@@ -2,6 +2,8 @@
 
 from datetime import UTC, datetime
 
+import pytest
+
 from jobfeed.adapters.store import _sqlite_real_job_views as views
 
 
@@ -12,7 +14,10 @@ def test_results_reads_materialized_canonical_dates() -> None:
     assert "SELECT MIN" not in views.SQLITE_CANONICAL_DATE
 
 
-def test_require_verdict_bounds_work_to_evaluated_or_review_jobs() -> None:
+@pytest.mark.parametrize("has_queue", [False, True])
+def test_require_verdict_bounds_work_to_evaluated_or_review_jobs(
+    has_queue: bool,
+) -> None:
     """The candidate subquery prevents a full canonical-parent scan."""
     _, _, shared_where, *_ = views._real_job_predicate(
         "results",
@@ -20,6 +25,7 @@ def test_require_verdict_bounds_work_to_evaluated_or_review_jobs() -> None:
         True,
         None,
         datetime.now(UTC),
+        has_queue,
     )
 
     assert "SELECT real_job_id FROM real_job_evaluations" in shared_where
