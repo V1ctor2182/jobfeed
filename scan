@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Run a scan. Assumes `./setup` has been run once (it creates config.toml, sets
+# up the host runtime). SQLite opens the repo-local database directly.
+#
+#   ./scan                          # all enabled sources from config.toml
+#   ./scan --source speedyapply     # a single source
+#   ./scan --source mock            # offline, deterministic (no network)
+#
+# MANUAL helper only — it installs no cron/launchd/timer.
+set -euo pipefail
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$REPO_ROOT"
+
+if [ ! -f config.toml ]; then
+  echo "error: config.toml not found — run ./setup first." >&2
+  exit 1
+fi
+
+exec "$REPO_ROOT/bin/jobfeed" scan "$@"

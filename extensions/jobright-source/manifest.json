@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "Jobfeed Jobright Source",
+  "version": "0.8.5",
+  "description": "Streams signed-in Jobright, LinkedIn and Handshake jobs into local Jobfeed scans.",
+  "permissions": [
+    "alarms",
+    "scripting",
+    "storage",
+    "tabs",
+    "webRequest",
+    "declarativeNetRequest"
+  ],
+  "host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "service-worker.js"
+  },
+  "action": {
+    "default_title": "Jobfeed Jobright Source",
+    "default_popup": "popup.html"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src ws://127.0.0.1:* ws://localhost:* http://127.0.0.1:* http://localhost:* https://jobfeed.localhost:1355 wss://jobfeed.localhost:1355"
+  }
+}

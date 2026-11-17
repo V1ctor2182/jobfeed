@@ -1,0 +1,7229 @@
+"""PostgreSQL implementation of the JobStore port using asyncpg."""
+
+from __future__ import annotations
+
+import json
+from collections import defaultdict
+from collections.abc import Sequence
+from datetime import UTC, date, datetime, timedelta
+from typing import Any, cast
+
+from jobfeed.adapters.store._application_identity_verification import (
+    verification_facts_match,
+)
+from jobfeed.adapters.store._posting_spam import SpamDB
+from jobfeed.adapters.store._repost_sort import triage_sorts
+from jobfeed.domain.display_posting import posting_location
+from jobfeed.domain.requisition_alias import receipt_alias
+
+try:
+    import asyncpg  # type: ignore[import-untyped]
+except ImportError as _exc:  # pragma: no cover
+    raise ImportError(
+        "asyncpg is required for PostgresStore. Install it with: pip install asyncpg"
+    ) from _exc
+
+from jobfeed.adapters.store._normalize import normalize, normalize_company
+from jobfeed.adapters.store._postgres_job_stars import PostgresJobStars
+from jobfeed.adapters.store._postgres_real_job_evaluation import (
+    PostgresRealJobEvaluation,
+    sync_postgres_real_job_input,
+)
+from jobfeed.adapters.store._postgres_real_job_identity import (
+    IdentityParentChanged,
+    resolve_postgres_real_job,
+)
+from jobfeed.adapters.store._postgres_real_job_views import PostgresRealJobViews
+from jobfeed.adapters.store._postgres_real_job_workflow import PostgresRealJobWorkflow
+from jobfeed.adapters.store._run_scan_stats import dump_scan_stats, load_scan_stats
+from jobfeed.adapters.store.legacy_import import (
+    AppliedRow,
+    CompanyRow,
+    CostLedgerRow,
+    EvaluationRow,
+    JobRow,
+    JobStatusRow,
+    ResumeSnapshotRow,
+    ResumeVariantRow,
+    StateRow,
+    StatusHistoryRow,
+)
+from jobfeed.domain.errors import (
+    CanonicalEvaluationNotReadyError,
+    SnapshotAmbiguousError,
+    SnapshotNotFoundError,
+)
+from jobfeed.domain.external_identity import external_identity
+from jobfeed.domain.interview import InterviewRound
+from jobfeed.domain.models import (
+    ApplicationRecord,
+    ApplicationStats,
+    AttentionItem,
+    AttentionReport,
+    AutoDecayResult,
+    BulkResult,
+    BulkTransitionRequest,
+    CompanyRecord,
+    CostEntry,
+    DigestStats,
+    FitAnalysis,
+    GapItem,
+    JobEvaluation,
+    JobPosting,
+    MatchItem,
+    MLGateResult,
+    PipelineRun,
+    QualityBand,
+    ResumeSnapshot,
+    ResumeSnapshotSummary,
+    ResumeVariantStats,
+    SaveJobResult,
+    StageAResult,
+    StageBResult,
+    StatusFilter,
+    StatusInfo,
+    TransitionRequest,
+    UnenrichedJob,
+    Verdict,
+    WorkflowAttention,
+    WorkflowAttentionItem,
+)
+from jobfeed.domain.models_llm import LLMUsage
+from jobfeed.domain.models_perf import (
+    FunnelStats,
+    LLMDailyStats,
+    PerformanceOverview,
+    StepTiming,
+    StepTimingSeries,
+)
+from jobfeed.domain.models_views import (
+    VALID_TABS,
+    InsightsDay,
+    InsightsOverview,
+    JobsViewPage,
+    JobsViewQuery,
+    JobsViewRow,
+    RunNewJob,
+    RunNewJobsPage,
+    TwinStatusRow,
+)
+from jobfeed.domain.quality import assess_quality, quality_rank
+from jobfeed.domain.real_job_evaluation import (
+    EVALUATION_ACTIVATION_KEY,
+    official_closed_at,
+    policy_visibility,
+    representative_source_id,
+)
+from jobfeed.domain.scoring import MAX_STAGE_RETRIES
+from jobfeed.domain.source_attribution import configured_source_counts
+from jobfeed.domain.status import (
+    ACTIVE_APPLICATION_STATUSES,
+    DECAY_SOURCES,
+    DEFAULT_ARCHIVE_IGNORED_DAYS,
+    DEFAULT_FOLLOWUP_GRACE_DAYS,
+    DEFAULT_GHOST_DAYS,
+    REASON_AUTO_SCORED,
+    RESPONSE_STATUSES,
+    is_terminal,
+    validate_transition,
+)
+from jobfeed.domain.types import VALID_SEVERITIES, Severity
+from jobfeed.ports.source import StoredEnrichment
+from jobfeed.ports.store_claims import GateCandidate
+from jobfeed.services.canonical_priority import (
+    CanonicalPriorityInput,
+    priority_input_for_sources,
+)
+
+# ---------------------------------------------------------------------------
+# Row mapping helpers
+# ---------------------------------------------------------------------------
+
+
+def _escape_like_prefix(prefix: str) -> str:
+    """Backslash-escape LIKE wildcards so a user prefix matches literally.
+
+    Args:
+        prefix: Raw user-supplied prefix.
+
+    Returns:
+        Prefix safe for ``LIKE ... ESCAPE '\\'`` (no wildcard expansion).
+    """
+    # Escape the escape char first, or the % / _ escapes below get double-escaped.
+    return prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _opt_float(value: Any) -> float | None:
+    """Coerce an optional numeric database value to ``float | None``.
+
+    Args:
+        value: Possibly-None numeric from an asyncpg Record.
+
+    Returns:
+        Float when truthy, else None.
+    """
+    return float(value) if value is not None else None
+
+
+def _job_from_record(r: asyncpg.Record) -> JobPosting:
+    """Build a JobPosting from an asyncpg Record.
+
+    Args:
+        r: Database record containing jobs table columns.
+
+    Returns:
+        Domain job posting with string identity.
+    """
+    return JobPosting(
+        id=str(r["id"]),
+        platform=r["platform"],
+        canonical_id=r["canonical_id"],
+        url=r["url"],
+        title=r["title"],
+        company=r["company"],
+        location=r["location"],
+        discovered_at=r["discovered_at"],
+        jd_text=r["jd_text"],
+        jd_quality=QualityBand(r["jd_quality"]) if r["jd_quality"] else None,
+        posted_at=r["posted_at"],
+        enriched_at=r["enriched_at"],
+        enrich_source=r["enrich_source"],
+        closed_at=r["closed_at"],
+        enrich_error=r["enrich_error"],
+        external_identity=r.get("external_identity"),
+        apply_url=r.get("apply_url"),
+        enrich_attempted_at=r.get("enrich_attempted_at"),
+        enrich_error_code=r.get("enrich_error_code"),
+        enrich_retry_after=r.get("enrich_retry_after"),
+        is_repost=bool(r["is_repost"]) if r.get("is_repost") is not None else None,
+        repost_evidence=r.get("repost_evidence"),
+        repost_observed_at=r.get("repost_observed_at"),
+        is_swe_role=r["is_swe_role"],
+    )
+
+
+async def _refresh_backfilled_real_job_display(
+    conn: asyncpg.Connection, source_ids: list[int]
+) -> None:
+    """Project canonical card source and official closure for one source page."""
+    parents = [
+        int(row[0])
+        for row in await conn.fetch(
+            "SELECT DISTINCT real_job_id FROM jobs WHERE id=ANY($1::int[])",
+            source_ids,
+        )
+    ]
+    if not parents:
+        return
+    grouped: dict[int, list[JobPosting]] = defaultdict(list)
+    for row in await conn.fetch(
+        "SELECT * FROM jobs WHERE real_job_id=ANY($1::bigint[]) "
+        "ORDER BY real_job_id,id",
+        parents,
+    ):
+        grouped[int(row["real_job_id"])].append(_job_from_record(row))
+    await conn.executemany(
+        "UPDATE real_jobs SET representative_job_id=$1,official_closed_at=$2 "
+        "WHERE id=$3",
+        [
+            (
+                representative_source_id(str(parent_id), jobs),
+                official_closed_at(jobs),
+                parent_id,
+            )
+            for parent_id, jobs in grouped.items()
+        ],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Jobs view (Phase 8 web read path)
+# ---------------------------------------------------------------------------
+
+# Tab predicates over jobs LEFT JOIN evaluations LEFT JOIN job_status. Triage
+# tabs (queue, pending_jd) exclude closed rows; Library tabs include them.
+# job_status rows are trigger-seeded on every jobs insert, so
+# job_status.status is never NULL despite the LEFT JOIN.
+_JOBS_VIEW_TAB_PREDICATES: dict[str, str] = {
+    "queue": (
+        "(job_status.status IN"
+        " ('new', 'scored', 'shortlisted', 'awaiting_referral')"
+        " AND jobs.closed_at IS NULL)"
+    ),
+    # Pending-JD: no usable JD (same quality predicate as
+    # mark_stale_jobs_closed), never Stage A-scored, not archived/ignored,
+    # still open (rewrite-spec §15 semantics).
+    "pending_jd": (
+        "((jobs.jd_quality IS NULL"
+        " OR jobs.jd_quality IN ('missing', 'abandoned'))"
+        " AND evaluations.stage_a_score IS NULL"
+        " AND job_status.status NOT IN ('archived', 'ignored')"
+        " AND jobs.closed_at IS NULL)"
+    ),
+    "all": "TRUE",
+    "scored": "job_status.status = 'scored'",
+    "shortlisted": "job_status.status IN ('shortlisted', 'awaiting_referral')",
+    "archived": "job_status.status IN ('archived', 'ignored')",
+}
+
+_JOBS_VIEW_FROM = (
+    "FROM jobs"
+    " LEFT JOIN evaluations ON evaluations.job_id = jobs.id"
+    " LEFT JOIN job_status ON job_status.job_id = jobs.id"
+)
+
+_JOBS_VIEW_COLUMNS = (
+    "jobs.*, job_status.status AS status,"
+    " evaluations.stage_a_score, evaluations.stage_b_verdict,"
+    " evaluations.stage_b_status,"
+    " (evaluations.stage_b_fit_json ->> 'score_0_100')::integer"
+    " AS stage_b_fit_score"
+)
+
+
+def _jobs_view_columns(*, include_jd_text: bool) -> str:
+    """Exclude large bodies from metadata-only Results reads."""
+    if include_jd_text:
+        return _JOBS_VIEW_COLUMNS
+    fields = (
+        "id",
+        "platform",
+        "canonical_id",
+        "url",
+        "title",
+        "company",
+        "location",
+        "discovered_at",
+        "jd_quality",
+        "posted_at",
+        "enriched_at",
+        "enrich_source",
+        "closed_at",
+        "enrich_error",
+        "external_identity",
+        "enrich_attempted_at",
+        "enrich_error_code",
+        "enrich_retry_after",
+        "is_repost",
+        "repost_evidence",
+        "repost_observed_at",
+        "is_swe_role",
+        "company_norm",
+        "title_norm",
+    )
+    metadata = ", ".join(f"jobs.{field}" for field in fields)
+    return _JOBS_VIEW_COLUMNS.replace("jobs.*", metadata + ", NULL AS jd_text")
+
+
+# SQL ORDER BY per JobsViewQuery.sort, mirroring the in-memory keys in
+# services/_jobs_view_sort.py (score = Stage B fit with Stage A fallback,
+# NULLS LAST; every sort ends in the discovered_at DESC, id DESC tiebreak)
+# so plain Library requests paginate in SQL beyond the corpus cap (D10).
+_JOBS_VIEW_SORT_SQL: dict[str, str] = {
+    "priority_desc": "jobs.discovered_at DESC, jobs.id DESC",
+    "discovered_desc": "jobs.discovered_at DESC, jobs.id DESC",
+    "posted_desc": (
+        "COALESCE(jobs.posted_at, jobs.discovered_at) DESC, jobs.discovered_at DESC, "
+        "jobs.id DESC"
+    ),
+    "posted_asc": (
+        "COALESCE(jobs.posted_at, jobs.discovered_at) ASC, jobs.discovered_at DESC, "
+        "jobs.id DESC"
+    ),
+    "score_desc": (
+        "COALESCE((evaluations.stage_b_fit_json ->> 'score_0_100')::integer,"
+        " evaluations.stage_a_score) DESC NULLS LAST,"
+        " jobs.discovered_at DESC, jobs.id DESC"
+    ),
+    "score_asc": (
+        "COALESCE((evaluations.stage_b_fit_json->>'score_0_100')::integer,"
+        " evaluations.stage_a_score) ASC NULLS LAST, jobs.discovered_at DESC,"
+        " jobs.id DESC"
+    ),
+    "company_asc": (
+        "jobs.company_norm ASC NULLS LAST, jobs.discovered_at DESC, jobs.id DESC"
+    ),
+}
+_JOBS_VIEW_SORT_SQL.update(
+    triage_sorts(
+        job="jobs",
+        score="COALESCE((evaluations.stage_b_fit_json->>'score_0_100')::integer, evaluations.stage_a_score)",
+        postgres=True,
+    )
+)
+
+
+MAX_REAL_JOB_BACKFILL_PAGE = 1000
+
+
+def _jobs_view_filters(query: JobsViewQuery) -> tuple[list[str], list[object]]:
+    """Build the request's shared WHERE fragments and their $1-based params.
+
+    These filters (statuses, search, freshness, require_verdict) apply to the
+    active tab's rows and total AND to every tab_counts bucket, so
+    tab_counts[t] always equals the total of re-running the request with
+    tab=t.
+
+    Args:
+        query: Jobs view query.
+
+    Returns:
+        Tuple of (SQL fragments, positional params), params numbered $1..$n.
+    """
+    fragments: list[str] = []
+    params: list[object] = []
+    if query.statuses:
+        params.append(list(query.statuses))
+        fragments.append(f"job_status.status = ANY(${len(params)}::text[])")
+    if query.search:
+        params.append(f"%{_escape_like_prefix(query.search)}%")
+        index = len(params)
+        fragments.append(f"(jobs.company ILIKE ${index} OR jobs.title ILIKE ${index})")
+    if query.posted_within_days is not None:
+        # Freshness cuts on discovered_at per rewrite-spec §15 — a job posted
+        # long ago but newly scraped is fresh to the user's workflow.
+        params.append(query.posted_within_days)
+        fragments.append(
+            f"jobs.discovered_at >= now() - make_interval(days => ${len(params)})"
+        )
+    if query.require_verdict:
+        fragments.append("evaluations.stage_b_verdict IS NOT NULL")
+    return fragments, params
+
+
+def _jobs_view_counts_sql(shared_where: str) -> str:
+    """Render the one-query per-tab COUNT(*) FILTER aggregate.
+
+    Args:
+        shared_where: WHERE clause of shared request filters ('TRUE' if none).
+
+    Returns:
+        SQL returning one row with a count column per tab. Aliases are quoted
+        because 'all' is a reserved word.
+    """
+    selects = ", ".join(
+        f'COUNT(*) FILTER (WHERE {_JOBS_VIEW_TAB_PREDICATES[tab]}) AS "{tab}"'
+        for tab in VALID_TABS
+    )
+    return f"SELECT {selects} {_JOBS_VIEW_FROM} WHERE {shared_where}"
+
+
+def _jobs_view_row_from_record(r: asyncpg.Record) -> JobsViewRow:
+    """Build a JobsViewRow from a jobs+evaluations+job_status record.
+
+    Args:
+        r: Joined record carrying jobs.*, the status alias, and the
+            evaluation summary columns.
+
+    Returns:
+        View row. The Stage B fit score is lifted from stage_b_fit_json's
+        'score_0_100' key — the same key get_evaluation hydrates FitAnalysis
+        from.
+    """
+    return JobsViewRow(
+        job=_job_from_record(r),
+        company_norm=r["company_norm"],
+        title_norm=r["title_norm"],
+        status=r["status"],
+        verdict=r["stage_b_verdict"],
+        stage_a_score=r["stage_a_score"],
+        stage_b_fit_score=r["stage_b_fit_score"],
+        stage_b_status=r["stage_b_status"],
+    )
+
+
+def _gate_candidate_from_record(r: asyncpg.Record) -> GateCandidate:
+    """Build a GateCandidate (job + persisted ml_gate_result) from a jobs record.
+
+    Reuses ``_job_from_record`` for identity/columns and lifts the persisted
+    ``jobs.ml_gate_result`` (already present via ``SELECT jobs.*``) so the funnel
+    can skip re-gating an already-'pass' representative.
+
+    Args:
+        r: ``jobs`` table record (must include the ``ml_gate_result`` column).
+
+    Returns:
+        Gate candidate carrying the job and its stored gate verdict (or None).
+    """
+    return GateCandidate(
+        job=_job_from_record(r),
+        ml_gate_result=r["ml_gate_result"],
+    )
+
+
+def _evaluation_from_record(r: asyncpg.Record) -> JobEvaluation:
+    """Build a joined JobEvaluation from a jobs+evaluations record.
+
+    Args:
+        r: Joined database record.
+
+    Returns:
+        Domain evaluation with optional Stage A and Stage B results.
+    """
+    return JobEvaluation(
+        job=_job_from_record(r),
+        stage_a=_stage_a_from_record(r),
+        stage_b=_stage_b_from_record(r),
+        stage_b_status=r.get("stage_b_status"),
+        stage_b_blocks=_stage_b_blocks_from_record(r),
+    )
+
+
+def _stage_a_from_record(r: asyncpg.Record) -> StageAResult | None:
+    """Build a Stage A result when the record has completed Stage A data.
+
+    Args:
+        r: Database record with evaluation columns.
+
+    Returns:
+        Stage A result for completed records; otherwise None.
+    """
+    if r.get("stage_a_status") != "completed":
+        return None
+    return StageAResult(
+        score=r["stage_a_score"],
+        one_line=r["stage_a_one_line"],
+        timing_eligible=r["stage_a_timing_eligible"],
+        model=r["stage_a_model"],
+        prompt_hash=r["stage_a_prompt_hash"],
+        resume_hash=r["stage_a_resume_hash"],
+        cost_usd=r["stage_a_cost_usd"],
+    )
+
+
+def _as_json_obj(value: object) -> Any:
+    """Decode a JSON/JSONB column value into a Python object.
+
+    asyncpg returns ``json``/``jsonb`` columns as raw strings unless a custom
+    type codec is registered, which this adapter does not do. Reads therefore
+    decode the string here. Already-decoded values pass through unchanged so the
+    helper stays correct if a codec is added later.
+
+    Args:
+        value: Raw column value from asyncpg (str when no codec is registered).
+
+    Returns:
+        The decoded JSON object, or the value unchanged when already decoded.
+    """
+    if isinstance(value, str):
+        return cast(Any, json.loads(value))
+    return value
+
+
+def _stage_b_strengths(fit_json: dict[str, Any]) -> list[MatchItem]:
+    """Parse the fit-analysis strong-match block into typed match items.
+
+    Real evaluation rows can carry a missing or NULL ``strong_match`` key, so
+    coalesce to an empty list rather than subscripting (which KeyErrors /
+    TypeErrors on missing/null) — the detail/display path must never crash.
+    """
+    strong_match = fit_json.get("strong_match")
+    if not isinstance(strong_match, list):
+        strong_match = _evidence_items(fit_json)
+    return [
+        MatchItem(
+            requirement=str(m.get("requirement", m.get("jd_need", "")) or ""),
+            evidence=str(
+                m.get(
+                    "evidence_from_resume",
+                    m.get("resume_evidence", m.get("evidence", "")),
+                )
+                or ""
+            ),
+        )
+        for m in strong_match
+        if isinstance(m, dict)
+    ]
+
+
+def _stage_b_gaps(fit_json: dict[str, Any]) -> list[GapItem]:
+    """Parse the fit-analysis gaps block into typed gap items.
+
+    Real evaluation rows can carry a missing or NULL ``gaps`` key, so coalesce
+    to an empty list rather than subscripting (which KeyErrors / TypeErrors on
+    missing/null) — the detail/display path must never crash.
+    """
+    gaps = fit_json.get("gaps")
+    if not isinstance(gaps, list):
+        return _evidence_gaps(fit_json)
+    return [
+        GapItem(
+            requirement=g["requirement"],
+            severity=_map_legacy_severity(g["severity"]),
+            mitigation=g.get("mitigation") or "",
+        )
+        for g in gaps
+    ]
+
+
+def _evidence_items(fit_json: dict[str, Any]) -> list[dict[str, Any]]:
+    """Flatten unique dimension evidence. Complexity: O(D * E)."""
+    items: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for dimension in _evidence_dimensions(fit_json):
+        for item in dimension.get("evidence", []):
+            if not isinstance(item, dict):
+                continue
+            key = (str(item.get("jd_need", "")), str(item.get("resume_evidence", "")))
+            if key not in seen and all(key):
+                seen.add(key)
+                items.append(item)
+    return items
+
+
+def _evidence_gaps(fit_json: dict[str, Any]) -> list[GapItem]:
+    """Flatten unique dimension gaps. Complexity: O(D * G)."""
+    values: list[GapItem] = []
+    seen: set[str] = set()
+    for dimension in _evidence_dimensions(fit_json):
+        for raw in dimension.get("gaps", []):
+            gap = str(raw).strip()
+            if gap and gap not in seen:
+                seen.add(gap)
+                values.append(GapItem(requirement=gap, severity="major", mitigation=""))
+    return values
+
+
+def _evidence_dimensions(fit_json: dict[str, Any]) -> list[dict[str, Any]]:
+    names = (
+        "similar_work",
+        "core_technical_evidence",
+        "work_type_similarity",
+        "additional_relevant_evidence",
+    )
+    return [value for name in names if isinstance((value := fit_json.get(name)), dict)]
+
+
+def _stage_b_fit_analysis(fit_json: dict[str, Any]) -> FitAnalysis:
+    """Build the normalized fit analysis (score + strengths + gaps)."""
+    return FitAnalysis(
+        score=fit_json["score_0_100"],
+        strengths=_stage_b_strengths(fit_json),
+        gaps=_stage_b_gaps(fit_json),
+    )
+
+
+def _stage_b_from_record(r: asyncpg.Record) -> StageBResult | None:
+    """Build a Stage B result when the record has completed Stage B data.
+
+    Args:
+        r: Database record with evaluation columns.
+
+    Returns:
+        Stage B result for completed records with a verdict; otherwise None.
+    """
+    if r.get("stage_b_status") != "completed":
+        return None
+    if r.get("stage_b_verdict") is None:
+        # Defensive: legacy/inconsistent rows can be 'completed' without a
+        # verdict. Treat as no usable Stage B result rather than crashing.
+        # The verdict-independent fit/blocks for the detail pane come from
+        # _stage_b_blocks_from_record instead.
+        return None
+
+    fit_json = _as_json_obj(r["stage_b_fit_json"])
+    if not isinstance(fit_json, dict) or fit_json.get("score_0_100") is None:
+        # Defensive: real 'completed' rows can carry a verdict but a NULL/absent
+        # fit score (102 such rows in the live corpus). The strict domain
+        # FitAnalysis requires an int score, so we cannot build a StageBResult
+        # here without crashing. Fall through to None; the verdict-independent
+        # _stage_b_blocks_from_record feeds the detail display path instead.
+        return None
+    hooks_json = _as_json_obj(r["stage_b_hooks_json"])
+
+    raw_blocks: dict[str, object] = {
+        "verdict": _as_json_obj(r["stage_b_verdict_json"]),
+        "jd_summary": _as_json_obj(r["stage_b_summary_json"]),
+        "fit_analysis": fit_json,
+        "resume_hooks": hooks_json,
+    }
+
+    return StageBResult(
+        verdict=Verdict(r["stage_b_verdict"]),
+        jd_summary=r["stage_b_jd_summary"],
+        fit_analysis=_stage_b_fit_analysis(fit_json),
+        resume_hooks=_read_legacy_hooks(hooks_json),
+        model=r["stage_b_model"],
+        prompt_hash=r["stage_b_prompt_hash"],
+        resume_hash=r["stage_b_resume_hash"],
+        cost_usd=r["stage_b_cost_usd"],
+        raw_blocks=raw_blocks,
+    )
+
+
+def _stage_b_hooks_block(hooks_json: object) -> dict[str, object]:
+    """Normalize the resume-hooks block to the detail wire shape.
+
+    Prefers a structured ``lead_with``/``supporting``/``avoid_mentioning``
+    object; otherwise derives lead/supporting from the flat hook list.
+    """
+    if isinstance(hooks_json, dict) and "lead_with" in hooks_json:
+        supporting = hooks_json.get("supporting")
+        avoid = hooks_json.get("avoid_mentioning")
+        return {
+            "lead_with": str(hooks_json.get("lead_with") or ""),
+            "supporting": [str(s) for s in supporting]
+            if isinstance(supporting, list)
+            else [],
+            "avoid_mentioning": [str(a) for a in avoid]
+            if isinstance(avoid, list)
+            else [],
+        }
+    flat = _read_legacy_hooks(hooks_json) if isinstance(hooks_json, dict) else []
+    return {
+        "lead_with": flat[0] if flat else "",
+        "supporting": flat[1:],
+        "avoid_mentioning": [],
+    }
+
+
+def _stage_b_jd_summary(r: asyncpg.Record) -> str:
+    """Read the Stage B JD summary, flat column first then the JSON block.
+
+    The flat ``stage_b_jd_summary`` is co-written with the verdict; a
+    verdict-less legacy row may have nulled it while the JSON summary block
+    survives, so fall back to ``stage_b_summary_json``'s ``role_in_3_lines``.
+
+    Args:
+        r: Database record with evaluation columns.
+
+    Returns:
+        The JD summary text, or an empty string when neither source has it.
+    """
+    flat = r.get("stage_b_jd_summary")
+    if flat:
+        return str(flat)
+    summary_json = _as_json_obj(r.get("stage_b_summary_json"))
+    if isinstance(summary_json, dict):
+        return str(summary_json.get("role_in_3_lines") or "")
+    return ""
+
+
+def _stage_b_blocks_from_record(r: asyncpg.Record) -> dict[str, object] | None:
+    """Build the verdict-independent Stage B display blocks for the detail.
+
+    Returns the normalized display shape (jd_summary / fit_score / strengths
+    / gaps / hooks) for any ``completed`` row carrying a usable fit JSON
+    object — even one whose flat verdict is NULL, or whose ``score_0_100`` is
+    absent/NULL — so the detail pane renders the same Stage B content the list
+    row implies. The fit score is coalesced to None (rendered as "—") rather
+    than fed to the strict domain ``FitAnalysis`` (which requires an int and
+    would raise); strengths/gaps already coalesce missing blocks to []. The
+    display DTO ``StageBDetail`` tolerates the null score and null summary.
+    Returns None only when there is no completed fit JSON object at all.
+
+    Args:
+        r: Database record with evaluation columns.
+
+    Returns:
+        Normalized blocks dict, or None when no completed fit JSON exists.
+    """
+    if r.get("stage_b_status") != "completed":
+        return None
+    fit_json = _as_json_obj(r.get("stage_b_fit_json"))
+    if not isinstance(fit_json, dict):
+        return None
+    score = fit_json.get("score_0_100")
+    return {
+        "jd_summary": _stage_b_jd_summary(r),
+        "fit_score": score
+        if isinstance(score, int) and not isinstance(score, bool)
+        else None,
+        "strengths": [
+            {"requirement": s.requirement, "evidence": s.evidence}
+            for s in _stage_b_strengths(fit_json)
+        ],
+        "gaps": [
+            {
+                "requirement": g.requirement,
+                "severity": g.severity,
+                "mitigation": g.mitigation,
+            }
+            for g in _stage_b_gaps(fit_json)
+        ],
+        "hooks": _stage_b_hooks_block(_as_json_obj(r.get("stage_b_hooks_json"))),
+    }
+
+
+_LEGACY_SEVERITY_MAP: dict[str, str] = {
+    "blocker": "critical",
+    "notable": "major",
+    "minor": "minor",
+}
+
+
+def _map_legacy_severity(value: str) -> Severity:
+    """Map legacy severity vocabulary to domain vocabulary.
+
+    Args:
+        value: Raw severity string (legacy or domain vocabulary).
+
+    Returns:
+        Typed Severity value.
+
+    Raises:
+        ValueError: If the severity value is not recognized.
+    """
+    mapped = _LEGACY_SEVERITY_MAP.get(value, value)
+    if mapped not in VALID_SEVERITIES:
+        raise ValueError(f"invalid gap severity: {value}")
+    return cast(Severity, mapped)
+
+
+def _read_legacy_hooks(hooks_json: dict[str, object]) -> list[str]:
+    """Read resume hooks from legacy or Phase 0 JSON structure.
+
+    Args:
+        hooks_json: Parsed hooks JSON object.
+
+    Returns:
+        Flat list of hook strings.
+    """
+    if "lead_with" in hooks_json:
+        lead = hooks_json["lead_with"]
+        supporting = hooks_json.get("supporting", [])
+        result = [str(lead)] if lead else []
+        if isinstance(supporting, list):
+            result.extend(str(s) for s in supporting)
+        return result
+    if "hooks" in hooks_json:
+        raw_hooks = hooks_json["hooks"]
+        if isinstance(raw_hooks, list):
+            return [str(h) for h in raw_hooks]
+    return []
+
+
+def _validated_severity(value: str) -> Severity:
+    """Validate and cast a severity string.
+
+    Args:
+        value: Raw severity string from the database.
+
+    Returns:
+        Typed Severity value.
+
+    Raises:
+        ValueError: If the severity value is not recognized.
+    """
+    if value not in VALID_SEVERITIES:
+        raise ValueError(f"invalid gap severity: {value}")
+    return cast(Severity, value)
+
+
+def _pipeline_run_from_record(r: asyncpg.Record) -> PipelineRun:
+    """Build a PipelineRun from an asyncpg Record.
+
+    Args:
+        r: Database record containing pipeline_runs columns.
+
+    Returns:
+        Domain pipeline run.
+    """
+    return PipelineRun(
+        run_id=r["run_id"],
+        started_at=r["started_at"],
+        source=r["source"],
+        status=r["status"],
+        jobs_discovered=r["jobs_discovered"],
+        jobs_inserted=r["jobs_inserted"],
+        jobs_updated=r["jobs_updated"],
+        jobs_filtered=r["jobs_filtered"],
+        jobs_ml_gated=r["jobs_ml_gated"],
+        jobs_seniority_filtered=r["jobs_seniority_filtered"],
+        jobs_gate_passed=r["jobs_gate_passed"],
+        stage_a_scored=r["stage_a_scored"],
+        stage_b_scored=r["stage_b_scored"],
+        verdict_counts=json.loads(r["verdict_counts_json"])
+        if isinstance(r["verdict_counts_json"], str)
+        else r["verdict_counts_json"],
+        jobs_scored=r["jobs_scored"],
+        total_llm_cost_usd=r["total_llm_cost_usd"],
+        errors=r["errors"],
+        finished_at=r["finished_at"],
+        failure_code=r["failure_code"],
+        failure_message=r["failure_message"],
+        failed_stage=r["failed_stage"],
+        failed_source=r["failed_source"],
+        last_progress_at=r["last_progress_at"],
+        restart_count=r["restart_count"],
+        restarted_by_run_id=r["restarted_by_run_id"],
+        scan_stats=load_scan_stats(r["scan_stats_json"]),
+        scan_progress=json.loads(r["scan_progress_json"] or "{}")
+        if isinstance(r["scan_progress_json"], str)
+        else (r["scan_progress_json"] or {}),
+    )
+
+
+# Insights aggregates (Phase 8). The requested discovery-date cohort bounds
+# totals, distributions, and daily events. The verdict CASE mirrors the
+# triage grouping: an explicit verdict wins; verdict-less threshold-skipped
+# rows form the derived below_threshold bucket.
+# ml_gate_passed counts gate survivors (ml_gate_result = 'pass') and is NULL
+# when no job in the cohort was gated, so a disabled gate never reads as zero
+# passes.
+_INSIGHTS_COHORT_CTE = """cohort AS (
+    SELECT real_job_id AS id, MIN(discovered_at) AS first_discovered_at
+    FROM jobs
+    WHERE real_job_id IS NOT NULL
+    GROUP BY real_job_id
+    HAVING ($1::integer IS NULL
+            OR MIN(discovered_at) >= now() - make_interval(days => $1))
+       AND MIN(discovered_at) <= now()
+)"""
+
+_INSIGHTS_TOTALS_SQL = f"""WITH {_INSIGHTS_COHORT_CTE}
+SELECT
+    (SELECT COUNT(*) FROM cohort) AS total_jobs,
+    (SELECT CASE WHEN COUNT(e.ml_gate_result) = 0 THEN NULL
+                 ELSE COUNT(*) FILTER (WHERE e.ml_gate_result = 'pass') END
+        FROM real_job_evaluations e JOIN cohort c ON c.id = e.real_job_id)
+        AS ml_gate_passed_jobs,
+    (SELECT COUNT(*) FROM real_job_evaluations e JOIN cohort c ON c.id = e.real_job_id
+        WHERE e.stage_a_status = 'completed') AS evaluated_jobs,
+    (SELECT COUNT(*) FROM real_job_evaluations e JOIN cohort c ON c.id = e.real_job_id
+        WHERE e.stage_b_status = 'completed') AS detailed_reviewed_jobs,
+    (SELECT COUNT(*) FROM real_job_status s JOIN cohort c ON c.id = s.real_job_id
+        WHERE s.status IN
+          ('applied','interviewing','offer','rejected','ghosted')) AS applied_jobs"""
+
+_INSIGHTS_VERDICTS_SQL = f"""WITH {_INSIGHTS_COHORT_CTE}
+SELECT
+        CASE WHEN stage_b_verdict IS NOT NULL THEN stage_b_verdict
+             ELSE 'below_threshold' END AS bucket,
+        COUNT(*) AS n
+    FROM real_job_evaluations e JOIN cohort c ON c.id = e.real_job_id
+    WHERE stage_b_verdict IS NOT NULL
+       OR stage_b_status = 'skipped_below_threshold'
+    GROUP BY bucket"""
+
+_INSIGHTS_DECISIONS_SQL = f"""WITH {_INSIGHTS_COHORT_CTE}
+SELECT
+    CASE
+      WHEN s.status IN ('new','scored') THEN 'results'
+      WHEN s.status IN ('shortlisted','awaiting_referral') THEN 'wait'
+      WHEN s.status IN ('applied','interviewing','offer','rejected','ghosted')
+        THEN 'applied'
+      WHEN s.status IN ('ignored','archived') THEN 'ignored'
+      ELSE NULL
+    END AS bucket,
+    COUNT(*) AS n
+    FROM real_job_status s JOIN cohort c ON c.id = s.real_job_id
+    GROUP BY bucket"""
+
+_INSIGHTS_APPLIED_SOURCES_SQL = f"""WITH {_INSIGHTS_COHORT_CTE}
+SELECT
+    COALESCE((SELECT j.platform FROM real_job_applications a
+              JOIN jobs j ON j.id = a.source_job_id
+              WHERE a.real_job_id = s.real_job_id
+              ORDER BY a.applied_at DESC, a.id DESC LIMIT 1), 'unknown') AS bucket,
+    COUNT(*) AS n
+    FROM real_job_status s JOIN cohort c ON c.id = s.real_job_id
+    WHERE s.status IN ('applied','interviewing','offer','rejected','ghosted')
+    GROUP BY bucket"""
+
+_INSIGHTS_APPLIED_DAILY_SQL = f"""WITH {_INSIGHTS_COHORT_CTE},
+current_applied AS (
+    SELECT s.real_job_id,
+           COALESCE(MAX(h.changed_at), s.last_status_change_at) AS event_at
+    FROM real_job_status s
+    JOIN cohort c ON c.id = s.real_job_id
+    LEFT JOIN real_job_status_history h
+      ON h.real_job_id = s.real_job_id AND h.to_status = 'applied'
+    WHERE s.status IN ('applied','interviewing','offer','rejected','ghosted')
+    GROUP BY s.real_job_id, s.last_status_change_at
+)
+SELECT (event_at AT TIME ZONE 'UTC')::date AS day, COUNT(*) AS n
+FROM current_applied
+WHERE event_at <= now()
+GROUP BY day"""
+
+_INSIGHTS_DISCOVERED_DAILY_SQL = f"""WITH {_INSIGHTS_COHORT_CTE}
+SELECT (first_discovered_at AT TIME ZONE 'UTC')::date AS day, COUNT(*) AS n
+    FROM cohort
+    GROUP BY day"""
+
+_INSIGHTS_EVALUATED_DAILY_SQL = f"""WITH {_INSIGHTS_COHORT_CTE}
+SELECT (e.stage_a_at AT TIME ZONE 'UTC')::date AS day, COUNT(*) AS n
+    FROM real_job_evaluations e JOIN cohort c ON c.id = e.real_job_id
+    WHERE ($1::integer IS NULL
+           OR e.stage_a_at >= now() - make_interval(days => $1))
+      AND e.stage_a_at <= now()
+    GROUP BY day"""
+
+
+def _merge_insights_days(
+    discovered: list[asyncpg.Record],
+    evaluated: list[asyncpg.Record],
+    applied: list[asyncpg.Record],
+) -> list[InsightsDay]:
+    """Merge the three per-day count queries into one ascending series.
+
+    Only days appearing in at least one measure are emitted (consumers
+    zero-fill gaps). Time complexity: O(n log n) — linear over the rows plus
+    the final sort by day.
+
+    Args:
+        discovered: (day, n) rows bucketed on ``jobs.discovered_at``.
+        evaluated: (day, n) rows bucketed on ``evaluations.stage_a_at``.
+        applied: (day, n) rows bucketed on ``job_status_history.changed_at``.
+
+    Returns:
+        Per-day funnel counts, ascending by day.
+    """
+    by_day: dict[date, dict[str, int]] = {}
+    for measure, rows in (
+        ("discovered", discovered),
+        ("evaluated", evaluated),
+        ("applied", applied),
+    ):
+        for r in rows:
+            by_day.setdefault(r["day"], {})[measure] = int(r["n"])
+    return [
+        InsightsDay(
+            day=day,
+            discovered=counts.get("discovered", 0),
+            evaluated=counts.get("evaluated", 0),
+            applied=counts.get("applied", 0),
+        )
+        for day, counts in sorted(by_day.items())
+    ]
+
+
+def _status_info_from_record(r: asyncpg.Record) -> StatusInfo:
+    """Build a StatusInfo from a joined job_status record.
+
+    Args:
+        r: Database record with status and job columns.
+
+    Returns:
+        Populated StatusInfo.
+    """
+    return StatusInfo(
+        job_id=str(r["job_id"]),
+        status=r["status"],
+        next_followup_at=r["next_followup_at"],
+        resume_variant=r["resume_variant"],
+        notes=r["notes"],
+        last_status_change_at=r["last_status_change_at"]
+        or datetime(1970, 1, 1, tzinfo=UTC),
+        company=r["company"],
+        title=r["title"],
+    )
+
+
+def _attention_item_from_record(
+    r: asyncpg.Record, reason: str
+) -> WorkflowAttentionItem:
+    """Build a WorkflowAttentionItem from a joined query record.
+
+    Args:
+        r: Database record with job and status columns.
+        reason: Bucket reason label.
+
+    Returns:
+        Populated attention item.
+    """
+    return WorkflowAttentionItem(
+        job_id=str(r["job_id"]),
+        title=r["title"],
+        company=r["company"],
+        url=r["url"],
+        status=r["status"],
+        last_status_change_at=r["last_status_change_at"]
+        or datetime(1970, 1, 1, tzinfo=UTC),
+        next_followup_at=r["next_followup_at"],
+        notes=r["notes"],
+        reason=reason,
+        days_since=r["days_since"],
+    )
+
+
+def _company_from_record(r: asyncpg.Record) -> CompanyRecord:
+    """Build a CompanyRecord from an asyncpg Record.
+
+    Args:
+        r: Database record containing companies table columns.
+
+    Returns:
+        Domain company record.
+    """
+    return CompanyRecord(
+        slug=r["slug"],
+        ats_vendor=r["ats_vendor"],
+        ats_override=bool(r["ats_override"]),
+        last_verified_at=r["last_verified_at"],
+        last_probe_attempt_at=r["last_probe_attempt_at"],
+        job_count_last_scan=r["job_count_last_scan"],
+        consecutive_discover_failures=r["consecutive_discover_failures"],
+        notes=r["notes"],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Private helpers for application stats
+# ---------------------------------------------------------------------------
+
+_INTERVIEW_STATUSES = {"interviewing", "offer"}
+
+
+def _median(values: list[int]) -> float | None:
+    """Compute the median of an integer list.
+
+    Args:
+        values: Integer list (will be sorted in-place).
+
+    Returns:
+        Median as float, or None if the list is empty.
+    """
+    if not values:
+        return None
+    values.sort()
+    n = len(values)
+    if n % 2 == 1:
+        return float(values[n // 2])
+    return (values[n // 2 - 1] + values[n // 2]) / 2.0
+
+
+def _count_outcomes(
+    job_response_statuses: dict[int, set[str]],
+) -> tuple[int, int, int, int]:
+    """Count response, interview, offer, and rejection totals.
+
+    Args:
+        job_response_statuses: Mapping of job_id to sets of reached
+            response statuses.
+
+    Returns:
+        Tuple of (response_count, interview_count, offer_count,
+        rejection_count).
+    """
+    response_count = len(job_response_statuses)
+    interview_count = sum(
+        1 for s in job_response_statuses.values() if s & _INTERVIEW_STATUSES
+    )
+    offer_count = sum(1 for s in job_response_statuses.values() if "offer" in s)
+    rejection_count = sum(1 for s in job_response_statuses.values() if "rejected" in s)
+    return response_count, interview_count, offer_count, rejection_count
+
+
+# ---------------------------------------------------------------------------
+# JSONB serialization helpers
+# ---------------------------------------------------------------------------
+
+
+def _json_or_none(value: Any) -> str | None:
+    """Serialize a value to JSON string, or None if already None.
+
+    Args:
+        value: Value to serialize (list or dict).
+
+    Returns:
+        JSON string or None.
+    """
+    if value is None:
+        return None
+    return json.dumps(value, sort_keys=True)
+
+
+def _stage_b_block_json(result: StageBResult, key: str) -> str:
+    """Serialize one Stage B block for JSONB column storage.
+
+    Args:
+        result: Stage B result to persist.
+        key: Block key to serialize.
+
+    Returns:
+        JSON string for the block.
+    """
+    blocks = result.raw_blocks or {}
+    if key in blocks:
+        return json.dumps(blocks[key], sort_keys=True)
+    return json.dumps(_derived_stage_b_block(result, key), sort_keys=True)
+
+
+def _derived_stage_b_block(result: StageBResult, key: str) -> dict[str, object]:
+    if key == "verdict":
+        return {"recommendation": result.verdict.value}
+    if key == "jd_summary":
+        return _derived_jd_summary_block(result)
+    if key == "fit_analysis":
+        return _derived_fit_analysis_block(result)
+    if key == "resume_hooks":
+        return _derived_resume_hooks_block(result)
+    raise ValueError(f"unknown Stage B block: {key}")
+
+
+def _derived_jd_summary_block(result: StageBResult) -> dict[str, object]:
+    return {
+        "role_in_3_lines": result.jd_summary,
+        "must_haves": [],
+        "nice_to_haves": [],
+        "red_flags_in_jd": [],
+    }
+
+
+def _derived_fit_analysis_block(result: StageBResult) -> dict[str, object]:
+    return {
+        "score_0_100": result.fit_analysis.score,
+        "strong_match": [
+            {
+                "requirement": item.requirement,
+                "evidence_from_resume": item.evidence,
+            }
+            for item in result.fit_analysis.strengths
+        ],
+        "gaps": [
+            {
+                "requirement": item.requirement,
+                "severity": item.severity,
+                "mitigation": item.mitigation,
+            }
+            for item in result.fit_analysis.gaps
+        ],
+    }
+
+
+def _derived_resume_hooks_block(result: StageBResult) -> dict[str, object]:
+    hooks = result.resume_hooks
+    return {
+        "lead_with": hooks[0] if hooks else "",
+        "supporting": hooks[1:],
+        "avoid_mentioning": [],
+    }
+
+
+# Marker mark_stale_closed stamps on heuristically-closed no-JD rows. Shared
+# with get_closed_canonical_ids, which excludes these rows; both sites must use
+# this constant so the stamp and the exclusion cannot drift apart.
+_STALE_BACKFILL_MARKER = "backfill:stale-no-jd"
+
+
+# ---------------------------------------------------------------------------
+# Pending-queue query builders
+# ---------------------------------------------------------------------------
+
+
+# Error rows over MAX_STAGE_RETRIES drop out of the pending queues (plan Task 1);
+# they stay terminally in 'error' for manual triage instead of retrying forever.
+_PG_STAGE_A_UNDER_CAP = (
+    "(evaluations.stage_a_status IS DISTINCT FROM 'error' "
+    f"OR evaluations.stage_a_error_count < {MAX_STAGE_RETRIES})"
+)
+_PG_STAGE_B_UNDER_CAP = (
+    "(evaluations.stage_b_status IS DISTINCT FROM 'error' "
+    f"OR evaluations.stage_b_error_count < {MAX_STAGE_RETRIES})"
+)
+_PG_EVALUATION_CLAIM_TTL = timedelta(hours=1)
+
+# The jd_quality -> rank CASE used to decide whether an incoming JD outranks the
+# stored one (mirrors domain.quality.quality_rank). Reused by save_job's upsert.
+_PG_STORED_JD_RANK = (
+    "(CASE jobs.jd_quality "
+    "WHEN 'full' THEN 5 WHEN 'good' THEN 4 "
+    "WHEN 'partial' THEN 3 WHEN 'stub' THEN 2 "
+    "WHEN 'missing' THEN 1 WHEN 'abandoned' THEN 0 "
+    "ELSE -1 END)"
+)
+# The JD that actually WINS save_job's upsert: the incoming JD only when it
+# outranks (>=) the stored one, else the preserved stored JD. ``$18`` is the
+# incoming quality_rank bind. Identical to the jd_text assignment's CASE.
+_PG_WINNING_JD_TEXT = (
+    f"(CASE WHEN $18::int >= {_PG_STORED_JD_RANK} "
+    "THEN COALESCE(EXCLUDED.jd_text, jobs.jd_text) ELSE jobs.jd_text END)"
+)
+# A gate INPUT feature changed iff the title or the WINNING JD differs from the
+# stored row. Drives save_job's stale-ml_gate reset.
+_PG_GATE_INPUT_CHANGED = (
+    "(EXCLUDED.title IS DISTINCT FROM jobs.title "
+    f"OR {_PG_WINNING_JD_TEXT} IS DISTINCT FROM jobs.jd_text)"
+)
+# Reset (NULL) the five ml_gate_* verdict columns on a gate-input change, else
+# preserve them. Appended to save_job's ON CONFLICT DO UPDATE SET list.
+_PG_RESET_ML_GATE_SET = ",\n".join(
+    f"ml_gate_{col} = CASE WHEN {_PG_GATE_INPUT_CHANGED} "
+    f"THEN NULL ELSE jobs.ml_gate_{col} END"
+    for col in ("score", "result", "fail_reason", "at", "version")
+)
+
+
+def _pg_corpus_condition(corpus: str) -> str:
+    """Return the WHERE fragment selecting the requested Stage A corpus.
+
+    Args:
+        corpus: "unrated" (no eval row or stage A error), "all" (no
+            restriction), or "failed" (Stage A errors only).
+
+    Returns:
+        SQL boolean fragment; empty string for "all".
+
+    Raises:
+        ValueError: If corpus is not a recognized value.
+    """
+    if corpus == "unrated":
+        return (
+            "(evaluations.job_id IS NULL "
+            "OR evaluations.stage_a_status IS NULL "
+            "OR evaluations.stage_a_status = 'error')"
+        )
+    if corpus == "failed":
+        return "evaluations.stage_a_status = 'error'"
+    if corpus == "all":
+        return ""
+    raise ValueError(f"unknown corpus: {corpus!r}")
+
+
+def _stage_a_pending_filters(
+    *,
+    quality_bands: frozenset[str] | None,
+    corpus: str,
+    max_days: int | None,
+    now: datetime,
+) -> tuple[list[str], list[Any]]:
+    """Build shared Stage A pending filters.
+
+    Always excludes ``closed_at IS NOT NULL`` rows (job-liveness): a posting
+    confirmed gone by a JD fetch never enters the funnel via any consumer
+    (``load_gate_candidates`` and every Stage-A claim path).
+
+    Args:
+        quality_bands: Optional jd_quality allow-list.
+        corpus: "unrated", "all", or "failed".
+        max_days: Optional freshness window on discovered_at.
+        now: Reference time for the freshness cutoff.
+
+    Returns:
+        WHERE conditions and positional (asyncpg) parameters.
+    """
+    conditions: list[str] = []
+    params: list[Any] = []
+    corpus_clause = _pg_corpus_condition(corpus)
+    if corpus_clause:
+        conditions.append(corpus_clause)
+    conditions.append(_PG_STAGE_A_UNDER_CAP)
+    # Job-liveness (closed_at feature): a req confirmed gone by JD fetch
+    # (404/410/403) is stamped closed_at and must never enter the funnel. This
+    # predicate is shared, so it covers load_gate_candidates AND every claim
+    # path (claim_pending_stage_a, claim_stage_a_by_ids).
+    conditions.append("jobs.closed_at IS NULL")
+    conditions.append("jobs.is_repost IS DISTINCT FROM 1")
+    conditions.append("COALESCE(jobs.hard_filter, '') = ''")
+    if quality_bands:
+        params.append(sorted(quality_bands))
+        conditions.append(f"jobs.jd_quality = ANY(${len(params)})")
+    if max_days is not None:
+        params.append(now - timedelta(days=max_days))
+        conditions.append(f"jobs.discovered_at >= ${len(params)}")
+    return conditions, params
+
+
+def _build_pending_stage_a_query(
+    *,
+    limit: int,
+    quality_bands: frozenset[str] | None,
+    corpus: str,
+    max_days: int | None,
+    now: datetime,
+) -> tuple[str, list[Any]]:
+    """Build the Stage A pending query with optional legacy parity filters.
+
+    Args:
+        limit: Max rows.
+        quality_bands: Optional jd_quality allow-list.
+        corpus: "unrated", "all", or "failed".
+        max_days: Optional freshness window on discovered_at.
+        now: Reference time for the freshness cutoff.
+
+    Returns:
+        SQL string and its positional (asyncpg) parameters.
+    """
+    conditions, params = _stage_a_pending_filters(
+        quality_bands=quality_bands,
+        corpus=corpus,
+        max_days=max_days,
+        now=now,
+    )
+    where = " AND ".join(conditions) if conditions else "TRUE"
+    params.append(limit)
+    sql = (
+        "SELECT jobs.* FROM jobs "
+        "LEFT JOIN evaluations ON evaluations.job_id = jobs.id "
+        f"WHERE {where} "
+        "ORDER BY jobs.discovered_at DESC, jobs.id DESC "
+        f"LIMIT ${len(params)}"
+    )
+    return sql, params
+
+
+def _stage_b_pending_filters(
+    *,
+    max_days: int | None,
+    stage_a_threshold: int | None,
+    now: datetime,
+    require_stage_a: bool = True,
+) -> tuple[list[str], list[Any]]:
+    """Build shared Stage B pending filters.
+
+    Args:
+        max_days: Optional freshness window on discovered_at.
+        stage_a_threshold: Optional minimum Stage A score.
+        now: Reference time for the freshness cutoff.
+
+    Returns:
+        WHERE conditions and positional (asyncpg) parameters.
+    """
+    conditions = [
+        "jobs.is_repost IS DISTINCT FROM 1",
+        "(evaluations.stage_b_status IS NULL OR evaluations.stage_b_status = 'error')",
+        _PG_STAGE_B_UNDER_CAP,
+    ]
+    if require_stage_a:
+        conditions.append("evaluations.stage_a_status = 'completed'")
+    params: list[Any] = []
+    if max_days is not None:
+        params.append(now - timedelta(days=max_days))
+        conditions.append(f"jobs.discovered_at >= ${len(params)}")
+    if stage_a_threshold is not None:
+        params.append(stage_a_threshold)
+        conditions.append(f"evaluations.stage_a_score >= ${len(params)}")
+    return conditions, params
+
+
+def _build_pending_stage_b_query(
+    *,
+    limit: int,
+    max_days: int | None,
+    stage_a_threshold: int | None,
+    now: datetime,
+    require_stage_a: bool = True,
+) -> tuple[str, list[Any]]:
+    """Build the Stage B pending query (Stage A completed, Stage B pending).
+
+    Args:
+        limit: Max rows.
+        max_days: Optional freshness window on discovered_at.
+        stage_a_threshold: Optional minimum Stage A score.
+        now: Reference time for the freshness cutoff.
+
+    Returns:
+        SQL string and its positional (asyncpg) parameters.
+    """
+    conditions, params = _stage_b_pending_filters(
+        max_days=max_days,
+        stage_a_threshold=stage_a_threshold,
+        now=now,
+        require_stage_a=require_stage_a,
+    )
+    params.append(limit)
+    where = " AND ".join(conditions)
+    sql = (
+        "SELECT jobs.* FROM jobs "
+        "LEFT JOIN evaluations ON evaluations.job_id = jobs.id "
+        f"WHERE {where} "
+        "ORDER BY jobs.discovered_at DESC, jobs.id DESC "
+        f"LIMIT ${len(params)}"
+    )
+    return sql, params
+
+
+def _stage_a_claim_status_condition(corpus: str, stale_ref: str) -> str:
+    if corpus == "all":
+        return (
+            "(evaluations.stage_a_status IS DISTINCT FROM 'in_progress' "
+            f"OR evaluations.updated_at < {stale_ref})"
+        )
+    if corpus == "failed":
+        return (
+            "(evaluations.stage_a_status = 'error' OR "
+            "(evaluations.stage_a_status = 'in_progress' "
+            f"AND evaluations.updated_at < {stale_ref} "
+            "AND evaluations.stage_a_error IS NOT NULL))"
+        )
+    if corpus == "unrated":
+        return (
+            "(evaluations.job_id IS NULL OR evaluations.stage_a_status IS NULL "
+            "OR evaluations.stage_a_status = 'error' OR "
+            "(evaluations.stage_a_status = 'in_progress' "
+            f"AND evaluations.updated_at < {stale_ref} "
+            "AND (evaluations.stage_a_score IS NULL "
+            "OR evaluations.stage_a_error IS NOT NULL)))"
+        )
+    raise ValueError(f"unknown corpus: {corpus!r}")
+
+
+def _stage_a_claim_update_condition(corpus: str, stale_ref: str) -> str:
+    if corpus in {"all", "failed"}:
+        return _stage_a_claim_status_condition(corpus, stale_ref)
+    if corpus == "unrated":
+        return (
+            "(evaluations.stage_a_status IS NULL OR evaluations.stage_a_status = 'error' "
+            "OR (evaluations.stage_a_status = 'in_progress' "
+            f"AND evaluations.updated_at < {stale_ref} "
+            "AND (evaluations.stage_a_score IS NULL "
+            "OR evaluations.stage_a_error IS NOT NULL)))"
+        )
+    raise ValueError(f"unknown corpus: {corpus!r}")
+
+
+def _claim_stage_a_sql(*, where: str, update_condition: str, limit_ref: str) -> str:
+    """Assemble the Stage A atomic-claim CTE SQL.
+
+    Shared by the queue-wide claim and the id-restricted claim so the
+    ``FOR UPDATE ... SKIP LOCKED`` + ``in_progress`` upsert lives in one place.
+
+    Args:
+        where: Candidate-selection WHERE clause.
+        update_condition: Guard for the ON CONFLICT upsert (stale/retry rules).
+        limit_ref: Positional placeholder for the candidate LIMIT.
+
+    Returns:
+        The claim CTE SQL string.
+    """
+    return f"""WITH candidates AS (
+                SELECT jobs.id FROM jobs
+                LEFT JOIN evaluations ON evaluations.job_id = jobs.id
+                WHERE {where}
+                ORDER BY jobs.discovered_at DESC, jobs.id DESC
+                LIMIT {limit_ref}
+                FOR UPDATE OF jobs SKIP LOCKED
+            ),
+            claimed AS (
+                INSERT INTO evaluations (job_id, stage_a_status, updated_at)
+                SELECT id, 'in_progress', now() FROM candidates
+                ON CONFLICT (job_id) DO UPDATE SET
+                    stage_a_status = 'in_progress',
+                    updated_at = now()
+                WHERE {update_condition}
+                RETURNING job_id
+            )
+            SELECT jobs.* FROM jobs
+            JOIN claimed ON claimed.job_id = jobs.id
+            ORDER BY jobs.discovered_at DESC, jobs.id DESC"""
+
+
+def _build_claim_stage_a_query(
+    *,
+    limit: int,
+    quality_bands: frozenset[str] | None,
+    corpus: str,
+    max_days: int | None,
+    now: datetime,
+) -> tuple[str, list[Any]]:
+    """Build the Stage A atomic claim query."""
+    conditions, params = _stage_a_pending_filters(
+        quality_bands=quality_bands,
+        corpus="all",
+        max_days=max_days,
+        now=now,
+    )
+    params.append(now - _PG_EVALUATION_CLAIM_TTL)
+    stale_ref = f"${len(params)}"
+    conditions.append(_stage_a_claim_status_condition(corpus, stale_ref))
+    where = " AND ".join(conditions) if conditions else "TRUE"
+    params.append(limit)
+    update_condition = _stage_a_claim_update_condition(corpus, stale_ref)
+    return (
+        _claim_stage_a_sql(
+            where=where,
+            update_condition=update_condition,
+            limit_ref=f"${len(params)}",
+        ),
+        params,
+    )
+
+
+def _numeric_job_ids(job_ids: list[str]) -> list[int]:
+    """Coerce store ids to ints, skipping non-numeric ones.
+
+    Store ids are bigint-as-str, so a non-numeric id matches no row; skipping
+    them keeps ``claim_stage_a_by_ids`` crash-free (no ``ValueError``) instead of
+    failing the whole claim. An all-non-numeric input yields ``[]``, which the
+    caller treats as a no-op (no query, no writes).
+    """
+    numeric: list[int] = []
+    for jid in job_ids:
+        try:
+            numeric.append(int(jid))
+        except (ValueError, TypeError):
+            continue
+    return numeric
+
+
+def _build_claim_stage_a_by_ids_query(
+    *,
+    job_ids: list[int],
+    limit: int,
+    quality_bands: frozenset[str] | None,
+    corpus: str,
+    max_days: int | None,
+    now: datetime,
+) -> tuple[str, list[Any]]:
+    """Build the Stage A atomic claim query restricted to an explicit id set.
+
+    Identical claim machinery to ``_build_claim_stage_a_query`` (stale-takeover /
+    retry-cap / ``SKIP LOCKED`` upsert), but the candidate scan is additionally
+    constrained to ``job_ids``. Callers must short-circuit empty ``job_ids``
+    (already coerced to bigint via ``_numeric_job_ids``).
+
+    Args:
+        job_ids: Numeric store ids to restrict the claim to (non-empty bigints).
+        limit: Max rows.
+        quality_bands: Optional jd_quality allow-list.
+        corpus: "unrated", "all", or "failed".
+        max_days: Optional freshness window on discovered_at.
+        now: Reference time for freshness and the stale-claim cutoff.
+
+    Returns:
+        SQL string and its positional (asyncpg) parameters.
+    """
+    conditions, params = _stage_a_pending_filters(
+        quality_bands=quality_bands,
+        corpus="all",
+        max_days=max_days,
+        now=now,
+    )
+    params.append(job_ids)
+    conditions.append(f"jobs.id = ANY(${len(params)})")
+    params.append(now - _PG_EVALUATION_CLAIM_TTL)
+    stale_ref = f"${len(params)}"
+    conditions.append(_stage_a_claim_status_condition(corpus, stale_ref))
+    where = " AND ".join(conditions)
+    params.append(limit)
+    update_condition = _stage_a_claim_update_condition(corpus, stale_ref)
+    return (
+        _claim_stage_a_sql(
+            where=where,
+            update_condition=update_condition,
+            limit_ref=f"${len(params)}",
+        ),
+        params,
+    )
+
+
+def _append_unrated_completed_suppression(conditions: list[str]) -> None:
+    """Exclude this post's completed result, never another post's result."""
+    conditions.append(
+        "(evaluations.job_id IS NULL "
+        "OR evaluations.stage_a_status IS DISTINCT FROM 'completed')"
+    )
+
+
+def _build_gate_candidates_query(
+    *,
+    limit: int,
+    quality_bands: frozenset[str] | None,
+    corpus: str,
+    max_days: int | None,
+    exclude_gate_failed: bool,
+    now: datetime,
+    after: tuple[datetime, int] | None = None,
+    job_ids: list[int] | None = None,
+) -> tuple[str, list[Any]]:
+    """Build the NON-claiming ML-gate candidate query.
+
+    Reuses the shared Stage A eligibility filters (quality_bands / freshness on
+    ``discovered_at`` / retry-cap) and the SAME stale-takeover corpus predicate
+    the claim builders use (``_stage_a_claim_status_condition``). For the
+    incremental DEFAULT corpus (``'unrated'``) it ALSO adds the
+    current-row not-yet-scored exclusion (status IS DISTINCT FROM 'completed'),
+    scoped to ``'unrated'`` ONLY (see
+    ``_append_unrated_completed_suppression``). When ``exclude_gate_failed`` is
+    set, ``jobs.ml_gate_result IS DISTINCT FROM 'fail'`` is appended for every
+    corpus.
+
+    Corpus-scoped completed handling — because the funnel is the sole path to
+    survivor ids, the current-row completed exclusion must agree with each
+    corpus's claim semantics or rows get filtered before
+    ``claim_stage_a_by_ids`` can claim them:
+      * ``'unrated'`` — only this post's completed result is dropped
+        (incremental "score new work once").
+      * ``'all'`` — explicit full re-evaluation: completed rows are re-admitted,
+        mirroring the claim's stale-takeover that
+        permits non-locked completed rows.
+      * ``'failed'`` — targets ``'error'`` rows (the claim status predicate
+        already restricts the set); a failed twin whose cluster sibling completed
+        stays re-scorable, so suppression must not fire.
+
+    Sharing the claim status predicate (instead of the narrower
+    ``_pg_corpus_condition``) means a row stuck ``in_progress`` past the claim
+    TTL by an interrupted *scoring* run re-enters the funnel under "unrated",
+    becomes a survivor, and is re-claimable by ``claim_stage_a_by_ids`` (whose
+    own stale-takeover then succeeds). FRESH ``in_progress`` rows (actively owned
+    by another run) are excluded. Rows with a NULL or 'pass' gate that are not
+    yet Stage-A-scored are included (crash recovery). This reads only — no claim,
+    no in_progress write.
+
+    ``after`` is an optional keyset cursor ``(discovered_at, id)``: when set, only
+    rows strictly older in the ``ORDER BY jobs.discovered_at DESC, jobs.id DESC``
+    sense are returned (``(discovered_at, id) < (ts, id)``). The funnel uses it to
+    page PAST hard-filtered drops so an eligible older row behind a blocked newest
+    prefix is not starved; every other predicate above still applies per page.
+
+    Args:
+        limit: Max rows (one page).
+        quality_bands: Optional jd_quality allow-list.
+        corpus: "unrated", "all", or "failed".
+        max_days: Optional freshness window on discovered_at.
+        exclude_gate_failed: When True, drop rows whose ml_gate_result is 'fail'.
+        now: Reference time for the freshness + stale-claim cutoffs.
+        after: Optional ``(discovered_at, id)`` keyset cursor for the next page.
+
+    Returns:
+        SQL string and its positional (asyncpg) parameters.
+    """
+    conditions, params = _stage_a_pending_filters(
+        quality_bands=quality_bands,
+        corpus="all",
+        max_days=max_days,
+        now=now,
+    )
+    params.append(now - _PG_EVALUATION_CLAIM_TTL)
+    stale_ref = f"${len(params)}"
+    conditions.append(_stage_a_claim_status_condition(corpus, stale_ref))
+    if job_ids is not None:
+        if job_ids:
+            params.append(job_ids)
+            conditions.append(f"jobs.id = ANY(${len(params)})")
+        else:
+            conditions.append("FALSE")
+    if after is not None:
+        cursor_ts, cursor_id = after
+        params.append(cursor_ts)
+        params.append(cursor_id)
+        # Keyset "next page" predicate, consistent with the row tuple ordering
+        # ORDER BY jobs.discovered_at DESC, jobs.id DESC.
+        conditions.append(
+            f"(jobs.discovered_at, jobs.id) < (${len(params) - 1}, ${len(params)})"
+        )
+    # Current-row completed exclusion is scoped to the
+    # incremental DEFAULT flow (corpus='unrated') ONLY. The funnel is now the
+    # sole path to survivor ids, so applying them to every corpus would silently
+    # filter completed rows BEFORE claim_stage_a_by_ids could re-claim them,
+    # breaking the explicit full re-evaluation (corpus='all') and the failed
+    # retry (corpus='failed'). Both of those corpora must mirror their
+    # _stage_a_claim_status_condition semantics: 'all' permits non-locked
+    # completed rows; 'failed' targets 'error' rows (and a failed twin whose
+    # cluster sibling completed must stay re-scorable). So neither predicate
+    # fires outside 'unrated'.
+    if corpus == "unrated":
+        _append_unrated_completed_suppression(conditions)
+    if exclude_gate_failed:
+        conditions.append("jobs.ml_gate_result IS DISTINCT FROM 'fail'")
+    where = " AND ".join(conditions) if conditions else "TRUE"
+    params.append(limit)
+    sql = (
+        "SELECT jobs.* FROM jobs "
+        "LEFT JOIN evaluations ON evaluations.job_id = jobs.id "
+        f"WHERE {where} "
+        "ORDER BY jobs.discovered_at DESC, jobs.id DESC "
+        f"LIMIT ${len(params)}"
+    )
+    return sql, params
+
+
+def _build_claimable_stage_a_query(
+    *,
+    limit: int,
+    quality_bands: frozenset[str] | None,
+    corpus: str,
+    max_days: int | None,
+    now: datetime,
+) -> tuple[str, list[Any]]:
+    """Build the read-only Stage A claim preview query."""
+    conditions, params = _stage_a_pending_filters(
+        quality_bands=quality_bands,
+        corpus="all",
+        max_days=max_days,
+        now=now,
+    )
+    params.append(now - _PG_EVALUATION_CLAIM_TTL)
+    stale_ref = f"${len(params)}"
+    conditions.append(_stage_a_claim_status_condition(corpus, stale_ref))
+    params.append(limit)
+    where = " AND ".join(conditions) if conditions else "TRUE"
+    return (
+        "SELECT jobs.* FROM jobs "
+        "LEFT JOIN evaluations ON evaluations.job_id = jobs.id "
+        f"WHERE {where} "
+        "ORDER BY jobs.discovered_at DESC, jobs.id DESC "
+        f"LIMIT ${len(params)}",
+        params,
+    )
+
+
+def _build_claim_stage_b_query(
+    *,
+    limit: int,
+    max_days: int | None,
+    stage_a_threshold: int | None,
+    now: datetime,
+    job_ids: list[int] | None = None,
+    require_stage_a: bool = True,
+) -> tuple[str, list[Any]]:
+    """Build the Stage B atomic claim query."""
+    conditions = ["jobs.is_repost IS DISTINCT FROM 1", _PG_STAGE_B_UNDER_CAP]
+    if require_stage_a:
+        conditions.append("evaluations.stage_a_status = 'completed'")
+    params: list[Any] = []
+    if max_days is not None:
+        params.append(now - timedelta(days=max_days))
+        conditions.append(f"jobs.discovered_at >= ${len(params)}")
+    if stage_a_threshold is not None:
+        params.append(stage_a_threshold)
+        conditions.append(f"evaluations.stage_a_score >= ${len(params)}")
+    if job_ids is not None:
+        if job_ids:
+            params.append(job_ids)
+            conditions.append(f"jobs.id = ANY(${len(params)})")
+        else:
+            conditions.append("FALSE")
+    params.append(now - _PG_EVALUATION_CLAIM_TTL)
+    stale_ref = f"${len(params)}"
+    stage_b_claim_condition = (
+        "(evaluations.stage_b_status IS NULL OR evaluations.stage_b_status = 'error' "
+        "OR (evaluations.stage_b_status = 'in_progress' "
+        f"AND evaluations.updated_at < {stale_ref} "
+        "AND evaluations.stage_b_verdict IS NULL))"
+    )
+    conditions.append(stage_b_claim_condition)
+    params.append(limit)
+    where = " AND ".join(conditions)
+    return (
+        f"""WITH candidates AS (
+                SELECT jobs.id FROM jobs
+                LEFT JOIN evaluations ON evaluations.job_id = jobs.id
+                WHERE {where}
+                ORDER BY jobs.discovered_at DESC, jobs.id DESC
+                LIMIT ${len(params)}
+                FOR UPDATE OF jobs SKIP LOCKED
+            ),
+            claimed AS (
+                INSERT INTO evaluations (job_id, stage_b_status, updated_at)
+                SELECT id, 'in_progress', now() FROM candidates
+                ON CONFLICT (job_id) DO UPDATE SET
+                    stage_b_status = 'in_progress', updated_at = now()
+                WHERE (
+                    evaluations.stage_b_status IS NULL
+                    OR evaluations.stage_b_status = 'error'
+                    OR (
+                        evaluations.stage_b_status = 'in_progress'
+                        AND evaluations.updated_at < {stale_ref}
+                        AND evaluations.stage_b_verdict IS NULL
+                    )
+                  )
+                RETURNING job_id
+            )
+            SELECT jobs.* FROM jobs
+            JOIN claimed ON claimed.job_id = jobs.id
+            ORDER BY jobs.discovered_at DESC, jobs.id DESC""",
+        params,
+    )
+
+
+def _build_stage_b_preview_query(
+    *,
+    limit: int,
+    max_days: int | None,
+    stage_a_threshold: int,
+    now: datetime,
+) -> tuple[str, list[Any]]:
+    """Build the read-only Stage B queue preview query."""
+    conditions = [
+        "jobs.is_repost IS DISTINCT FROM 1",
+        "evaluations.stage_a_status = 'completed'",
+        "evaluations.stage_a_score >= $1",
+        _PG_STAGE_B_UNDER_CAP,
+    ]
+    params: list[Any] = [stage_a_threshold]
+    if max_days is not None:
+        params.append(now - timedelta(days=max_days))
+        conditions.append(f"jobs.discovered_at >= ${len(params)}")
+    params.append(now - _PG_EVALUATION_CLAIM_TTL)
+    stale_ref = f"${len(params)}"
+    conditions.append(
+        "("
+        "evaluations.stage_b_status IS NULL OR "
+        "evaluations.stage_b_status = 'error' OR "
+        "evaluations.stage_b_status = 'skipped_below_threshold' OR "
+        "(evaluations.stage_b_status = 'in_progress' AND "
+        f"evaluations.updated_at < {stale_ref} AND "
+        "evaluations.stage_b_verdict IS NULL)"
+        ")"
+    )
+    params.append(limit)
+    sql = (
+        "SELECT jobs.* FROM jobs "
+        "JOIN evaluations ON evaluations.job_id = jobs.id "
+        f"WHERE {' AND '.join(conditions)} "
+        "ORDER BY jobs.discovered_at DESC, jobs.id DESC "
+        f"LIMIT ${len(params)}"
+    )
+    return sql, params
+
+
+def _row_to_interview_round(row: asyncpg.Record) -> InterviewRound:
+    """Build an InterviewRound from an asyncpg Record.
+
+    Args:
+        row: Database record containing interview_rounds columns.
+
+    Returns:
+        Domain interview round.
+    """
+    return InterviewRound(
+        id=row["id"],
+        job_id=row["job_id"],
+        round_index=row["round_index"],
+        label=row["label"],
+        scheduled_at=row["scheduled_at"],
+        completed_at=row["completed_at"],
+        notes=row["notes"],
+        created_at=row["created_at"],
+    )
+
+
+# A scan's new jobs are the first-insert status rows written inside its window;
+# an active run's window ends now. Parameter $1: run_id.
+_RUN_FIRST_INSERTS = """
+    FROM pipeline_runs AS r
+    JOIN job_status_history AS h
+      ON h.changed_at >= r.started_at
+     AND h.changed_at <= COALESCE(r.finished_at, now())
+    JOIN jobs AS j ON j.id = h.job_id
+    WHERE r.run_id = $1
+      AND r.source <> 'evaluate'
+      AND h.from_status IS NULL
+      AND h.to_status = 'new'"""
+
+
+# ---------------------------------------------------------------------------
+# PostgresStore
+# ---------------------------------------------------------------------------
+
+
+class PostgresStore(
+    PostgresJobStars, PostgresRealJobEvaluation, PostgresRealJobWorkflow, PostgresRealJobViews
+):
+    """PostgreSQL-backed JobStore implementation using asyncpg connection pool.
+
+    All methods use asyncpg's native ``$1, $2, ...`` parameter placeholders
+    and JSONB columns. Transactions use ``async with conn.transaction():``.
+    """
+
+    async def resolve_real_job_ids(self, source_ids: list[str]) -> list[str]:
+        """Resolve source insertions to distinct canonical IDs in input order.
+
+        Args:
+            source_ids: Source posting IDs whose canonical parents are required.
+
+        Returns:
+            Distinct canonical IDs in first-source order.
+
+        Raises:
+            ValueError: If an ID is invalid or a requested source lacks a canonical
+                parent.
+        """
+        if not source_ids:
+            return []
+        ids = [int(value) for value in dict.fromkeys(source_ids)]
+        async with self._get_pool().acquire() as db:
+            rows = await db.fetch(
+                "SELECT id,real_job_id FROM jobs WHERE id=ANY($1::int[])", ids
+            )
+        mapping = {
+            int(row["id"]): str(row["real_job_id"])
+            for row in rows
+            if row["real_job_id"] is not None
+        }
+        if len(mapping) != len(ids):
+            raise ValueError("evaluation scope contains a missing real-job parent")
+        return list(dict.fromkeys(mapping[value] for value in ids))
+
+    async def list_real_job_ids_for_evaluation(
+        self,
+        *,
+        limit: int,
+        stage: str = "both",
+        threshold: int = 0,
+        before_id: int | None = None,
+        max_days: int | None = None,
+        stage_a_policy: dict[str, object] | None = None,
+        stage_b_policy: dict[str, object] | None = None,
+    ) -> list[str]:
+        """Select a bounded canonical evaluation backlog.
+
+        Args:
+            limit: Maximum number of records to select.
+            stage: Evaluation stage: a, b, or both.
+            threshold: Minimum Stage A score for Stage B eligibility.
+            before_id: Exclusive canonical-ID bound for descending pagination.
+            max_days: Conservative source-age prefilter; claims verify exact age.
+            stage_a_policy: Configured Stage A policy used to verify stored scores.
+            stage_b_policy: Configured Stage B policy used to verify stored scores.
+
+        Returns:
+            Bounded canonical IDs eligible for the requested evaluation stages.
+
+        Raises:
+            ValueError: If stage is not a, b, or both.
+        """
+        if limit <= 0:
+            return []
+        if stage not in {"a", "b", "both"}:
+            raise ValueError("unknown canonical evaluation stage")
+        del stage_a_policy, stage_b_policy
+
+        def pending(stage_name: str) -> str:
+            return (
+                f"(COALESCE(e.{stage_name}_status,'pending') NOT IN "
+                "('completed','in_progress','error') OR "
+                f"(e.{stage_name}_status='error' AND "
+                f"e.{stage_name}_error_count < {MAX_STAGE_RETRIES}) OR "
+                f"(e.{stage_name}_status='in_progress' AND "
+                "e.updated_at < CURRENT_TIMESTAMP - INTERVAL '1 hour'))"
+            )
+
+        stage_a = pending("stage_a")
+        stage_b = (
+            "(e.stage_a_status='completed' AND e.stage_a_score>=$1 AND "
+            + pending("stage_b")
+            + ")"
+        )
+        predicate = {"a": stage_a, "b": stage_b, "both": f"({stage_a} OR {stage_b})"}[
+            stage
+        ]
+        async with self._get_pool().acquire() as db:
+            rows = await db.fetch(
+                "SELECT r.id FROM real_jobs r LEFT JOIN real_job_evaluations e "
+                "ON e.real_job_id=r.id WHERE r.identity_review_state='clear' "
+                "AND NOT EXISTS(SELECT 1 FROM real_job_applications applied "
+                "WHERE applied.real_job_id=r.id) "
+                "AND r.official_closed_at IS NULL "
+                "AND EXISTS(SELECT 1 FROM jobs j WHERE j.real_job_id=r.id "
+                "AND j.jd_quality IN ('full','good') AND COALESCE(j.jd_text,'')!='') "
+                "AND EXISTS(SELECT 1 FROM jobs j WHERE j.real_job_id=r.id "
+                "AND COALESCE(j.is_repost,0)=0) "
+                f"AND {predicate} AND $1::int IS NOT NULL "
+                "AND ($4::int IS NULL OR EXISTS(SELECT 1 FROM jobs d "
+                "WHERE d.real_job_id=r.id AND (d.discovered_at >= "
+                "CURRENT_TIMESTAMP - $4 * INTERVAL '1 day' OR d.posted_at BETWEEN "
+                "CURRENT_TIMESTAMP - $4 * INTERVAL '1 day' AND CURRENT_TIMESTAMP))) "
+                "AND ($2::bigint IS NULL OR r.id < $2) ORDER BY r.id DESC LIMIT $3",
+                threshold,
+                before_id,
+                limit,
+                max_days,
+            )
+        return [str(row["id"]) for row in rows]
+
+    async def canonical_evaluation_ready(self) -> bool:
+        """Check activation and fail closed on an inconsistent canonical schema.
+
+        Returns:
+            True when canonical evaluation is activated; False before activation.
+
+        Raises:
+            CanonicalEvaluationNotReadyError: If activation exists without the required
+                schema or consistent canonical ownership.
+        """
+        if await self.get_state(EVALUATION_ACTIVATION_KEY) != "enabled":
+            return False
+        async with self._get_pool().acquire() as db:
+            if not await db.fetchval(
+                "SELECT to_regclass('public.real_job_evaluations') IS NOT NULL"
+            ):
+                raise CanonicalEvaluationNotReadyError(
+                    "canonical evaluation activation lacks schema"
+                )
+            for label, sql in (
+                (
+                    "orphan source",
+                    "SELECT 1 FROM jobs WHERE real_job_id IS NULL LIMIT 1",
+                ),
+                (
+                    "workflow backfill",
+                    "SELECT 1 FROM real_jobs r LEFT JOIN real_job_status s "
+                    "ON s.real_job_id=r.id WHERE r.identity_review_state='clear' "
+                    "AND s.real_job_id IS NULL LIMIT 1",
+                ),
+                (
+                    "application backfill",
+                    "SELECT 1 FROM applied a LEFT JOIN real_job_applications ra "
+                    "ON ra.source_applied_job_id=a.job_id WHERE ra.id IS NULL LIMIT 1",
+                ),
+                (
+                    "evaluation backfill",
+                    "SELECT 1 FROM evaluations e JOIN jobs j ON j.id=e.job_id "
+                    "JOIN real_jobs r ON r.id=j.real_job_id "
+                    "LEFT JOIN real_job_evaluations re ON re.real_job_id=j.real_job_id "
+                    "WHERE e.stage_a_status='completed' AND re.real_job_id IS NULL "
+                    "AND r.identity_review_state NOT IN "
+                    "('evaluation_conflict','evaluation_input_conflict',"
+                    "'evaluation_input_missing','requirements_conflict') LIMIT 1",
+                ),
+            ):
+                if await db.fetchval(sql):
+                    raise CanonicalEvaluationNotReadyError(
+                        f"canonical evaluation activation has {label}"
+                    )
+        return True
+
+    async def canonical_policy_pending_counts(
+        self,
+        *,
+        stage_a_policy: dict[str, object],
+        stage_b_policy: dict[str, object],
+    ) -> dict[str, int]:
+        """Count completed canonical scores with unverified policy versions.
+
+        Args:
+            stage_a_policy: Configured Stage A policy used to verify stored scores.
+            stage_b_policy: Configured Stage B policy used to verify stored scores.
+
+        Returns:
+            Counts of completed Stage A and Stage B scores lacking current policy proof.
+        """
+        a = json.dumps(stage_a_policy, sort_keys=True, separators=(",", ":"))
+        b = json.dumps(stage_b_policy, sort_keys=True, separators=(",", ":"))
+        async with self._get_pool().acquire() as db:
+            row = await db.fetchrow(
+                "WITH p AS (SELECT $1::jsonb AS a,$2::jsonb AS b) "
+                "SELECT "
+                "0 AS stage_a_pending,0 AS stage_b_pending,"
+                "COUNT(*) FILTER (WHERE e.stage_a_status='completed' AND "
+                "e.input_facts_json::jsonb->'stage_a_policy' IS NULL) "
+                "AS legacy_stage_a,"
+                "COUNT(*) FILTER (WHERE e.stage_b_status='completed' AND "
+                "e.input_facts_json::jsonb->'stage_b_policy' IS NULL) "
+                "AS legacy_stage_b "
+                "FROM real_job_evaluations e JOIN real_jobs r "
+                "ON r.id=e.real_job_id CROSS JOIN p "
+                "WHERE r.identity_review_state='clear'",
+                a,
+                b,
+            )
+        return {
+            key: int(row[key])
+            for key in (
+                "stage_a_pending",
+                "stage_b_pending",
+                "legacy_stage_a",
+                "legacy_stage_b",
+            )
+        }
+
+    async def canonical_policy_cutover_ready(
+        self,
+        *,
+        stage_a_policy: dict[str, object],
+        stage_b_policy: dict[str, object],
+    ) -> bool:
+        """Fail closed when completed scores lack configured policy proof.
+
+        Args:
+            stage_a_policy: Configured Stage A policy used to verify stored scores.
+            stage_b_policy: Configured Stage B policy used to verify stored scores.
+
+        Returns:
+            True when no completed scores remain unverified for the configured policies.
+
+        Raises:
+            ValueError: If completed scores still lack current policy proof.
+        """
+        counts = await self.canonical_policy_pending_counts(
+            stage_a_policy=stage_a_policy,
+            stage_b_policy=stage_b_policy,
+        )
+        if counts["stage_a_pending"] or counts["stage_b_pending"]:
+            detail = ", ".join(f"{key}={value}" for key, value in counts.items())
+            raise ValueError(f"canonical policy cutover pending: {detail}")
+        return True
+
+    async def load_real_job_priority_inputs(
+        self,
+        real_job_ids: list[str],
+        *,
+        stage_a_policy: dict[str, object] | None = None,
+        stage_b_policy: dict[str, object] | None = None,
+    ) -> list[CanonicalPriorityInput]:
+        """Load canonical score/status and source evidence once per parent.
+
+        Args:
+            real_job_ids: Canonical parent IDs to load.
+            stage_a_policy: Configured Stage A policy used to verify stored scores.
+            stage_b_policy: Configured Stage B policy used to verify stored scores.
+
+        Returns:
+            Priority inputs for existing requested canonical jobs.
+        """
+        if not real_job_ids:
+            return []
+        ids = list(dict.fromkeys(int(value) for value in real_job_ids))
+        async with self._get_pool().acquire() as db:
+            rows = await db.fetch(
+                "SELECT j.*,r.representative_job_id,s.status AS real_status,"
+                "e.stage_a_status AS real_a_status,"
+                "e.stage_a_score AS real_a_score,e.stage_b_json AS real_b_json,"
+                "e.stage_b_status AS real_b_status,"
+                "e.input_facts_json AS real_input_facts_json "
+                "FROM jobs j JOIN real_jobs r ON r.id=j.real_job_id "
+                "LEFT JOIN real_job_status s ON s.real_job_id=r.id "
+                "LEFT JOIN real_job_evaluations e ON e.real_job_id=r.id "
+                "WHERE r.id=ANY($1::bigint[]) ORDER BY r.id,j.id",
+                ids,
+            )
+        grouped: dict[int, list[JobPosting]] = {value: [] for value in ids}
+        metadata: dict[int, asyncpg.Record] = {}
+        for row in rows:
+            real_id = int(row["real_job_id"])
+            grouped[real_id].append(_job_from_record(row))
+            metadata[real_id] = row
+        output: list[CanonicalPriorityInput] = []
+        for real_id in ids:
+            row = metadata.get(real_id)
+            if row is None:
+                continue
+            stage_b = json.loads(row["real_b_json"]) if row["real_b_json"] else {}
+            fit = stage_b.get("fit_analysis", {}).get("score")
+            a_visible, b_visible, _ = policy_visibility(
+                row["real_input_facts_json"],
+                stage_a_policy=stage_a_policy,
+                stage_b_policy=stage_b_policy,
+            )
+            item = priority_input_for_sources(
+                str(real_id),
+                grouped[real_id],
+                representative_source_id=(
+                    str(row["representative_job_id"])
+                    if row["representative_job_id"] is not None
+                    else None
+                ),
+                status=str(row["real_status"] or "new"),
+                stage_a_score=(
+                    int(row["real_a_score"])
+                    if a_visible
+                    and row["real_a_status"] == "completed"
+                    and row["real_a_score"] is not None
+                    else None
+                ),
+                stage_b_fit_score=int(fit) if b_visible and fit is not None else None,
+                stage_a_status=row["real_a_status"] if a_visible else None,
+                stage_b_status=row["real_b_status"] if b_visible else None,
+                input_facts_json=row["real_input_facts_json"],
+                now=datetime.now(UTC),
+            )
+            if item is not None:
+                output.append(item)
+        return output
+
+    def __init__(self, dsn: str, **pool_kwargs: Any) -> None:
+        """Create a store for a PostgreSQL connection string.
+
+        Args:
+            dsn: PostgreSQL connection string (e.g.
+                ``postgresql://user:pass@host/db``).
+            **pool_kwargs: Additional keyword arguments forwarded to
+                ``asyncpg.create_pool`` (e.g. ``min_size``, ``max_size``).
+        """
+        self._dsn = dsn
+        self._pool_kwargs = pool_kwargs
+        self._pool: asyncpg.Pool | None = None
+        # Dedicated connection + transaction held across a bulk-import run so all
+        # bulk_insert_* calls share one transaction (the pool would otherwise
+        # hand each call a different connection).
+        self._import_conn: asyncpg.Connection | None = None
+        self._import_tx: Any = None
+
+    async def connect(self) -> None:
+        """Open the asyncpg connection pool.
+
+        Pins the session timezone to UTC so CURRENT_DATE / ::date truncation use
+        UTC day boundaries. Without this, date-bucketing queries (digest_stats,
+        follow-up due, cost range) would diverge on a non-UTC Postgres server.
+
+        Raises:
+            Exception: If pool creation fails.
+        """
+        if self._pool is not None:
+            return
+        pool_kwargs = dict(self._pool_kwargs)
+        server_settings = {"timezone": "UTC", **pool_kwargs.pop("server_settings", {})}
+        self._pool = await asyncpg.create_pool(
+            self._dsn, server_settings=server_settings, **pool_kwargs
+        )
+
+    async def close(self) -> None:
+        """Close the asyncpg connection pool when open."""
+        if self._pool is not None:
+            pool = self._pool
+            self._pool = None
+            await pool.close()
+
+    def _get_pool(self) -> asyncpg.Pool:
+        """Return the live pool or raise if not connected.
+
+        Returns:
+            The asyncpg connection pool.
+
+        Raises:
+            RuntimeError: If the store has not been connected.
+        """
+        if self._pool is None:
+            raise RuntimeError("PostgresStore is not connected")
+        return self._pool
+
+    # ------------------------------------------------------------------
+    # BulkImportPort + ParityReadPort (legacy migration)
+    # ------------------------------------------------------------------
+
+    _PARITY_TABLES = frozenset(
+        {
+            "jobs",
+            "evaluations",
+            "job_status",
+            "job_status_history",
+            "applied",
+            "resume_snapshots",
+            "resume_variants",
+            "companies",
+            "cost_ledger",
+            "state",
+            "pipeline_runs",
+        }
+    )
+
+    def _import_connection(self) -> asyncpg.Connection:
+        """Return the connection bound to the active import transaction.
+
+        Returns:
+            The held asyncpg connection.
+
+        Raises:
+            RuntimeError: If called outside an import transaction.
+        """
+        if self._import_conn is None:
+            raise RuntimeError("bulk import called outside an import transaction")
+        return self._import_conn
+
+    async def begin_import_transaction(self) -> None:
+        """Acquire a dedicated connection and open an import transaction."""
+        conn = await self._get_pool().acquire()
+        tx = conn.transaction()
+        await tx.start()
+        self._import_conn = conn
+        self._import_tx = tx
+
+    async def commit_import_transaction(self) -> None:
+        """Commit the import transaction and release its connection."""
+        if self._import_tx is None or self._import_conn is None:
+            return
+        await self._import_tx.commit()
+        await self._get_pool().release(self._import_conn)
+        self._import_tx = None
+        self._import_conn = None
+
+    async def rollback_import_transaction(self) -> None:
+        """Roll back the import transaction and release its connection."""
+        if self._import_tx is None or self._import_conn is None:
+            return
+        await self._import_tx.rollback()
+        await self._get_pool().release(self._import_conn)
+        self._import_tx = None
+        self._import_conn = None
+
+    async def disable_triggers(self) -> None:
+        """Disable the auto-seed trigger on jobs during import."""
+        async with self._get_pool().acquire() as conn:
+            await conn.execute("ALTER TABLE jobs DISABLE TRIGGER USER")
+
+    async def enable_triggers(self) -> None:
+        """Re-enable the auto-seed trigger on jobs after import."""
+        async with self._get_pool().acquire() as conn:
+            await conn.execute("ALTER TABLE jobs ENABLE TRIGGER USER")
+
+    async def reset_sequences(self) -> None:
+        """Advance SERIAL sequences past the explicitly imported ids."""
+        conn = self._import_connection()
+        for table in ("jobs", "job_status_history"):
+            await conn.execute(
+                f"SELECT setval(pg_get_serial_sequence('{table}', 'id'), "
+                f"(SELECT COALESCE(MAX(id), 0) + 1 FROM {table}), false)"
+            )
+
+    async def bulk_insert_jobs(self, rows: list[JobRow]) -> int:
+        """Insert job rows in bulk (legacy timestamps cast text -> timestamptz).
+
+        Args:
+            rows: Job rows to insert.
+
+        Returns:
+            Count of rows inserted.
+        """
+        if not rows:
+            return 0
+        conn = self._import_connection()
+        await conn.executemany(
+            """INSERT INTO jobs (
+                id, platform, canonical_id, url, title, company, location,
+                jd_text, jd_quality, posted_at, discovered_at, enriched_at,
+                enrich_source, company_norm, title_norm, location_norm,
+                jd_lang, enrich_error, quality_rubric_version, reapply_notice,
+                hard_filter, seniority_level, degree_required, clearance_required,
+                school_restricted, domain_tags, tech_required, role_type, yoe_min,
+                ml_gate_score, ml_gate_result, ml_gate_fail_reason, ml_gate_at,
+                ml_gate_version, is_swe_role
+            ) VALUES (
+                $1,$2,$3,$4,$5,$6,$7,$8,$9,$10::text::timestamptz,$11::text::timestamptz,
+                $12::text::timestamptz,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,
+                $24,$25,$26,$27,$28,$29,$30,$31,$32,$33::text::timestamptz,$34,$35
+            )""",
+            [
+                (
+                    row["id"],
+                    row["platform"],
+                    row["canonical_id"],
+                    row["url"],
+                    row["title"],
+                    row["company"],
+                    row["location"],
+                    row.get("jd_text"),
+                    row.get("jd_quality"),
+                    row.get("posted_at"),
+                    row["discovered_at"],
+                    row.get("enriched_at"),
+                    row.get("enrich_source"),
+                    row.get("company_norm"),
+                    row.get("title_norm"),
+                    row.get("location_norm"),
+                    row.get("jd_lang"),
+                    row.get("enrich_error"),
+                    row.get("quality_rubric_version"),
+                    row.get("reapply_notice"),
+                    row.get("hard_filter"),
+                    row.get("seniority_level"),
+                    row.get("degree_required"),
+                    row.get("clearance_required"),
+                    row.get("school_restricted"),
+                    row.get("domain_tags"),
+                    row.get("tech_required"),
+                    row.get("role_type"),
+                    row.get("yoe_min"),
+                    row.get("ml_gate_score"),
+                    row.get("ml_gate_result"),
+                    row.get("ml_gate_fail_reason"),
+                    row.get("ml_gate_at"),
+                    row.get("ml_gate_version"),
+                    row.get("is_swe_role"),
+                )
+                for row in rows
+            ],
+        )
+        return len(rows)
+
+    async def bulk_insert_evaluations(self, rows: list[EvaluationRow]) -> int:
+        """Insert evaluation rows in bulk (id auto-generated).
+
+        Args:
+            rows: Evaluation rows to insert.
+
+        Returns:
+            Count of rows inserted.
+        """
+        if not rows:
+            return 0
+        conn = self._import_connection()
+        await conn.executemany(
+            """INSERT INTO evaluations (
+                job_id, stage_a_score, stage_a_one_line, stage_a_timing_eligible,
+                stage_a_status, stage_a_error, stage_a_model, stage_a_cost_usd,
+                stage_a_prompt_hash, stage_a_resume_hash,
+                stage_b_verdict, stage_b_jd_summary,
+                stage_b_verdict_json, stage_b_summary_json,
+                stage_b_fit_json, stage_b_hooks_json,
+                stage_b_status, stage_b_error, stage_b_model, stage_b_cost_usd,
+                stage_b_prompt_hash, stage_b_resume_hash, created_at, updated_at
+            ) VALUES (
+                $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
+                $13::jsonb,$14::jsonb,$15::jsonb,$16::jsonb,
+                $17,$18,$19,$20,$21,$22,$23::text::timestamptz,$24::text::timestamptz
+            )""",
+            [
+                (
+                    row["job_id"],
+                    row.get("stage_a_score"),
+                    row.get("stage_a_one_line"),
+                    row.get("stage_a_timing_eligible"),
+                    row.get("stage_a_status"),
+                    row.get("stage_a_error"),
+                    row.get("stage_a_model"),
+                    row.get("stage_a_cost_usd"),
+                    row.get("stage_a_prompt_hash"),
+                    row.get("stage_a_resume_hash"),
+                    row.get("stage_b_verdict"),
+                    row.get("stage_b_jd_summary"),
+                    row.get("stage_b_verdict_json"),
+                    row.get("stage_b_summary_json"),
+                    row.get("stage_b_fit_json"),
+                    row.get("stage_b_hooks_json"),
+                    row.get("stage_b_status"),
+                    row.get("stage_b_error"),
+                    row.get("stage_b_model"),
+                    row.get("stage_b_cost_usd"),
+                    row.get("stage_b_prompt_hash"),
+                    row.get("stage_b_resume_hash"),
+                    row["created_at"],
+                    row["updated_at"],
+                )
+                for row in rows
+            ],
+        )
+        return len(rows)
+
+    async def bulk_insert_job_status(self, rows: list[JobStatusRow]) -> int:
+        """Insert job_status rows in bulk.
+
+        Args:
+            rows: Job status rows to insert.
+
+        Returns:
+            Count of rows inserted.
+        """
+        if not rows:
+            return 0
+        conn = self._import_connection()
+        await conn.executemany(
+            """INSERT INTO job_status (
+                job_id, status, next_followup_at, resume_variant, notes,
+                last_status_change_at
+            ) VALUES ($1,$2,$3::text::timestamptz,$4,$5,$6::text::timestamptz)""",
+            [
+                (
+                    row["job_id"],
+                    row["status"],
+                    row.get("next_followup_at"),
+                    row.get("resume_variant"),
+                    row.get("notes"),
+                    row["last_status_change_at"],
+                )
+                for row in rows
+            ],
+        )
+        return len(rows)
+
+    async def bulk_insert_job_status_history(self, rows: list[StatusHistoryRow]) -> int:
+        """Insert job_status_history rows in bulk with preserved ids.
+
+        Args:
+            rows: Status history rows to insert.
+
+        Returns:
+            Count of rows inserted.
+        """
+        if not rows:
+            return 0
+        conn = self._import_connection()
+        await conn.executemany(
+            """INSERT INTO job_status_history (
+                id, job_id, from_status, to_status, changed_at, reason,
+                resume_variant_at_change
+            ) VALUES ($1,$2,$3,$4,$5::text::timestamptz,$6,$7)""",
+            [
+                (
+                    row["id"],
+                    row["job_id"],
+                    row.get("from_status"),
+                    row["to_status"],
+                    row["changed_at"],
+                    row.get("reason"),
+                    row.get("resume_variant_at_change"),
+                )
+                for row in rows
+            ],
+        )
+        return len(rows)
+
+    async def bulk_insert_applied(self, rows: list[AppliedRow]) -> int:
+        """Insert applied rows in bulk.
+
+        Args:
+            rows: Applied rows to insert.
+
+        Returns:
+            Count of rows inserted.
+        """
+        if not rows:
+            return 0
+        conn = self._import_connection()
+        await conn.executemany(
+            """INSERT INTO applied (
+                job_id, applied_at, notes, master_resume_hash,
+                tailored_resume_hash, cover_letter, application_method,
+                verdict_snapshot, fit_snapshot, hooks_snapshot
+            ) VALUES ($1,$2::text::timestamptz,$3,$4,$5,$6,$7,$8,$9,$10)""",
+            [
+                (
+                    row["job_id"],
+                    row["applied_at"],
+                    row.get("notes"),
+                    row.get("master_resume_hash"),
+                    row.get("tailored_resume_hash"),
+                    row.get("cover_letter"),
+                    row.get("application_method"),
+                    row.get("verdict_snapshot"),
+                    row.get("fit_snapshot"),
+                    row.get("hooks_snapshot"),
+                )
+                for row in rows
+            ],
+        )
+        return len(rows)
+
+    async def bulk_insert_resume_snapshots(self, rows: list[ResumeSnapshotRow]) -> int:
+        """Insert resume_snapshots rows in bulk.
+
+        Args:
+            rows: Resume snapshot rows to insert.
+
+        Returns:
+            Count of rows inserted.
+        """
+        if not rows:
+            return 0
+        conn = self._import_connection()
+        await conn.executemany(
+            """INSERT INTO resume_snapshots (
+                resume_hash, captured_at, source, content, notes
+            ) VALUES ($1,$2::text::timestamptz,$3,$4,$5)""",
+            [
+                (
+                    row["resume_hash"],
+                    row["captured_at"],
+                    row["source"],
+                    row["content"],
+                    row.get("notes"),
+                )
+                for row in rows
+            ],
+        )
+        return len(rows)
+
+    async def bulk_insert_resume_variants(self, rows: list[ResumeVariantRow]) -> int:
+        """Insert resume_variants rows in bulk.
+
+        Args:
+            rows: Resume variant rows to insert.
+
+        Returns:
+            Count of rows inserted.
+        """
+        if not rows:
+            return 0
+        conn = self._import_connection()
+        await conn.executemany(
+            """INSERT INTO resume_variants (name, description, created_at)
+               VALUES ($1,$2,$3::text::timestamptz)""",
+            [(row["name"], row.get("description"), row["created_at"]) for row in rows],
+        )
+        return len(rows)
+
+    async def bulk_insert_companies(self, rows: list[CompanyRow]) -> int:
+        """Insert companies rows in bulk.
+
+        Args:
+            rows: Company rows to insert.
+
+        Returns:
+            Count of rows inserted.
+        """
+        if not rows:
+            return 0
+        conn = self._import_connection()
+        await conn.executemany(
+            """INSERT INTO companies (
+                slug, ats_vendor, ats_override, last_verified_at,
+                last_probe_attempt_at, job_count_last_scan, notes,
+                consecutive_discover_failures
+            ) VALUES ($1,$2,$3,$4::text::timestamptz,$5::text::timestamptz,$6,$7,$8)""",
+            [
+                (
+                    row["slug"],
+                    row.get("ats_vendor"),
+                    row.get("ats_override", 0),
+                    row.get("last_verified_at"),
+                    row.get("last_probe_attempt_at"),
+                    row.get("job_count_last_scan", 0),
+                    row.get("notes"),
+                    row.get("consecutive_discover_failures", 0),
+                )
+                for row in rows
+            ],
+        )
+        return len(rows)
+
+    async def bulk_insert_cost_ledger(self, rows: list[CostLedgerRow]) -> int:
+        """Insert cost_ledger rows in bulk.
+
+        Args:
+            rows: Cost ledger rows to insert.
+
+        Returns:
+            Count of rows inserted.
+        """
+        if not rows:
+            return 0
+        conn = self._import_connection()
+        await conn.executemany(
+            """INSERT INTO cost_ledger (day, spent_usd, calls, last_updated)
+               VALUES ($1,$2,$3,$4::text::timestamptz)""",
+            [
+                (
+                    row["day"],
+                    row["spent_usd"],
+                    row.get("calls", 0),
+                    row["last_updated"],
+                )
+                for row in rows
+            ],
+        )
+        return len(rows)
+
+    async def bulk_insert_state(self, rows: list[StateRow]) -> int:
+        """Insert state rows in bulk (upsert on key).
+
+        Args:
+            rows: State rows to insert.
+
+        Returns:
+            Count of rows inserted.
+        """
+        if not rows:
+            return 0
+        conn = self._import_connection()
+        await conn.executemany(
+            """INSERT INTO state (key, value) VALUES ($1,$2)
+               ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value""",
+            [(row["key"], row["value"]) for row in rows],
+        )
+        return len(rows)
+
+    async def read_all_rows(self, table: str) -> list[dict[str, Any]]:
+        """Read all rows from a table as dicts for parity verification.
+
+        Args:
+            table: Table name to read from.
+
+        Returns:
+            List of row dicts.
+
+        Raises:
+            ValueError: If table name is not in the allowlist.
+        """
+        if table not in self._PARITY_TABLES:
+            raise ValueError(f"Table {table!r} not allowed for parity reads")
+        async with self._get_pool().acquire() as conn:
+            records = await conn.fetch(f"SELECT * FROM {table}")
+        return [dict(r) for r in records]
+
+    async def count_rows(self, table: str) -> int:
+        """Count rows in a table for parity verification.
+
+        Args:
+            table: Table name to count rows in.
+
+        Returns:
+            Row count.
+
+        Raises:
+            ValueError: If table name is not in the allowlist.
+        """
+        if table not in self._PARITY_TABLES:
+            raise ValueError(f"Table {table!r} not allowed for parity reads")
+        async with self._get_pool().acquire() as conn:
+            value = await conn.fetchval(f"SELECT COUNT(*) FROM {table}")
+        return int(value) if value is not None else 0
+
+    # ------------------------------------------------------------------
+    # JobStore core methods
+    # ------------------------------------------------------------------
+
+    async def save_job(self, job: JobPosting) -> SaveJobResult:
+        """Persist one source, retrying a bounded concurrent identity move.
+
+        Args:
+            job: Source posting to inspect or persist.
+
+        Returns:
+            Saved source identity and whether the operation inserted or updated it.
+
+        Raises:
+            AssertionError: If the bounded identity retry loop reaches an impossible
+                state.
+            asyncpg.PostgresError: If persistence fails after any permitted retry.
+        """
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            try:
+                return await self._save_job_once(job)
+            except (IdentityParentChanged, asyncpg.DeadlockDetectedError):
+                if attempt == max_attempts - 1:
+                    raise
+        raise AssertionError("unreachable identity retry state")
+
+    async def _save_job_once(self, job: JobPosting) -> SaveJobResult:
+        """Insert or upsert a job by (platform, canonical_id).
+
+        Uses ``INSERT ... ON CONFLICT DO UPDATE ... RETURNING id, (xmax = 0) AS
+            inserted``
+        to atomically handle the upsert in a single round-trip.
+
+        Args:
+            job: Job posting to persist.
+
+        Returns:
+            Upsert result with store-assigned identity.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow(
+                f"""INSERT INTO jobs (
+                       platform, canonical_id, url, title, company, location,
+                       jd_text, jd_quality, posted_at, discovered_at,
+                       enriched_at, enrich_source,
+                       company_norm, title_norm, location_norm,
+                       closed_at, enrich_error, external_identity, enrich_attempted_at,
+                       enrich_error_code, enrich_retry_after, is_repost, repost_evidence, repost_observed_at
+                   ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$19,$20,$21,$22,$23,$24,$25)
+                   ON CONFLICT (platform, canonical_id) DO UPDATE SET
+                       is_repost = CASE WHEN jobs.is_repost=1 THEN 1 ELSE COALESCE(EXCLUDED.is_repost,jobs.is_repost) END,
+                       repost_evidence = CASE WHEN EXCLUDED.is_repost IS NULL OR (jobs.is_repost=1 AND EXCLUDED.is_repost<>1) THEN jobs.repost_evidence ELSE EXCLUDED.repost_evidence END,
+                       repost_observed_at = CASE WHEN EXCLUDED.is_repost IS NULL OR (jobs.is_repost=1 AND EXCLUDED.is_repost<>1) THEN jobs.repost_observed_at ELSE EXCLUDED.repost_observed_at END,
+                       external_identity = EXCLUDED.external_identity,
+                       enrich_attempted_at = COALESCE(EXCLUDED.enrich_attempted_at, jobs.enrich_attempted_at),
+                       enrich_error_code = EXCLUDED.enrich_error_code,
+                       enrich_retry_after = EXCLUDED.enrich_retry_after,
+                       url = EXCLUDED.url,
+                       title = EXCLUDED.title,
+                       company = EXCLUDED.company,
+                       location = EXCLUDED.location,
+                       jd_text = CASE
+                           WHEN $18::int >= (CASE jobs.jd_quality
+                               WHEN 'full' THEN 5 WHEN 'good' THEN 4
+                               WHEN 'partial' THEN 3 WHEN 'stub' THEN 2
+                               WHEN 'missing' THEN 1 WHEN 'abandoned' THEN 0
+                               ELSE -1 END)
+                           THEN COALESCE(EXCLUDED.jd_text, jobs.jd_text)
+                           ELSE jobs.jd_text END,
+                       jd_quality = CASE
+                           WHEN $18::int >= (CASE jobs.jd_quality
+                               WHEN 'full' THEN 5 WHEN 'good' THEN 4
+                               WHEN 'partial' THEN 3 WHEN 'stub' THEN 2
+                               WHEN 'missing' THEN 1 WHEN 'abandoned' THEN 0
+                               ELSE -1 END)
+                           THEN COALESCE(EXCLUDED.jd_quality, jobs.jd_quality)
+                           ELSE jobs.jd_quality END,
+                       posted_at = CASE WHEN jobs.platform = 'speedyapply'
+                           THEN COALESCE(jobs.posted_at, EXCLUDED.posted_at)
+                           ELSE COALESCE(EXCLUDED.posted_at, jobs.posted_at) END,
+                       discovered_at = jobs.discovered_at,
+                       enriched_at = COALESCE(EXCLUDED.enriched_at, jobs.enriched_at),
+                       -- enrich_source must track whichever jd_text actually
+                       -- wins above: only adopt the incoming provenance when the
+                       -- incoming JD is kept, else a no-JD/lower-quality re-scan
+                       -- (e.g. a transient vendor failure) would relabel a
+                       -- preserved full JD as speedyapply-error/-unrouted.
+                       enrich_source = CASE
+                           WHEN $18::int >= (CASE jobs.jd_quality
+                               WHEN 'full' THEN 5 WHEN 'good' THEN 4
+                               WHEN 'partial' THEN 3 WHEN 'stub' THEN 2
+                               WHEN 'missing' THEN 1 WHEN 'abandoned' THEN 0
+                               ELSE -1 END)
+                           THEN COALESCE(EXCLUDED.enrich_source, jobs.enrich_source)
+                           ELSE jobs.enrich_source END,
+                       company_norm = EXCLUDED.company_norm,
+                       title_norm = EXCLUDED.title_norm,
+                       location_norm = EXCLUDED.location_norm,
+                       closed_at = CASE WHEN EXCLUDED.jd_text IS NOT NULL THEN NULL
+                                        ELSE COALESCE(jobs.closed_at, EXCLUDED.closed_at) END,
+                       enrich_error = CASE WHEN EXCLUDED.jd_text IS NOT NULL AND EXCLUDED.jd_quality IN ('good','full') THEN NULL
+                                           ELSE COALESCE(EXCLUDED.enrich_error, jobs.enrich_error) END,
+                       hard_filter = CASE
+                           WHEN jobs.company IS DISTINCT FROM EXCLUDED.company
+                             OR jobs.location IS DISTINCT FROM EXCLUDED.location
+                             OR (EXCLUDED.posted_at IS NOT NULL
+                                 AND jobs.posted_at IS DISTINCT FROM EXCLUDED.posted_at)
+                           THEN NULL ELSE jobs.hard_filter END,
+                       -- Reset the stale ML-gate verdict iff a gate INPUT
+                       -- feature (title, or the JD that actually WINS this
+                       -- upsert) changed. A stale 'fail' is excluded forever
+                       -- (ml_gate_result IS DISTINCT FROM 'fail') and a stale
+                       -- 'pass' is trusted without re-gating, so on a content
+                       -- change we NULL the verdict columns to force a re-gate.
+                       -- _PG_GATE_INPUT_CHANGED reuses the exact winning-jd_text
+                       -- CASE from the jd_text assignment above: a lower-quality
+                       -- / no-JD re-scan that loses keeps the stored JD, so the
+                       -- input is unchanged and the verdict is preserved
+                       -- (Decision 8: don't needlessly re-gate an identical
+                       -- re-scan and risk a model-drift flip).
+                       {_PG_RESET_ML_GATE_SET}
+                   RETURNING id, (xmax = 0) AS inserted""",
+                job.platform,
+                job.canonical_id,
+                job.url,
+                job.title,
+                job.company,
+                job.location,
+                job.jd_text,
+                job.jd_quality.value if job.jd_quality else None,
+                job.posted_at,
+                job.discovered_at,
+                job.enriched_at,
+                job.enrich_source,
+                normalize_company(job.company),
+                normalize(job.title),
+                normalize(job.location),
+                job.closed_at,
+                job.enrich_error,
+                quality_rank(job.jd_quality),
+                job.external_identity or external_identity(job.url),
+                job.enrich_attempted_at,
+                job.enrich_error_code,
+                job.enrich_retry_after,
+                None if job.is_repost is None else int(job.is_repost),
+                job.repost_evidence,
+                job.repost_observed_at,
+            )
+            assert row is not None  # RETURNING always produces a row
+            source_id = int(row["id"])
+            if job.apply_url:
+                await conn.execute(
+                    "UPDATE jobs SET apply_url=$1 WHERE id=$2", job.apply_url, source_id
+                )
+            parent_id = await conn.fetchval(
+                "SELECT real_job_id FROM jobs WHERE id=$1 FOR UPDATE", source_id
+            )
+            if parent_id is None:
+                parent_id = await conn.fetchval(
+                    "INSERT INTO real_jobs(representative_job_id) VALUES($1) RETURNING id",
+                    source_id,
+                )
+                await conn.execute(
+                    "UPDATE jobs SET real_job_id=$1 WHERE id=$2", parent_id, source_id
+                )
+            await conn.execute(
+                "INSERT INTO real_job_status(real_job_id,status,next_followup_at,"
+                "resume_variant,notes,last_status_change_at) "
+                "SELECT $1,status,next_followup_at,resume_variant,notes,"
+                "last_status_change_at FROM job_status WHERE job_id=$2 "
+                "ON CONFLICT(real_job_id) DO NOTHING",
+                parent_id,
+                source_id,
+            )
+            await conn.execute(
+                "INSERT INTO real_job_status_history(real_job_id,source_history_id,"
+                "from_status,to_status,changed_at,reason,resume_variant_at_change) "
+                "SELECT $1,id,from_status,to_status,changed_at,reason,"
+                "resume_variant_at_change FROM job_status_history WHERE job_id=$2 "
+                "ON CONFLICT(source_history_id) DO NOTHING",
+                parent_id,
+                source_id,
+            )
+            await conn.execute(
+                "INSERT INTO real_job_identifiers("
+                "real_job_id,provider,scope,native_id,evidence_job_id,observed_url) "
+                "VALUES($1,$2,'',$3,$4,$5) ON CONFLICT(provider,scope,native_id) DO NOTHING",
+                parent_id,
+                job.platform,
+                job.canonical_id,
+                source_id,
+                job.url,
+            )
+            await resolve_postgres_real_job(conn, source_id, job)
+            await sync_postgres_real_job_input(conn, source_id, _job_from_record)
+            inserted = bool(row["inserted"])
+            return SaveJobResult(
+                job_id=str(row["id"]),
+                inserted=inserted,
+                updated=not inserted,
+            )
+
+    async def reconcile_real_jobs(self) -> int:
+        """Idempotently parent legacy sources that predate the live source writer.
+
+        Run this after the nullable-FK migration and repeat it while old scan
+        workers may still be writing. It preserves all source child rows.
+
+        Returns:
+            Number of source rows still lacking canonical parents after reconciliation.
+        """
+        async with self._get_pool().acquire() as conn, conn.transaction():
+            await conn.execute(
+                "INSERT INTO real_jobs(representative_job_id) "
+                "SELECT id FROM jobs WHERE real_job_id IS NULL "
+                "ON CONFLICT (representative_job_id) DO NOTHING"
+            )
+            await conn.execute(
+                "UPDATE jobs AS j SET real_job_id=r.id FROM real_jobs AS r "
+                "WHERE j.real_job_id IS NULL AND r.representative_job_id=j.id"
+            )
+            await conn.execute(
+                "INSERT INTO real_job_identifiers("
+                "real_job_id,provider,scope,native_id,evidence_job_id,observed_url) "
+                "SELECT real_job_id,platform,'',canonical_id,id,url FROM jobs "
+                "WHERE real_job_id IS NOT NULL "
+                "ON CONFLICT(provider,scope,native_id) DO NOTHING"
+            )
+            remaining = await conn.fetchval(
+                "SELECT COUNT(*) FROM jobs WHERE real_job_id IS NULL"
+            )
+        return int(remaining)
+
+    async def backfill_real_job_identifiers(
+        self, *, after_id: int = 0, limit: int = 100
+    ) -> tuple[int, int]:
+        """Explicitly reconcile one bounded exact-identity page on a DB copy.
+
+        Args:
+            after_id: Exclusive source-ID cursor for the next backfill page.
+            limit: Maximum number of records to select.
+
+        Returns:
+            Last processed source ID and number of source rows processed.
+
+        Raises:
+            ValueError: If limit is outside the inclusive range 1 through 1000.
+        """
+        if limit < 1 or limit > MAX_REAL_JOB_BACKFILL_PAGE:
+            raise ValueError("limit must be between 1 and 1000")
+        async with self._get_pool().acquire() as conn, conn.transaction():
+            rows = await conn.fetch(
+                "SELECT * FROM jobs WHERE id>$1 AND real_job_id IS NOT NULL "
+                "ORDER BY id LIMIT $2",
+                after_id,
+                limit,
+            )
+            for row in rows:
+                merged = await resolve_postgres_real_job(
+                    conn,
+                    int(row["id"]),
+                    _job_from_record(row),
+                    include_content=False,
+                )
+                if merged:
+                    await sync_postgres_real_job_input(
+                        conn, int(row["id"]), _job_from_record
+                    )
+            await _refresh_backfilled_real_job_display(
+                conn, [int(row["id"]) for row in rows]
+            )
+        return (int(rows[-1]["id"]) if rows else after_id, len(rows))
+
+    async def save_hard_filters(self, reasons: dict[str, str]) -> None:
+        """Persist deterministic hard-filter reasons in one transaction.
+
+        Args:
+            reasons: Store job IDs mapped to exclusion reasons.
+        """
+        rows = [(int(job_id), reason) for job_id, reason in reasons.items()]
+        if not rows:
+            return
+        async with self._get_pool().acquire() as conn, conn.transaction():
+            await conn.executemany(
+                "UPDATE jobs SET hard_filter=$2 WHERE id=$1",
+                rows,
+            )
+
+    async def get_job(self, job_id: str) -> JobPosting | None:
+        """Load a job by store identity.
+
+        Args:
+            job_id: Store-assigned identity.
+
+        Returns:
+            Job posting if found, else None.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT * FROM jobs WHERE id = $1", int(job_id))
+        return _job_from_record(row) if row is not None else None
+
+    async def list_jobs(self, limit: int = 100) -> list[JobPosting]:
+        """List recent jobs.
+
+        Args:
+            limit: Max jobs.
+
+        Returns:
+            Job postings by recency.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM jobs ORDER BY discovered_at DESC, id DESC LIMIT $1",
+                limit,
+            )
+        return [_job_from_record(r) for r in rows]
+
+    async def job_exists(self, *, platform: str, canonical_id: str) -> bool:
+        """Check job existence by natural key.
+
+        Args:
+            platform: Source platform.
+            canonical_id: Platform-specific identity.
+
+        Returns:
+            True if the job exists.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT 1 FROM jobs WHERE platform = $1 AND canonical_id = $2",
+                platform,
+                canonical_id,
+            )
+        return row is not None
+
+    async def get_enrichment(
+        self,
+        *,
+        platform: str,
+        canonical_id: str,
+    ) -> StoredEnrichment | None:
+        """Return the stored enrichment snapshot for a job (EnrichmentLookup port).
+
+        Args:
+            platform: Source platform.
+            canonical_id: Platform-specific identity.
+
+        Returns:
+            Stored enrichment snapshot, or None when the job is unknown.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """SELECT *
+                   FROM jobs WHERE platform = $1 AND canonical_id = $2""",
+                platform,
+                canonical_id,
+            )
+        if row is None:
+            return None
+        return StoredEnrichment(
+            jd_text=row["jd_text"],
+            quality=QualityBand(row["jd_quality"]) if row["jd_quality"] else None,
+            enriched_at=row["enriched_at"],
+            enrich_source=row["enrich_source"],
+            apply_url=row["apply_url"],
+            platform=row["platform"],
+            external_identity=row["external_identity"],
+            enrich_attempted_at=row["enrich_attempted_at"],
+            enrich_error_code=row["enrich_error_code"],
+            enrich_retry_after=row["enrich_retry_after"],
+            enrich_error=row["enrich_error"],
+        )
+
+    async def get_enrichment_by_identity(
+        self, identity: str
+    ) -> StoredEnrichment | None:
+        """Find a complete cross-source JD or latest deferred exact twin.
+
+        Args:
+            identity: Existing exact cross-source identity to match.
+
+        Returns:
+            Reusable enriched posting, latest deferred twin, or None when absent.
+        """
+        if not identity:
+            return None
+        async with self._get_pool().acquire() as conn:
+            platform, _, canonical_id = identity.partition(":")
+            if platform in {"jobright", "handshake"}:
+                official = await conn.fetchval(
+                    "SELECT external_identity FROM jobs WHERE platform=$1 AND canonical_id=$2",
+                    platform,
+                    canonical_id,
+                )
+                if official:
+                    identity = official
+            row = await conn.fetchrow(
+                """SELECT * FROM jobs WHERE (external_identity=$1 OR external_identity IN
+                   (SELECT platform || ':' || canonical_id FROM jobs WHERE external_identity=$1 AND platform IN ('jobright','handshake'))) AND closed_at IS NULL
+                   ORDER BY CASE WHEN jd_quality IN ('good','full')
+                   AND LENGTH(TRIM(COALESCE(jd_text,'')))>0 THEN 0 ELSE 1 END,
+                   enrich_retry_after DESC NULLS LAST, enriched_at DESC NULLS LAST, id LIMIT 1""",
+                identity,
+            )
+        if row is None:
+            return None
+        return StoredEnrichment(
+            jd_text=row["jd_text"],
+            quality=QualityBand(row["jd_quality"]) if row["jd_quality"] else None,
+            enriched_at=row["enriched_at"],
+            enrich_source=row["enrich_source"],
+            apply_url=row["apply_url"],
+            platform=row["platform"],
+            external_identity=identity,
+            enrich_attempted_at=row["enrich_attempted_at"],
+            enrich_error_code=row["enrich_error_code"],
+            enrich_retry_after=row["enrich_retry_after"],
+            enrich_error=row["enrich_error"],
+        )
+
+    async def get_closed_canonical_ids(self, *, platform: str) -> set[str]:
+        """Return canonical ids of definitively closed jobs (ClosedJobLookup).
+
+        Heuristic ``mark-stale-closed`` backfill closures are excluded: they
+        are guesses, not proven-gone postings, and the save-path self-heal can
+        only clear their ``closed_at`` if a later JD fetch succeeds — which
+        requires the source to keep re-fetching them.
+
+        Args:
+            platform: Source platform to scope the lookup to.
+
+        Returns:
+            The set of ``canonical_id`` values whose row has ``closed_at`` set
+            and is not a heuristic stale-backfill closure.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            # Heuristic backfill closures stay re-fetchable: the save-path
+            # self-heal needs a successful fetch to recover a live posting.
+            rows = await conn.fetch(
+                """SELECT canonical_id FROM jobs
+                   WHERE platform = $1 AND closed_at IS NOT NULL
+                     AND enrich_error IS DISTINCT FROM $2""",
+                platform,
+                _STALE_BACKFILL_MARKER,
+            )
+        return {row["canonical_id"] for row in rows}
+
+    async def save_stage_a(self, job_id: str, result: StageAResult) -> None:
+        """Persist a successful Stage A result and advance status to scored.
+
+        The evaluation upsert and the ``new -> scored`` status advance commit
+        atomically. The advance only fires when the job is still ``new``, so
+        re-evaluation and jobs already moved along the workflow are untouched.
+
+        Args:
+            job_id: Store-assigned identity.
+            result: Stage A result.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn, conn.transaction():
+            await conn.execute(
+                """INSERT INTO evaluations (
+                       job_id, stage_a_score, stage_a_one_line,
+                       stage_a_timing_eligible, stage_a_status, stage_a_error,
+                       stage_a_model, stage_a_cost_usd,
+                       stage_a_prompt_hash, stage_a_resume_hash, stage_a_at
+                   ) VALUES ($1,$2,$3,$4,'completed',NULL,$5,$6,$7,$8,now())
+                   ON CONFLICT (job_id) DO UPDATE SET
+                       stage_a_score = EXCLUDED.stage_a_score,
+                       stage_a_one_line = EXCLUDED.stage_a_one_line,
+                       stage_a_timing_eligible = EXCLUDED.stage_a_timing_eligible,
+                       stage_a_status = EXCLUDED.stage_a_status,
+                       stage_a_error = NULL,
+                       stage_a_model = EXCLUDED.stage_a_model,
+                       stage_a_cost_usd = EXCLUDED.stage_a_cost_usd,
+                       stage_a_prompt_hash = EXCLUDED.stage_a_prompt_hash,
+                       stage_a_resume_hash = EXCLUDED.stage_a_resume_hash,
+                       stage_a_at = COALESCE(evaluations.stage_a_at, now()),
+                       stage_b_status = CASE
+                           WHEN evaluations.stage_b_status = 'skipped_below_threshold'
+                               THEN NULL
+                           ELSE evaluations.stage_b_status
+                       END,
+                       stage_b_error = CASE
+                           WHEN evaluations.stage_b_status = 'skipped_below_threshold'
+                               THEN NULL
+                           ELSE evaluations.stage_b_error
+                       END,
+                       updated_at = now()""",
+                int(job_id),
+                result.score,
+                result.one_line,
+                result.timing_eligible,
+                result.model,
+                result.cost_usd,
+                result.prompt_hash,
+                result.resume_hash,
+            )
+            row = await conn.fetchrow(
+                "SELECT status FROM job_status WHERE job_id = $1 FOR UPDATE",
+                int(job_id),
+            )
+            if row is not None and row["status"] == "new":
+                await self._transition_status_in_tx(
+                    conn,
+                    TransitionRequest(
+                        job_id=job_id,
+                        new_status="scored",
+                        reason=REASON_AUTO_SCORED,
+                    ),
+                )
+
+    async def save_stage_a_error(self, job_id: str, error: str) -> None:
+        """Record a Stage A error (retryable).
+
+        Args:
+            job_id: Store-assigned identity.
+            error: Error detail.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn, conn.transaction():
+            await conn.execute(
+                """INSERT INTO evaluations (
+                       job_id, stage_a_status, stage_a_error, stage_a_error_count
+                   ) VALUES ($1, 'error', $2, 1)
+                   ON CONFLICT (job_id) DO UPDATE SET
+                       stage_a_status = EXCLUDED.stage_a_status,
+                       stage_a_error = EXCLUDED.stage_a_error,
+                       stage_a_error_count = evaluations.stage_a_error_count + 1,
+                       updated_at = now()""",
+                int(job_id),
+                error,
+            )
+
+    async def save_stage_b(self, job_id: str, result: StageBResult) -> None:
+        """Persist a successful Stage B result.
+
+        Args:
+            job_id: Store-assigned identity.
+            result: Stage B result.
+        """
+        verdict = result.verdict.value
+        summary = result.jd_summary
+        verdict_json = _stage_b_block_json(result, "verdict")
+        summary_json = _stage_b_block_json(result, "jd_summary")
+        fit_json = _stage_b_block_json(result, "fit_analysis")
+        hooks_json = _stage_b_block_json(result, "resume_hooks")
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO evaluations (
+                       job_id, stage_b_verdict, stage_b_jd_summary,
+                       stage_b_verdict_json, stage_b_summary_json,
+                       stage_b_fit_json, stage_b_hooks_json,
+                       stage_b_status, stage_b_error,
+                       stage_b_model, stage_b_cost_usd,
+                       stage_b_prompt_hash, stage_b_resume_hash, stage_b_at
+                   ) VALUES ($1,$2,$3,$4::jsonb,$5::jsonb,$6::jsonb,$7::jsonb,'completed',NULL,$8,$9,$10,$11,now())
+                   ON CONFLICT (job_id) DO UPDATE SET
+                       stage_b_verdict = EXCLUDED.stage_b_verdict,
+                       stage_b_jd_summary = EXCLUDED.stage_b_jd_summary,
+                       stage_b_verdict_json = EXCLUDED.stage_b_verdict_json,
+                       stage_b_summary_json = EXCLUDED.stage_b_summary_json,
+                       stage_b_fit_json = EXCLUDED.stage_b_fit_json,
+                       stage_b_hooks_json = EXCLUDED.stage_b_hooks_json,
+                       stage_b_status = EXCLUDED.stage_b_status,
+                       stage_b_error = NULL,
+                       stage_b_model = EXCLUDED.stage_b_model,
+                       stage_b_cost_usd = EXCLUDED.stage_b_cost_usd,
+                       stage_b_prompt_hash = EXCLUDED.stage_b_prompt_hash,
+                       stage_b_resume_hash = EXCLUDED.stage_b_resume_hash,
+                       stage_b_at = COALESCE(evaluations.stage_b_at, now()),
+                       updated_at = now()""",
+                int(job_id),
+                verdict,
+                summary,
+                verdict_json,
+                summary_json,
+                fit_json,
+                hooks_json,
+                result.model,
+                result.cost_usd,
+                result.prompt_hash,
+                result.resume_hash,
+            )
+
+    async def save_stage_b_error(self, job_id: str, error: str) -> None:
+        """Record a Stage B error (retryable).
+
+        Args:
+            job_id: Store-assigned identity.
+            error: Error detail.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO evaluations (
+                       job_id, stage_b_status, stage_b_error, stage_b_error_count
+                   ) VALUES ($1, 'error', $2, 1)
+                   ON CONFLICT (job_id) DO UPDATE SET
+                       stage_b_status = EXCLUDED.stage_b_status,
+                       stage_b_error = EXCLUDED.stage_b_error,
+                       stage_b_error_count = evaluations.stage_b_error_count + 1,
+                       updated_at = now()""",
+                int(job_id),
+                error,
+            )
+
+    async def mark_stage_b_skipped(self, job_id: str) -> None:
+        """Mark Stage B as skipped (threshold decision by service).
+
+        Args:
+            job_id: Store-assigned identity.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """UPDATE evaluations SET
+                       stage_b_status = 'skipped_below_threshold',
+                       updated_at = now()
+                   WHERE job_id = $1
+                     AND stage_b_status IS DISTINCT FROM 'completed'""",
+                int(job_id),
+            )
+
+    async def mark_stage_b_ineligible(self, job_id: str) -> None:
+        """Persist a hard-eligibility skip so it is not reclaimed.
+
+        Args:
+            job_id: Store-assigned identity.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """UPDATE evaluations SET
+                       stage_b_status = 'skipped_below_threshold',
+                       stage_b_error = 'ineligible',
+                       updated_at = now()
+                   WHERE job_id = $1
+                     AND stage_b_status IS DISTINCT FROM 'completed'""",
+                int(job_id),
+            )
+
+    async def mark_stage_b_skipped_batch(self, job_ids: list[str]) -> None:
+        """Mark multiple Stage B evaluations as skipped in a single UPDATE.
+
+        Args:
+            job_ids: Store-assigned job identities to skip.
+        """
+        if not job_ids:
+            return
+        int_ids = [int(jid) for jid in job_ids]
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """UPDATE evaluations SET
+                       stage_b_status = 'skipped_below_threshold',
+                       updated_at = now()
+                   WHERE job_id = ANY($1)
+                     AND stage_b_status IS DISTINCT FROM 'completed'""",
+                int_ids,
+            )
+
+    async def mark_stage_b_below_threshold(
+        self,
+        threshold: int,
+        *,
+        max_days: int | None = None,
+    ) -> int:
+        """Mark pending Stage B rows below the Stage A threshold.
+
+        Args:
+            threshold: Minimum Stage A score allowed into Stage B.
+            max_days: Optional freshness window on discovered_at.
+
+        Returns:
+            Number of rows marked skipped.
+        """
+        conditions = [
+            "evaluations.job_id = jobs.id",
+            "evaluations.stage_a_status = 'completed'",
+            """(evaluations.stage_b_status IS NULL
+               OR evaluations.stage_b_status = 'error'
+               OR (
+                   evaluations.stage_b_status = 'in_progress'
+                   AND evaluations.stage_b_verdict IS NULL
+                   AND evaluations.updated_at < $2
+               ))""",
+            _PG_STAGE_B_UNDER_CAP,
+            "evaluations.stage_a_score < $1",
+        ]
+        params: list[Any] = [threshold, datetime.now(UTC) - _PG_EVALUATION_CLAIM_TTL]
+        if max_days is not None:
+            params.append(datetime.now(UTC) - timedelta(days=max_days))
+            conditions.append(f"jobs.discovered_at >= ${len(params)}")
+        where = " AND ".join(conditions)
+        sql = (
+            "UPDATE evaluations SET "
+            "stage_b_status = 'skipped_below_threshold', updated_at = now() "
+            f"FROM jobs WHERE {where} RETURNING evaluations.job_id"
+        )
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(sql, *params)
+        return len(rows)
+
+    async def reopen_stage_b_at_or_above_threshold(
+        self,
+        threshold: int,
+        *,
+        max_days: int | None = None,
+    ) -> int:
+        """Reopen threshold-skipped Stage B rows that meet the active threshold.
+
+        Args:
+            threshold: Minimum Stage A score allowed into Stage B.
+            max_days: Optional freshness window on discovered_at.
+
+        Returns:
+            Number of rows reopened.
+        """
+        conditions = [
+            "evaluations.job_id = jobs.id",
+            "evaluations.stage_a_status = 'completed'",
+            "evaluations.stage_b_status = 'skipped_below_threshold'",
+            "evaluations.stage_b_error IS NULL",
+            "evaluations.stage_a_score >= $1",
+        ]
+        params: list[Any] = [threshold]
+        if max_days is not None:
+            params.append(datetime.now(UTC) - timedelta(days=max_days))
+            conditions.append(f"jobs.discovered_at >= ${len(params)}")
+        sql = (
+            "UPDATE evaluations SET stage_b_status = NULL, "
+            "stage_b_error = NULL, updated_at = now() "
+            f"FROM jobs WHERE {' AND '.join(conditions)} "
+            "RETURNING evaluations.job_id"
+        )
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(sql, *params)
+        return len(rows)
+
+    async def load_pending_stage_a(
+        self,
+        *,
+        limit: int = 100,
+        quality_bands: frozenset[str] | None = None,
+        corpus: str = "unrated",
+        max_days: int | None = None,
+    ) -> list[JobPosting]:
+        """Load jobs pending Stage A evaluation.
+
+        Args:
+            limit: Max jobs.
+            quality_bands: Filter by jd_quality.
+            corpus: "unrated", "all", or "failed".
+            max_days: Freshness filter on discovered_at.
+
+        Returns:
+            Jobs pending Stage A.
+        """
+        sql, params = _build_pending_stage_a_query(
+            limit=limit,
+            quality_bands=quality_bands,
+            corpus=corpus,
+            max_days=max_days,
+            now=datetime.now(UTC),
+        )
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(sql, *params)
+        return [_job_from_record(r) for r in rows]
+
+    async def claim_pending_stage_a(
+        self,
+        *,
+        limit: int = 100,
+        quality_bands: frozenset[str] | None = None,
+        corpus: str = "unrated",
+        max_days: int | None = None,
+    ) -> list[JobPosting]:
+        """Atomically claim jobs pending Stage A evaluation.
+
+        Args:
+            limit: Max jobs.
+            quality_bands: Filter by jd_quality.
+            corpus: "unrated", "all", or "failed".
+            max_days: Freshness filter on discovered_at.
+
+        Returns:
+            Jobs claimed for this Stage A run.
+        """
+        sql, params = _build_claim_stage_a_query(
+            limit=limit,
+            quality_bands=quality_bands,
+            corpus=corpus,
+            max_days=max_days,
+            now=datetime.now(UTC),
+        )
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(sql, *params)
+        return [_job_from_record(r) for r in rows]
+
+    async def preview_claimable_stage_a(
+        self,
+        *,
+        limit: int = 100,
+        quality_bands: frozenset[str] | None = None,
+        corpus: str = "unrated",
+        max_days: int | None = None,
+    ) -> list[JobPosting]:
+        """Preview jobs claimable for Stage A without mutating leases.
+
+        Args:
+            limit: Max jobs.
+            quality_bands: Filter by jd_quality.
+            corpus: "unrated", "all", or "failed".
+            max_days: Freshness filter on discovered_at.
+
+        Returns:
+            Jobs a real Stage A run would claim.
+        """
+        sql, params = _build_claimable_stage_a_query(
+            limit=limit,
+            quality_bands=quality_bands,
+            corpus=corpus,
+            max_days=max_days,
+            now=datetime.now(UTC),
+        )
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(sql, *params)
+        return [_job_from_record(r) for r in rows]
+
+    async def load_gate_candidates(
+        self,
+        *,
+        corpus: str = "unrated",
+        quality_bands: frozenset[str] | None = None,
+        max_days: int | None = None,
+        limit: int = 100,
+        exclude_gate_failed: bool = True,
+        after: tuple[datetime, int] | None = None,
+        job_ids: list[str] | None = None,
+    ) -> list[GateCandidate]:
+        """Load ML-gate candidates pending Stage A (NON-claiming read).
+
+        Reuses the shared Stage A eligibility filters plus the same
+        stale-takeover corpus predicate the claim builders use (so a stale
+        ``in_progress`` row past the claim TTL re-enters under "unrated"), and
+        adds the not-yet-Stage-A-scored predicate plus, when
+        ``exclude_gate_failed``, an ``ml_gate_result IS DISTINCT FROM 'fail'``
+        guard. Includes rows with a NULL or 'pass' gate that are not yet
+        Stage-A-scored (crash recovery) and excludes already-Stage-A-scored rows.
+        Each row carries its persisted ``ml_gate_result``. Writes nothing.
+
+        ``after`` is an optional ``(discovered_at, id)`` keyset cursor: when set,
+        only rows strictly past it in ``discovered_at DESC, id DESC`` order are
+        returned. The funnel pages with it to overfetch past hard-filtered drops
+        so an eligible older row is not starved by a blocked newest prefix.
+
+        Args:
+            corpus: "unrated", "all", or "failed".
+            quality_bands: Filter by jd_quality.
+            max_days: Freshness filter on discovered_at.
+            limit: Max jobs (one page).
+            exclude_gate_failed: When True, drop rows whose gate result is 'fail';
+                when False, gate state is ignored entirely.
+            after: Optional ``(discovered_at, id)`` keyset cursor for the next page.
+
+        Returns:
+            Gate candidates (job + persisted ``ml_gate_result``) pending Stage A,
+            with no lease mutation.
+        """
+        sql, params = _build_gate_candidates_query(
+            limit=limit,
+            quality_bands=quality_bands,
+            corpus=corpus,
+            max_days=max_days,
+            exclude_gate_failed=exclude_gate_failed,
+            now=datetime.now(UTC),
+            after=after,
+            job_ids=None if job_ids is None else _numeric_job_ids(job_ids),
+        )
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(sql, *params)
+        return [_gate_candidate_from_record(r) for r in rows]
+
+    async def claim_stage_a_by_ids(
+        self,
+        job_ids: list[str],
+        *,
+        quality_bands: frozenset[str] | None = None,
+        corpus: str = "unrated",
+        max_days: int | None = None,
+        limit: int = 100,
+    ) -> list[JobPosting]:
+        """Atomically claim Stage A jobs restricted to an explicit id set.
+
+        Same claim machinery as ``claim_pending_stage_a`` (``SKIP LOCKED`` +
+        ``in_progress`` upsert with stale-takeover / retry-cap semantics), but
+        the candidate scan is constrained to ``job_ids``. Store ids are
+        bigint-as-str; non-numeric ids match no row and are dropped, so an empty
+        or all-non-numeric ``job_ids`` returns ``[]`` and writes nothing.
+
+        Args:
+            job_ids: Store-assigned identities to claim from.
+            quality_bands: Filter by jd_quality.
+            corpus: "unrated", "all", or "failed".
+            max_days: Freshness filter on discovered_at.
+            limit: Max jobs.
+
+        Returns:
+            Jobs claimed for this Stage A run (subset of ``job_ids``).
+        """
+        numeric_ids = _numeric_job_ids(job_ids)
+        if not numeric_ids:
+            return []
+        sql, params = _build_claim_stage_a_by_ids_query(
+            job_ids=numeric_ids,
+            limit=limit,
+            quality_bands=quality_bands,
+            corpus=corpus,
+            max_days=max_days,
+            now=datetime.now(UTC),
+        )
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(sql, *params)
+        return [_job_from_record(r) for r in rows]
+
+    async def load_pending_stage_b(
+        self,
+        *,
+        limit: int = 100,
+        max_days: int | None = None,
+        stage_a_threshold: int | None = None,
+        require_stage_a: bool = True,
+    ) -> list[JobPosting]:
+        """Load Stage A-completed, Stage B-pending jobs.
+
+        Args:
+            limit: Max jobs.
+            max_days: Freshness filter.
+            stage_a_threshold: Optional minimum Stage A score.
+
+        Returns:
+            Jobs pending Stage B.
+        """
+        sql, params = _build_pending_stage_b_query(
+            limit=limit,
+            max_days=max_days,
+            stage_a_threshold=stage_a_threshold,
+            now=datetime.now(UTC),
+            require_stage_a=require_stage_a,
+        )
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(sql, *params)
+        return [_job_from_record(r) for r in rows]
+
+    async def claim_pending_stage_b(
+        self,
+        *,
+        limit: int = 100,
+        max_days: int | None = None,
+        stage_a_threshold: int | None = None,
+        require_stage_a: bool = True,
+        job_ids: list[str] | None = None,
+    ) -> list[JobPosting]:
+        """Atomically claim jobs pending Stage B evaluation.
+
+        Args:
+            limit: Max jobs.
+            max_days: Freshness filter.
+            stage_a_threshold: Optional minimum Stage A score.
+
+        Returns:
+            Jobs claimed for this Stage B run.
+        """
+        sql, params = _build_claim_stage_b_query(
+            limit=limit,
+            max_days=max_days,
+            stage_a_threshold=stage_a_threshold,
+            now=datetime.now(UTC),
+            job_ids=None if job_ids is None else _numeric_job_ids(job_ids),
+            require_stage_a=require_stage_a,
+        )
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(sql, *params)
+        return [_job_from_record(r) for r in rows]
+
+    async def release_stage_a_claim(self, job_id: str) -> None:
+        """Release an unspent Stage A in-progress claim.
+
+        Args:
+            job_id: Store-assigned identity.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """UPDATE evaluations
+                   SET stage_a_status = CASE
+                           WHEN stage_a_error IS NOT NULL THEN 'error'
+                           WHEN stage_a_score IS NOT NULL THEN 'completed'
+                           ELSE NULL
+                       END,
+                       updated_at = now()
+                 WHERE job_id = $1 AND stage_a_status = 'in_progress'""",
+                int(job_id),
+            )
+
+    async def release_stage_b_claim(self, job_id: str) -> None:
+        """Release an unspent Stage B in-progress claim.
+
+        Args:
+            job_id: Store-assigned identity.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """UPDATE evaluations
+                   SET stage_b_status = CASE
+                           WHEN stage_b_error IS NOT NULL THEN 'error'
+                           WHEN stage_b_verdict IS NOT NULL THEN 'completed'
+                           ELSE NULL
+                       END,
+                       updated_at = now()
+                 WHERE job_id = $1 AND stage_b_status = 'in_progress'""",
+                int(job_id),
+            )
+
+    async def refresh_stage_b_claim(self, job_id: str) -> None:
+        """Refresh an active Stage B in-progress claim.
+
+        Args:
+            job_id: Store-assigned identity.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """UPDATE evaluations
+                      SET updated_at = now()
+                    WHERE job_id = $1 AND stage_b_status = 'in_progress'""",
+                int(job_id),
+            )
+
+    async def preview_pending_stage_b_after_threshold_sync(
+        self,
+        *,
+        limit: int = 100,
+        max_days: int | None = None,
+        stage_a_threshold: int,
+    ) -> list[JobPosting]:
+        """Preview Stage B jobs after threshold sync without mutating rows.
+
+        Args:
+            limit: Max jobs.
+            max_days: Freshness filter.
+            stage_a_threshold: Active Stage A threshold.
+
+        Returns:
+            Jobs that a real Stage B run would consider after reopening
+            eligible threshold-skipped rows and filtering below-threshold rows.
+        """
+        sql, params = _build_stage_b_preview_query(
+            limit=limit,
+            max_days=max_days,
+            stage_a_threshold=stage_a_threshold,
+            now=datetime.now(UTC),
+        )
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(sql, *params)
+        return [_job_from_record(r) for r in rows]
+
+    async def list_evaluated_jobs(self, limit: int = 100) -> list[JobEvaluation]:
+        """List jobs with evaluations.
+
+        Args:
+            limit: Max evaluations.
+
+        Returns:
+            Joined evaluations.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT
+                       jobs.*,
+                       evaluations.stage_a_score, evaluations.stage_a_one_line,
+                       evaluations.stage_a_timing_eligible, evaluations.stage_a_status,
+                       evaluations.stage_a_error, evaluations.stage_a_model,
+                       evaluations.stage_a_cost_usd, evaluations.stage_a_prompt_hash,
+                       evaluations.stage_a_resume_hash,
+                       evaluations.stage_b_verdict, evaluations.stage_b_jd_summary,
+                       evaluations.stage_b_verdict_json, evaluations.stage_b_summary_json,
+                       evaluations.stage_b_fit_json, evaluations.stage_b_hooks_json,
+                       evaluations.stage_b_status, evaluations.stage_b_error,
+                       evaluations.stage_b_model, evaluations.stage_b_cost_usd,
+                       evaluations.stage_b_prompt_hash, evaluations.stage_b_resume_hash
+                   FROM jobs
+                   JOIN evaluations ON evaluations.job_id = jobs.id
+                   ORDER BY jobs.discovered_at DESC, jobs.id DESC
+                   LIMIT $1""",
+                limit,
+            )
+        return [_evaluation_from_record(r) for r in rows]
+
+    async def get_evaluation(self, job_id: str) -> JobEvaluation | None:
+        """Fetch a single job's evaluation.
+
+        Args:
+            job_id: Store-assigned identity.
+
+        Returns:
+            Evaluation if found, else None.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """SELECT
+                       jobs.*,
+                       evaluations.stage_a_score, evaluations.stage_a_one_line,
+                       evaluations.stage_a_timing_eligible, evaluations.stage_a_status,
+                       evaluations.stage_a_error, evaluations.stage_a_model,
+                       evaluations.stage_a_cost_usd, evaluations.stage_a_prompt_hash,
+                       evaluations.stage_a_resume_hash,
+                       evaluations.stage_b_verdict, evaluations.stage_b_jd_summary,
+                       evaluations.stage_b_verdict_json, evaluations.stage_b_summary_json,
+                       evaluations.stage_b_fit_json, evaluations.stage_b_hooks_json,
+                       evaluations.stage_b_status, evaluations.stage_b_error,
+                       evaluations.stage_b_model, evaluations.stage_b_cost_usd,
+                       evaluations.stage_b_prompt_hash, evaluations.stage_b_resume_hash
+                   FROM jobs
+                   LEFT JOIN evaluations ON evaluations.job_id = jobs.id
+                   WHERE jobs.id = $1""",
+                int(job_id),
+            )
+        if row is None:
+            return None
+        return _evaluation_from_record(row)
+
+    async def get_stage_a_scores(
+        self,
+        job_ids: list[str],
+    ) -> dict[str, int | None]:
+        """Batch-fetch Stage A scores for the given jobs.
+
+        Args:
+            job_ids: Store-assigned job identities.
+
+        Returns:
+            Mapping of job_id → stage_a_score (None when unevaluated).
+        """
+        if not job_ids:
+            return {}
+        int_ids = [int(jid) for jid in job_ids]
+        async with self._get_pool().acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT job_id, stage_a_score
+                   FROM evaluations
+                   WHERE job_id = ANY($1)""",
+                int_ids,
+            )
+        return {str(row["job_id"]): row["stage_a_score"] for row in rows}
+
+    async def top_evaluated_jobs(
+        self,
+        *,
+        min_score: int = 0,
+        limit: int = 100,
+    ) -> list[JobEvaluation]:
+        """Stage B-completed jobs by score descending.
+
+        Args:
+            min_score: Score threshold.
+            limit: Max jobs.
+
+        Returns:
+            Sorted evaluations.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT
+                       jobs.*,
+                       evaluations.stage_a_score, evaluations.stage_a_one_line,
+                       evaluations.stage_a_timing_eligible, evaluations.stage_a_status,
+                       evaluations.stage_a_error, evaluations.stage_a_model,
+                       evaluations.stage_a_cost_usd, evaluations.stage_a_prompt_hash,
+                       evaluations.stage_a_resume_hash,
+                       evaluations.stage_b_verdict, evaluations.stage_b_jd_summary,
+                       evaluations.stage_b_verdict_json, evaluations.stage_b_summary_json,
+                       evaluations.stage_b_fit_json, evaluations.stage_b_hooks_json,
+                       evaluations.stage_b_status, evaluations.stage_b_error,
+                       evaluations.stage_b_model, evaluations.stage_b_cost_usd,
+                       evaluations.stage_b_prompt_hash, evaluations.stage_b_resume_hash
+                   FROM jobs
+                   JOIN evaluations ON evaluations.job_id = jobs.id
+                   WHERE evaluations.stage_b_status = 'completed'
+                     AND evaluations.stage_a_score >= $1
+                   ORDER BY evaluations.stage_a_score DESC,
+                            jobs.discovered_at DESC, jobs.id DESC
+                   LIMIT $2""",
+                min_score,
+                limit,
+            )
+        return [_evaluation_from_record(r) for r in rows]
+
+    async def query_jobs_view(self, query: JobsViewQuery) -> JobsViewPage:
+        """Run the filtered, paginated Phase 8 jobs view query.
+
+        One SELECT over jobs LEFT JOIN evaluations LEFT JOIN job_status for
+        the active tab's rows (ordered per ``query.sort``, bounded by
+        limit/offset), plus the active tab's total and a one-row per-tab
+        count aggregate. All request filters apply to the rows, the total,
+        and every tab_counts bucket alike, so tab_counts[t] equals the total
+        of re-running the same request with tab=t.
+
+        Args:
+            query: Tab, filters, sort, and pagination window.
+
+        Returns:
+            Bounded jobs view page.
+        """
+        shared, params = _jobs_view_filters(query)
+        where = " AND ".join([_JOBS_VIEW_TAB_PREDICATES[query.tab], *shared])
+        shared_where = " AND ".join(shared) if shared else "TRUE"
+        columns = _jobs_view_columns(include_jd_text=query.include_jd_text)
+        rows_sql = (
+            f"SELECT {columns} {_JOBS_VIEW_FROM} WHERE {where}"
+            f" ORDER BY {_JOBS_VIEW_SORT_SQL[query.sort]}"
+            f" LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}"
+        )
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(rows_sql, *params, query.limit, query.offset)
+            total = len(rows)
+            if query.include_total:
+                total = await self._count(
+                    conn,
+                    f"SELECT COUNT(*) {_JOBS_VIEW_FROM} WHERE {where}",
+                    *params,
+                )
+            counts_row = None
+            if query.include_counts:
+                counts_row = await conn.fetchrow(
+                    _jobs_view_counts_sql(shared_where), *params
+                )
+        return JobsViewPage(
+            rows=[_jobs_view_row_from_record(r) for r in rows],
+            total=total,
+            tab_counts=(
+                {tab: int(counts_row[tab]) for tab in VALID_TABS}
+                if counts_row is not None
+                else {}
+            ),
+        )
+
+    async def list_twin_rows_by_status(
+        self,
+        keys: Sequence[tuple[str, str]],
+        *,
+        statuses: Sequence[str],
+        limit: int,
+        include_jd_text: bool = True,
+    ) -> list[JobsViewRow]:
+        """List view rows in the given statuses for the given twin keys.
+
+        Feeds the display fold (plan D9): the tab-filtered jobs-view corpus
+        never contains out-of-tab siblings, so the fold pulls them in
+        explicitly (e.g. the in-flight ``applied`` twin of a queue row). The
+        ``<> ''`` guards are NULL-safe, so blank-norm rows never match —
+        mirroring ``list_twin_statuses``.
+
+        Args:
+            keys: Non-blank ``(company_norm, title_norm)`` cluster keys.
+            statuses: Workflow statuses to keep.
+            limit: Maximum rows returned.
+
+        Returns:
+            Matching view rows, newest discovered first.
+        """
+        if not keys or not statuses:
+            return []
+        columns = _jobs_view_columns(include_jd_text=include_jd_text)
+        sql = (
+            f"SELECT {columns} {_JOBS_VIEW_FROM}"
+            " WHERE EXISTS (SELECT 1 FROM unnest($1::text[], $2::text[])"
+            "   AS twin_keys(company_norm, title_norm)"
+            "   WHERE (twin_keys.company_norm='__external_identity__' AND jobs.external_identity=twin_keys.title_norm)"
+            " OR (twin_keys.company_norm='__external_identity__' AND jobs.platform='jobright' AND twin_keys.title_norm='jobright:' || jobs.canonical_id)"
+            " OR (twin_keys.company_norm='__display_title__' AND jobs.title_norm=twin_keys.title_norm)"
+            " OR (jobs.external_identity IS NULL AND jobs.company_norm=twin_keys.company_norm AND jobs.title_norm=twin_keys.title_norm)"
+            ") AND job_status.status = ANY($3::text[])"
+            "   AND (jobs.external_identity IS NOT NULL OR (jobs.company_norm <> '' AND jobs.title_norm <> ''))"
+            " ORDER BY jobs.discovered_at DESC, jobs.id DESC"
+            " LIMIT $4"
+        )
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                sql,
+                [key[0] for key in keys],
+                [key[1] for key in keys],
+                list(statuses),
+                limit,
+            )
+        return [_jobs_view_row_from_record(r) for r in rows]
+
+    async def load_display_bodies(self, job_ids: Sequence[str]) -> dict[str, str]:
+        """Load only bodies whose lightweight rows may be display duplicates.
+
+        Args:
+            job_ids: Source posting IDs whose description bodies are required.
+
+        Returns:
+            Available nonempty description bodies keyed by source posting ID.
+        """
+        if not job_ids:
+            return {}
+        async with self._get_pool().acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT id,jd_text FROM jobs WHERE id=ANY($1::bigint[])",
+                [int(job_id) for job_id in job_ids],
+            )
+        return {str(row["id"]): row["jd_text"] for row in rows if row["jd_text"]}
+
+    async def list_twin_statuses(self, job_id: str) -> list[TwinStatusRow]:
+        """List known posting aliases at the same nonblank location.
+
+        The job itself is excluded. Blank/NULL norms never cluster (the
+        ``<> ''`` guards are NULL-safe: NULL comparisons are not true), so a
+        blank-norm job has no twins — mirroring ``expand_twin_ids``.
+
+        Args:
+            job_id: Store-assigned identity of the detail job.
+
+        Returns:
+            Twin rows (platform, url, current status), ordered by job id.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT twin.id, twin.platform, twin.url, job_status.status,
+                          twin.location, jobs.location AS source_location
+                   FROM jobs
+                   JOIN jobs twin
+                     ON jobs.external_identity IS NOT NULL
+                     AND jobs.external_identity<>''
+                     AND twin.external_identity=jobs.external_identity
+                    AND twin.id <> jobs.id
+                   LEFT JOIN job_status ON job_status.job_id = twin.id
+                   WHERE jobs.id = $1
+                   ORDER BY twin.id""",
+                int(job_id),
+            )
+        return [
+            TwinStatusRow(
+                job_id=str(r["id"]),
+                platform=r["platform"],
+                url=r["url"],
+                status=r["status"],
+            )
+            for r in rows
+            if posting_location(r["source_location"])
+            and posting_location(r["location"])
+            == posting_location(r["source_location"])
+        ]
+
+    async def save_ml_gate_result(self, job_id: str, result: MLGateResult) -> None:
+        """Persist ML gate decision and features.
+
+        Args:
+            job_id: Store-assigned identity.
+            result: Gate decision with features.
+        """
+        domain_tags = json.dumps(result.domain_tags) if result.domain_tags else None
+        tech_required = (
+            json.dumps(result.tech_required) if result.tech_required else None
+        )
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """UPDATE jobs SET
+                       ml_gate_score = $1, ml_gate_result = $2,
+                       ml_gate_fail_reason = $3, ml_gate_at = now(),
+                       ml_gate_version = $4, is_swe_role = $5,
+                       seniority_level = $6, degree_required = $7,
+                       clearance_required = $8, school_restricted = $9,
+                       yoe_min = $10, domain_tags = $11,
+                       tech_required = $12, role_type = $13
+                   WHERE id = $14""",
+                result.score,
+                result.result,
+                result.fail_reason,
+                result.version,
+                result.is_swe_role,
+                result.seniority_level,
+                result.degree_required,
+                result.clearance_required,
+                result.school_restricted,
+                result.yoe_min,
+                domain_tags,
+                tech_required,
+                result.role_type,
+                int(job_id),
+            )
+
+    # ------------------------------------------------------------------
+    # Pipeline runs
+    # ------------------------------------------------------------------
+
+    async def record_pipeline_run(self, run: PipelineRun) -> None:
+        """Persist pipeline run counters.
+
+        Args:
+            run: Pipeline run.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO pipeline_runs (
+                       run_id, started_at, source, status, jobs_discovered,
+                       jobs_inserted, jobs_updated, jobs_filtered,
+                       jobs_ml_gated, jobs_seniority_filtered,
+                       jobs_gate_passed, stage_a_scored, stage_b_scored,
+                       jobs_scored, total_llm_cost_usd, errors, finished_at,
+                       failure_code, failure_message, failed_stage,
+                       failed_source, last_progress_at, restart_count,
+                       restarted_by_run_id, scan_stats_json, scan_progress_json,
+                       verdict_counts_json
+                   ) VALUES (
+                       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
+                       $18,$19,$20,$21,$22,$23,$24,$25::jsonb,$26::jsonb,
+                       $27::jsonb
+                   )""",
+                run.run_id,
+                run.started_at,
+                run.source,
+                run.status,
+                run.jobs_discovered,
+                run.jobs_inserted,
+                run.jobs_updated,
+                run.jobs_filtered,
+                run.jobs_ml_gated,
+                run.jobs_seniority_filtered,
+                run.jobs_gate_passed,
+                run.stage_a_scored,
+                run.stage_b_scored,
+                run.jobs_scored,
+                run.total_llm_cost_usd,
+                run.errors,
+                run.finished_at,
+                run.failure_code,
+                run.failure_message,
+                run.failed_stage,
+                run.failed_source,
+                run.last_progress_at,
+                run.restart_count,
+                run.restarted_by_run_id,
+                dump_scan_stats(run.scan_stats),
+                json.dumps(run.scan_progress),
+                json.dumps(run.verdict_counts)
+                if run.verdict_counts is not None
+                else None,
+            )
+
+    async def get_pipeline_run(self, run_id: str) -> PipelineRun | None:
+        """Load a pipeline run by identity.
+
+        Args:
+            run_id: Run identity.
+
+        Returns:
+            Pipeline run if found, else None.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM pipeline_runs WHERE run_id = $1",
+                run_id,
+            )
+        return _pipeline_run_from_record(row) if row is not None else None
+
+    async def list_pipeline_runs(
+        self,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        days: int | None = None,
+    ) -> tuple[list[PipelineRun], int]:
+        """List pipeline runs, newest first, with the matching total.
+
+        Args:
+            limit: Maximum runs returned.
+            offset: Runs to skip before the returned window.
+            days: Optional look-back window; only runs started within the
+                last ``days`` days are listed and counted.
+
+        Returns:
+            Tuple of (runs ordered by started_at DESC with run_id DESC as a
+            deterministic tiebreak, total count of runs matching ``days``
+            ignoring limit/offset).
+        """
+        # Filter params first, LIMIT/OFFSET appended last, so the one WHERE
+        # fragment serves both queries with no hand-numbered placeholders.
+        params: list[int] = []
+        where = ""
+        if days is not None:
+            params.append(days)
+            where = f"WHERE started_at >= now() - make_interval(days => ${len(params)})"
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            total = await self._count(
+                conn, f"SELECT COUNT(*) FROM pipeline_runs {where}", *params
+            )
+            rows = await conn.fetch(
+                f"""SELECT * FROM pipeline_runs
+                   {where}
+                   ORDER BY started_at DESC, run_id DESC
+                   LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}""",
+                *params,
+                limit,
+                offset,
+            )
+        return [_pipeline_run_from_record(r) for r in rows], total
+
+    async def get_stage_b_run_progress(
+        self, run_id: str, started_at: datetime
+    ) -> tuple[int, int]:
+        """Reconstruct live Stage B progress for a separately owned worker.
+
+        Args:
+            run_id: Active evaluation run identity.
+            started_at: Lower timestamp bound for claims owned by the run.
+
+        Returns:
+            Processed count and reconstructed total Stage B count.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """SELECT
+                    (SELECT COUNT(DISTINCT u.job_id)
+                       FROM llm_usage AS u
+                       JOIN evaluations AS done ON done.job_id=u.job_id
+                      WHERE u.run_id=$1 AND u.stage='b'
+                        AND done.stage_b_status IN ('completed','error')) AS processed,
+                    (SELECT COUNT(*)
+                       FROM evaluations AS pending
+                      WHERE pending.stage_b_status='in_progress'
+                        AND pending.stage_b_verdict IS NULL
+                        AND pending.updated_at >= $2) AS remaining""",
+                run_id,
+                started_at,
+            )
+        processed = int(row["processed"])
+        return processed, processed + int(row["remaining"])
+
+    async def get_new_job_source_counts(self, run_id: str) -> dict[str, int]:
+        """Count first inserts during a scan, grouped by configured source.
+
+        Args:
+            run_id: Historical or active pipeline run identity.
+
+        Returns:
+            Exact first-insert counts grouped by configured source.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"SELECT j.platform, COUNT(*) AS n{_RUN_FIRST_INSERTS} GROUP BY j.platform",
+                run_id,
+            )
+        return configured_source_counts(
+            (str(row["platform"]), int(row["n"])) for row in rows
+        )
+
+    async def get_new_jobs(self, run_id: str, *, limit: int) -> RunNewJobsPage:
+        """List one scan's first inserts, oldest first, with the full total.
+
+        Args:
+            run_id: Historical or active pipeline run identity.
+            limit: Maximum postings returned.
+
+        Returns:
+            Bounded postings and the unbounded first-insert total.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"""SELECT j.id, j.platform, j.title, j.company, j.location, j.url,
+                           h.changed_at, COUNT(*) OVER () AS total
+                    {_RUN_FIRST_INSERTS}
+                    ORDER BY h.changed_at, h.id
+                    LIMIT $2""",
+                run_id,
+                limit,
+            )
+        jobs = [
+            RunNewJob(
+                job_id=str(row["id"]),
+                platform=row["platform"],
+                title=row["title"],
+                company=row["company"],
+                location=row["location"],
+                url=row["url"],
+                first_seen_at=row["changed_at"],
+            )
+            for row in rows
+        ]
+        return RunNewJobsPage(jobs=jobs, total=int(rows[0]["total"]) if rows else 0)
+
+    async def get_historical_run_verdict_counts(
+        self, run_id: str
+    ) -> dict[str, int] | None:
+        """Count unchanged Stage B rows first completed inside an old run.
+
+        Args:
+            run_id: Run identifier used to bound historical completed reviews.
+
+        Returns:
+            Reconstructed verdict counts, or None when the run cannot be reconstructed
+                safely.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """SELECT r.stage_b_scored AS expected,
+                          COUNT(e.job_id) AS actual,
+                          COUNT(e.job_id) FILTER (WHERE
+                              e.stage_b_status IS DISTINCT FROM 'completed'
+                              OR e.stage_b_verdict IS NULL
+                              OR e.stage_b_verdict NOT IN ('apply','consider','skip')
+                              OR e.updated_at > r.finished_at
+                          ) AS changed,
+                          COUNT(e.job_id) FILTER (WHERE e.stage_b_verdict='apply') AS apply_count,
+                          COUNT(e.job_id) FILTER (WHERE e.stage_b_verdict='consider') AS consider_count,
+                          COUNT(e.job_id) FILTER (WHERE e.stage_b_verdict='skip') AS skip_count
+                   FROM pipeline_runs AS r
+                   LEFT JOIN evaluations AS e
+                     ON e.stage_b_at >= r.started_at
+                    AND e.stage_b_at <= r.finished_at
+                   WHERE r.run_id=$1 AND r.source='evaluate'
+                     AND r.finished_at IS NOT NULL
+                   GROUP BY r.run_id""",
+                run_id,
+            )
+        if row is None or row["actual"] != row["expected"] or row["changed"]:
+            return None
+        return {
+            "apply": int(row["apply_count"]),
+            "consider": int(row["consider_count"]),
+            "skip": int(row["skip_count"]),
+        }
+
+    async def list_retryable_run_error_job_ids(self, run_id: str) -> list[str]:
+        """Return current retryable scoring errors attributable to one run.
+
+        Args:
+            run_id: Completed evaluation run identity.
+
+        Returns:
+            Current failed job IDs written during that run and below retry cap.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT job_id FROM (
+                    SELECT e.job_id, e.updated_at
+                    FROM pipeline_runs AS r
+                    JOIN evaluations AS e
+                      ON e.updated_at >= r.started_at
+                     AND e.updated_at <= r.finished_at
+                    WHERE r.run_id=$1
+                      AND r.source='evaluate'
+                      AND r.finished_at IS NOT NULL
+                      AND (
+                        (e.stage_a_status='error'
+                         AND e.stage_a_error_count < $2)
+                        OR (e.stage_b_status='error'
+                            AND e.stage_b_error_count < $2)
+                      )
+                    UNION ALL
+                    SELECT e.source_job_id AS job_id, e.updated_at
+                    FROM pipeline_runs AS r
+                    JOIN real_job_evaluations AS e
+                      ON e.updated_at >= r.started_at
+                     AND e.updated_at <= r.finished_at
+                    WHERE r.run_id=$1
+                      AND r.source='evaluate'
+                      AND r.finished_at IS NOT NULL
+                      AND (
+                        (e.stage_a_status='error'
+                         AND e.stage_a_error_count < $2)
+                        OR (e.stage_b_status='error'
+                            AND e.stage_b_error_count < $2)
+                      )
+                ) AS retry_errors
+                GROUP BY job_id ORDER BY MIN(updated_at), job_id""",
+                run_id,
+                MAX_STAGE_RETRIES,
+            )
+        return [str(row["job_id"]) for row in rows]
+
+    async def override_application_backfill_stop(
+        self, run_id: str, *, failure_code: str
+    ) -> bool:
+        """Correct a late explicit cancellation without touching lease ownership.
+
+        Args:
+            run_id: Exact finalized historical attempt identity.
+            failure_code: Explicit user Stop or shutdown reason.
+
+        Returns:
+            True for a failed historical priority row, or a user Stop overriding
+            its interrupted reason; shutdown cannot override a user Stop.
+
+        Raises:
+            ValueError: If the explicit reason is neither Stop nor shutdown.
+        """
+        if failure_code not in {"user_stopped", "interrupted"}:
+            raise ValueError("Invalid explicit backfill stop reason")
+        message = (
+            "Run stopped by user"
+            if failure_code == "user_stopped"
+            else "Run interrupted by service shutdown"
+        )
+        async with self._get_pool().acquire() as connection:
+            result = await connection.execute(
+                """UPDATE pipeline_runs SET failure_code=$1, failure_message=$2
+                   WHERE run_id=$3 AND source='application-backfill'
+                     AND status='failed' AND (failure_code='foreground_priority'
+                       OR ($1='user_stopped' AND failure_code='interrupted'))""",
+                failure_code,
+                message,
+                run_id,
+            )
+        return bool(result == "UPDATE 1")
+
+    async def update_pipeline_run_status(
+        self,
+        run: PipelineRun,
+    ) -> None:
+        """Persist a pipeline run's current counters, status, and finish time.
+
+        Args:
+            run: Pipeline run with accumulated counters to persist.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """UPDATE pipeline_runs
+                   SET status = $1, finished_at = $2,
+                       jobs_discovered = $3, jobs_inserted = $4,
+                       jobs_updated = $5, jobs_filtered = $6,
+                       jobs_ml_gated = $7, jobs_seniority_filtered = $8,
+                       jobs_gate_passed = $9, stage_a_scored = $10,
+                       stage_b_scored = $11, jobs_scored = $12,
+                       total_llm_cost_usd = $13, errors = $14,
+                       failure_code = $15, failure_message = $16,
+                       failed_stage = $17, failed_source = $18,
+                       last_progress_at = $19, restart_count = $20,
+                       restarted_by_run_id = $21,
+                       scan_stats_json = $22::jsonb, scan_progress_json = $23::jsonb,
+                       verdict_counts_json = $24::jsonb
+                   WHERE run_id = $25""",
+                run.status,
+                run.finished_at,
+                run.jobs_discovered,
+                run.jobs_inserted,
+                run.jobs_updated,
+                run.jobs_filtered,
+                run.jobs_ml_gated,
+                run.jobs_seniority_filtered,
+                run.jobs_gate_passed,
+                run.stage_a_scored,
+                run.stage_b_scored,
+                run.jobs_scored,
+                run.total_llm_cost_usd,
+                run.errors,
+                run.failure_code,
+                run.failure_message,
+                run.failed_stage,
+                run.failed_source,
+                run.last_progress_at,
+                run.restart_count,
+                run.restarted_by_run_id,
+                dump_scan_stats(run.scan_stats),
+                json.dumps(run.scan_progress),
+                json.dumps(run.verdict_counts)
+                if run.verdict_counts is not None
+                else None,
+                run.run_id,
+            )
+
+    async def record_step_timing(self, timing: StepTiming) -> None:
+        """Persist a single step timing record.
+
+        Args:
+            timing: Step timing to persist.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO step_timings
+                       (run_id, step_type, step_name, elapsed_ms, is_error)
+                   VALUES ($1, $2, $3, $4, $5)""",
+                timing.run_id,
+                timing.step_type,
+                timing.step_name,
+                timing.elapsed_ms,
+                timing.is_error,
+            )
+
+    async def record_step_timings(self, timings: list[StepTiming]) -> None:
+        """Persist multiple step timing records in a single batch.
+
+        Args:
+            timings: Step timings to persist.
+        """
+        if not timings:
+            return
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            await conn.executemany(
+                """INSERT INTO step_timings
+                       (run_id, step_type, step_name, elapsed_ms, is_error)
+                   VALUES ($1, $2, $3, $4, $5)""",
+                [
+                    (t.run_id, t.step_type, t.step_name, t.elapsed_ms, t.is_error)
+                    for t in timings
+                ],
+            )
+
+    # ------------------------------------------------------------------
+    # Performance queries
+    # ------------------------------------------------------------------
+
+    async def get_performance_overview(self, window_days: int) -> PerformanceOverview:
+        """Aggregate performance metrics with period-over-period deltas.
+
+        Uses two equal-sized windows (current and previous) to compute
+        deltas. Falls back to None when no previous-window data exists.
+
+        Args:
+            window_days: Number of days in the current window.
+
+        Returns:
+            Overview with averages, totals, and deltas.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """WITH bounds AS (
+                       SELECT now() - make_interval(days => $1) AS cur_start,
+                              now() - make_interval(days => $1 * 2) AS prev_start
+                   ),
+                   cur AS (
+                       SELECT
+                           COALESCE(AVG(EXTRACT(EPOCH FROM (finished_at - started_at)) * 1000)
+                               FILTER (WHERE status = 'succeeded'
+                                   AND source NOT ILIKE '%%evaluat%%'), 0) AS avg_scan,
+                           COALESCE(AVG(EXTRACT(EPOCH FROM (finished_at - started_at)) * 1000)
+                               FILTER (WHERE status = 'succeeded'
+                                   AND source ILIKE '%%evaluat%%'), 0) AS avg_eval,
+                           COALESCE(SUM(total_llm_cost_usd), 0) AS cost,
+                           CASE WHEN COUNT(*) > 0
+                               THEN COUNT(*) FILTER (WHERE errors > 0 OR status = 'failed')::float / COUNT(*)
+                               ELSE 0 END AS err_rate
+                       FROM pipeline_runs, bounds
+                       WHERE started_at >= bounds.cur_start
+                         AND finished_at IS NOT NULL
+                   ),
+                   prev AS (
+                       SELECT
+                           COALESCE(AVG(EXTRACT(EPOCH FROM (finished_at - started_at)) * 1000)
+                               FILTER (WHERE status = 'succeeded'
+                                   AND source NOT ILIKE '%%evaluat%%'), 0) AS avg_scan,
+                           COALESCE(AVG(EXTRACT(EPOCH FROM (finished_at - started_at)) * 1000)
+                               FILTER (WHERE status = 'succeeded'
+                                   AND source ILIKE '%%evaluat%%'), 0) AS avg_eval,
+                           COALESCE(SUM(total_llm_cost_usd), 0) AS cost,
+                           CASE WHEN COUNT(*) > 0
+                               THEN COUNT(*) FILTER (WHERE errors > 0 OR status = 'failed')::float / COUNT(*)
+                               ELSE 0 END AS err_rate,
+                           COUNT(*) AS cnt
+                       FROM pipeline_runs, bounds
+                       WHERE started_at >= bounds.prev_start
+                         AND started_at < bounds.cur_start
+                         AND finished_at IS NOT NULL
+                   )
+                   SELECT cur.avg_scan, cur.avg_eval, cur.cost, cur.err_rate,
+                          CASE WHEN prev.cnt > 0 AND prev.avg_scan > 0
+                              THEN (cur.avg_scan - prev.avg_scan) / prev.avg_scan
+                              ELSE NULL END AS scan_delta,
+                          CASE WHEN prev.cnt > 0 AND prev.avg_eval > 0
+                              THEN (cur.avg_eval - prev.avg_eval) / prev.avg_eval
+                              ELSE NULL END AS eval_delta,
+                          CASE WHEN prev.cnt > 0 AND prev.cost > 0
+                              THEN (cur.cost - prev.cost) / prev.cost
+                              ELSE NULL END AS cost_delta,
+                          CASE WHEN prev.cnt > 0 AND prev.err_rate > 0
+                              THEN (cur.err_rate - prev.err_rate) / prev.err_rate
+                              ELSE NULL END AS err_delta
+                   FROM cur, prev""",
+                window_days,
+            )
+        assert row is not None
+        return PerformanceOverview(
+            avg_scan_duration_ms=float(row["avg_scan"]),
+            avg_eval_duration_ms=float(row["avg_eval"]),
+            total_llm_cost_usd=float(row["cost"]),
+            error_rate=float(row["err_rate"]),
+            scan_duration_delta=_opt_float(row["scan_delta"]),
+            eval_duration_delta=_opt_float(row["eval_delta"]),
+            cost_delta=_opt_float(row["cost_delta"]),
+            error_rate_delta=_opt_float(row["err_delta"]),
+        )
+
+    async def get_step_timings(
+        self, window_days: int, step_type: str | None = None
+    ) -> list[StepTimingSeries]:
+        """Fetch step timing rows within the window.
+
+        Args:
+            window_days: Look-back window in days.
+            step_type: Optional filter on step_type.
+
+        Returns:
+            Step timings ordered by created_at ascending, id as tiebreaker.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            if step_type is not None:
+                rows = await conn.fetch(
+                    """SELECT step_type, step_name, run_id,
+                              elapsed_ms, is_error, created_at
+                       FROM step_timings
+                       WHERE created_at >= now() - make_interval(days => $1)
+                         AND step_type = $2
+                       ORDER BY created_at, id""",
+                    window_days,
+                    step_type,
+                )
+            else:
+                rows = await conn.fetch(
+                    """SELECT step_type, step_name, run_id,
+                              elapsed_ms, is_error, created_at
+                       FROM step_timings
+                       WHERE created_at >= now() - make_interval(days => $1)
+                       ORDER BY created_at, id""",
+                    window_days,
+                )
+        return [
+            StepTimingSeries(
+                step_type=r["step_type"],
+                step_name=r["step_name"],
+                run_id=r["run_id"],
+                elapsed_ms=float(r["elapsed_ms"]),
+                is_error=r["is_error"],
+                created_at=r["created_at"],
+            )
+            for r in rows
+        ]
+
+    async def get_llm_daily_stats(self, window_days: int) -> list[LLMDailyStats]:
+        """Daily LLM latency percentiles and token averages.
+
+        Args:
+            window_days: Look-back window in days.
+
+        Returns:
+            Daily stats ordered by day ascending.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT date(timestamp) AS day, model, stage,
+                          percentile_cont(0.5) WITHIN GROUP
+                              (ORDER BY latency_ms) AS p50,
+                          percentile_cont(0.95) WITHIN GROUP
+                              (ORDER BY latency_ms) AS p95,
+                          count(*) AS call_count,
+                          avg(input_tokens) AS avg_in,
+                          avg(output_tokens) AS avg_out
+                   FROM llm_usage
+                   WHERE timestamp >= now() - make_interval(days => $1)
+                   GROUP BY 1, 2, 3
+                   ORDER BY 1, 2, 3""",
+                window_days,
+            )
+        return [
+            LLMDailyStats(
+                day=r["day"].isoformat(),
+                model=str(r["model"]),
+                stage=r["stage"],
+                p50_latency_ms=float(r["p50"]),
+                p95_latency_ms=float(r["p95"]),
+                call_count=int(r["call_count"]),
+                avg_input_tokens=float(r["avg_in"]),
+                avg_output_tokens=float(r["avg_out"]),
+            )
+            for r in rows
+        ]
+
+    async def get_funnel_stats(self, window_days: int) -> list[FunnelStats]:
+        """Evaluation funnel snapshots from evaluate pipeline runs.
+
+        Only ``source = 'evaluate'`` runs contribute rows — scan runs carry
+        no funnel counters and would render all-zero funnels.
+        ``after_gate`` is the per-run gate-survivor counter; ``scored`` is
+        the count of jobs that actually received a score (capped below
+        ``after_gate`` by the Stage A limit, budget, and scoring errors).
+        ``after_filter`` adds back the gate-failed count and
+        ``total_candidates`` the hard-filtered count.
+
+        Args:
+            window_days: Look-back window in days.
+
+        Returns:
+            Funnel stats per evaluate run, newest first.
+        """
+        # jobs_gate_passed is the true gate-survivor count (Phase 9
+        # follow-up). Rows predating migration 0008 — and gate-disabled
+        # runs — have 0, so GREATEST falls back to the scored counters
+        # (stage_a_scored for stage a/both runs, stage_b_scored for
+        # stage-b-only runs), keeping the funnel monotone.
+        # jobs_scored is NOT used: it sums both stages and double-counts.
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT run_id,
+                          jobs_filtered + jobs_ml_gated + jobs_seniority_filtered
+                              + GREATEST(jobs_gate_passed, stage_a_scored,
+                                         stage_b_scored)
+                              AS total_candidates,
+                          jobs_ml_gated + jobs_seniority_filtered
+                              + GREATEST(jobs_gate_passed, stage_a_scored,
+                                         stage_b_scored)
+                              AS after_filter,
+                          GREATEST(jobs_gate_passed, stage_a_scored,
+                                   stage_b_scored) AS after_gate,
+                          GREATEST(stage_a_scored, stage_b_scored) AS scored
+                   FROM pipeline_runs
+                   WHERE started_at >= now() - make_interval(days => $1)
+                     AND source = 'evaluate'
+                   ORDER BY started_at DESC""",
+                window_days,
+            )
+        return [
+            FunnelStats(
+                run_id=r["run_id"],
+                total_candidates=r["total_candidates"],
+                after_filter=r["after_filter"],
+                after_gate=r["after_gate"],
+                scored=r["scored"],
+            )
+            for r in rows
+        ]
+
+    async def insights_overview(self, *, window_days: int | None) -> InsightsOverview:
+        """Aggregate the insights overview.
+
+        The window defines the discovery-date cohort for totals,
+        distributions, and daily UTC event buckets over
+        ``[now - window_days, now]``, or all time through now when None.
+
+        Args:
+            window_days: Discovery-cohort and daily-series window (validated),
+                or None for all time.
+
+        Returns:
+            Insights overview aggregate.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            totals = await conn.fetchrow(_INSIGHTS_TOTALS_SQL, window_days)
+            verdict_rows = await conn.fetch(_INSIGHTS_VERDICTS_SQL, window_days)
+            decision_rows = await conn.fetch(_INSIGHTS_DECISIONS_SQL, window_days)
+            source_rows = await conn.fetch(_INSIGHTS_APPLIED_SOURCES_SQL, window_days)
+            discovered = await conn.fetch(_INSIGHTS_DISCOVERED_DAILY_SQL, window_days)
+            evaluated = await conn.fetch(_INSIGHTS_EVALUATED_DAILY_SQL, window_days)
+            applied = await conn.fetch(_INSIGHTS_APPLIED_DAILY_SQL, window_days)
+        return InsightsOverview(
+            window_days=window_days,
+            total_jobs=int(totals["total_jobs"]),
+            ml_gate_passed_jobs=(
+                None
+                if totals["ml_gate_passed_jobs"] is None
+                else int(totals["ml_gate_passed_jobs"])
+            ),
+            evaluated_jobs=int(totals["evaluated_jobs"]),
+            detailed_reviewed_jobs=int(totals["detailed_reviewed_jobs"]),
+            applied_jobs=int(totals["applied_jobs"]),
+            verdict_distribution={r["bucket"]: int(r["n"]) for r in verdict_rows},
+            decision_distribution={r["bucket"]: int(r["n"]) for r in decision_rows},
+            daily=_merge_insights_days(discovered, evaluated, applied),
+            applied_by_source={r["bucket"]: int(r["n"]) for r in source_rows},
+        )
+
+    # ------------------------------------------------------------------
+    # Status management
+    # ------------------------------------------------------------------
+
+    async def _transition_status_in_tx(
+        self,
+        conn: asyncpg.Connection,
+        request: TransitionRequest,
+    ) -> str:
+        """Write status transition inside an existing transaction.
+
+        The caller must hold a transaction via ``async with conn.transaction():``.
+
+        Args:
+            conn: Active asyncpg connection (transaction already open).
+            request: Transition parameters unpacked inside this method.
+
+        Returns:
+            The new status string.
+
+        Raises:
+            ValueError: If the transition is invalid.
+            KeyError: If the job has no status row.
+        """
+        job_id = request.job_id
+        new_status = request.new_status
+        reason = request.reason
+        resume_variant = request.resume_variant
+        force = request.force
+        i_mean_it = request.i_mean_it
+        followup_grace_days = request.followup_grace_days
+        row = await conn.fetchrow(
+            "SELECT status FROM job_status WHERE job_id = $1",
+            int(job_id),
+        )
+        if row is None:
+            raise KeyError(f"no status row for job_id={job_id}")
+        old_status: str = row["status"]
+        if new_status == "applied":
+            application = await conn.fetchrow(
+                "SELECT 1 FROM applied WHERE job_id = $1", int(job_id)
+            )
+            if application is None:
+                raise ValueError(
+                    "A recorded application with confirmation evidence is required "
+                    "before setting applied status."
+                )
+
+        err = validate_transition(
+            old_status, new_status, force=force, i_mean_it=i_mean_it
+        )
+        if err is not None:
+            raise ValueError(err)
+
+        # next_followup_at: set on transition to applied, cleared when leaving
+        # the active-application states, untouched between interview substages.
+        followup_val: datetime | None = None
+        set_followup = new_status not in ACTIVE_APPLICATION_STATUSES
+        if new_status == "applied":
+            set_followup = True
+            followup_val = datetime.now(UTC) + timedelta(days=followup_grace_days)
+
+        reason_tag = reason
+        if force and reason_tag is None:
+            reason_tag = "FORCE"
+
+        await conn.execute(
+            """UPDATE job_status
+               SET status = $1,
+                   next_followup_at = CASE WHEN $2 THEN $3 ELSE next_followup_at END,
+                   resume_variant = COALESCE($4, resume_variant),
+                   last_status_change_at = now()
+               WHERE job_id = $5""",
+            new_status,
+            set_followup,
+            followup_val,
+            resume_variant,
+            int(job_id),
+        )
+        await conn.execute(
+            """INSERT INTO job_status_history
+                   (job_id, from_status, to_status, reason,
+                    resume_variant_at_change)
+               VALUES ($1, $2, $3, $4, $5)""",
+            int(job_id),
+            old_status,
+            new_status,
+            reason_tag,
+            resume_variant,
+        )
+        return new_status
+
+    async def transition_status(self, request: TransitionRequest) -> str:
+        """Transition a job's status with validation and history.
+
+        Args:
+            request: Transition parameters.
+
+        Returns:
+            The new status string.
+
+        Raises:
+            ValueError: If the transition is invalid.
+            KeyError: If the job has no status row.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                return await self._transition_status_in_tx(conn, request)
+
+    async def get_status(self, job_id: str) -> StatusInfo | None:
+        """Get current status for a job.
+
+        Args:
+            job_id: Store-assigned identity.
+
+        Returns:
+            Status info if found, else None.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """SELECT s.job_id, s.status, s.next_followup_at,
+                          s.resume_variant, s.notes, s.last_status_change_at,
+                          j.company, j.title
+                   FROM job_status s
+                   JOIN jobs j ON j.id = s.job_id
+                   WHERE s.job_id = $1""",
+                int(job_id),
+            )
+        return _status_info_from_record(row) if row else None
+
+    async def restore_from_archived(self, job_id: str) -> str:
+        """Restore archived job to pre-archive status.
+
+        Reads history and writes the restore transition all inside one
+        transaction.
+
+        Args:
+            job_id: Store-assigned identity.
+
+        Returns:
+            Restored status string.
+
+        Raises:
+            ValueError: If job is not archived or no prior status exists.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    "SELECT status FROM job_status WHERE job_id = $1",
+                    int(job_id),
+                )
+                if row is None or row["status"] != "archived":
+                    current = row["status"] if row else "unknown"
+                    raise ValueError(f"job {job_id} is not archived (status={current})")
+
+                hist = await conn.fetchrow(
+                    # Order by the append-only id, not changed_at: the wall
+                    # clock can invert two transitions written close together
+                    # (see get_status_history), which would restore to the
+                    # wrong target.
+                    """SELECT to_status FROM job_status_history
+                       WHERE job_id = $1 AND to_status != 'archived'
+                       ORDER BY id DESC
+                       LIMIT 1""",
+                    int(job_id),
+                )
+                if hist is None:
+                    raise ValueError(f"no non-archived history for job_id={job_id}")
+                target_status: str = hist["to_status"]
+
+                return await self._transition_status_in_tx(
+                    conn,
+                    TransitionRequest(
+                        job_id=job_id,
+                        new_status=target_status,
+                        reason="restore_from_archived",
+                        force=True,
+                        i_mean_it=True,
+                    ),
+                )
+
+    async def auto_decay(
+        self,
+        *,
+        ghost_days: int = DEFAULT_GHOST_DAYS,
+        archive_ignored_days: int = DEFAULT_ARCHIVE_IGNORED_DAYS,
+    ) -> AutoDecayResult:
+        """Sweep stale jobs to ghosted/archived.
+
+        Args:
+            ghost_days: Days before ghosting.
+            archive_ignored_days: Days before archiving ignored.
+
+        Returns:
+            Counts of ghosted and archived jobs.
+        """
+        decay_list = sorted(DECAY_SOURCES)
+        decay_placeholders = ", ".join(f"${i}" for i in range(1, len(decay_list) + 1))
+        ghost_interval_param = f"${len(decay_list) + 1}"
+
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                ghost_rows = await conn.fetch(
+                    f"""SELECT job_id FROM job_status
+                        WHERE status IN ({decay_placeholders})
+                          AND last_status_change_at < now() - ({ghost_interval_param} || ' days')::interval""",
+                    *decay_list,
+                    str(ghost_days),
+                )
+                ghost_count = len(ghost_rows)
+                for row in ghost_rows:
+                    await self._transition_status_in_tx(
+                        conn,
+                        TransitionRequest(
+                            job_id=str(row["job_id"]),
+                            new_status="ghosted",
+                            reason="auto_decay",
+                            force=True,
+                        ),
+                    )
+
+                archive_rows = await conn.fetch(
+                    """SELECT job_id FROM job_status
+                       WHERE status = 'ignored'
+                         AND last_status_change_at < now() - ($1 || ' days')::interval""",
+                    str(archive_ignored_days),
+                )
+                archive_count = len(archive_rows)
+                for row in archive_rows:
+                    await self._transition_status_in_tx(
+                        conn,
+                        TransitionRequest(
+                            job_id=str(row["job_id"]),
+                            new_status="archived",
+                            reason="auto_decay",
+                            force=True,
+                        ),
+                    )
+
+        return AutoDecayResult(ghosted=ghost_count, archived=archive_count)
+
+    # ------------------------------------------------------------------
+    # StoreStatusMixin
+    # ------------------------------------------------------------------
+
+    async def list_statuses(
+        self, filters: StatusFilter | None = None
+    ) -> list[StatusInfo]:
+        """Query jobs by status with optional filters.
+
+        Args:
+            filters: Filter parameters unpacked inside this method.
+
+        Returns:
+            Matching status info records.
+        """
+        _f = filters or StatusFilter()
+        statuses = _f.statuses
+        days = _f.days
+        since = _f.since
+        no_response_days = _f.no_response_days
+        needs_followup = _f.needs_followup
+        notes_contain = _f.notes_contain
+        limit = _f.limit
+
+        clauses: list[str] = []
+        params: list[object] = []
+        param_idx = 0
+
+        if statuses:
+            sorted_statuses = sorted(statuses)
+            placeholders = ", ".join(
+                f"${param_idx + i + 1}" for i in range(len(sorted_statuses))
+            )
+            clauses.append(f"s.status IN ({placeholders})")
+            params.extend(sorted_statuses)
+            param_idx += len(sorted_statuses)
+
+        if days is not None:
+            param_idx += 1
+            clauses.append(
+                f"s.last_status_change_at >= now() - (${param_idx} || ' days')::interval"
+            )
+            params.append(str(days))
+
+        if since is not None:
+            param_idx += 1
+            clauses.append(f"s.last_status_change_at >= ${param_idx}")
+            params.append(since)
+
+        if no_response_days is not None:
+            clauses.append("s.status IN ('applied', 'interviewing')")
+            param_idx += 1
+            clauses.append(
+                f"s.last_status_change_at < now() - (${param_idx} || ' days')::interval"
+            )
+            params.append(str(no_response_days))
+
+        if needs_followup:
+            clauses.append("s.next_followup_at IS NOT NULL")
+            clauses.append("s.next_followup_at::date <= CURRENT_DATE")
+
+        if notes_contain:
+            param_idx += 1
+            clauses.append(f"s.notes ILIKE '%' || ${param_idx} || '%'")
+            params.append(notes_contain)
+
+        where = " AND ".join(clauses) if clauses else "1=1"
+        sql = f"""SELECT s.job_id, s.status, s.next_followup_at,
+                         s.resume_variant, s.notes, s.last_status_change_at,
+                         j.company, j.title
+                  FROM job_status s
+                  JOIN jobs j ON j.id = s.job_id
+                  WHERE {where}
+                  ORDER BY s.last_status_change_at DESC"""
+
+        if limit is not None:
+            param_idx += 1
+            sql += f" LIMIT ${param_idx}"
+            params.append(limit)
+
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(sql, *params)
+
+        return [_status_info_from_record(r) for r in rows]
+
+    async def append_note(self, *, job_id: str, text: str) -> bool:
+        """Append timestamped note, reset ghost clock.
+
+        Args:
+            job_id: Store-assigned job identity.
+            text: Note text to append.
+
+        Returns:
+            True if a job_status row was updated, False if none exists.
+        """
+        prefix = datetime.now(UTC).strftime("[%Y-%m-%d %H:%M] ")
+        line = prefix + text + "\n"
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            result = await conn.execute(
+                """UPDATE job_status
+                   SET notes = COALESCE(notes, '') || $1,
+                       last_status_change_at = now()
+                   WHERE job_id = $2""",
+                line,
+                int(job_id),
+            )
+        # asyncpg returns "UPDATE N" where N is the row count
+        return not result.endswith(" 0")
+
+    async def set_followup(self, *, job_id: str, at: datetime) -> bool:
+        """Set the next follow-up time for a job.
+
+        Args:
+            job_id: Store-assigned job identity.
+            at: When the next follow-up is due.
+
+        Returns:
+            True if a job_status row was updated, False if none exists.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            result = await conn.execute(
+                "UPDATE job_status SET next_followup_at = $1 WHERE job_id = $2",
+                at,
+                int(job_id),
+            )
+        # asyncpg returns "UPDATE N" where N is the row count
+        return not result.endswith(" 0")
+
+    async def workflow_attention(
+        self,
+        *,
+        auto_ghost_days: int = DEFAULT_GHOST_DAYS,
+        lookahead_days: int = 5,
+    ) -> WorkflowAttention:
+        """Three-bucket workflow attention report.
+
+        Args:
+            auto_ghost_days: Ghost threshold.
+            lookahead_days: Early warning window.
+
+        Returns:
+            Follow-up, interview prep, and going-ghosted lists.
+        """
+        _cols = """s.job_id, j.title, j.company, j.url,
+            s.status, s.last_status_change_at, s.next_followup_at, s.notes"""
+
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            # Bucket 1: follow_up_today
+            follow_rows = await conn.fetch(
+                f"""SELECT {_cols},
+                       EXTRACT(DAY FROM now() - s.next_followup_at)::integer AS days_since
+                   FROM job_status s JOIN jobs j ON j.id = s.job_id
+                   WHERE s.status IN ('applied','interviewing')
+                     AND s.next_followup_at IS NOT NULL
+                     AND s.next_followup_at::date <= CURRENT_DATE
+                   ORDER BY s.next_followup_at ASC""",
+            )
+            follow_up = [
+                _attention_item_from_record(r, "follow-up due") for r in follow_rows
+            ]
+
+            # Bucket 2: interview_prep — source from interview_rounds
+            # Jobs with upcoming scheduled rounds (bounded by lookahead window)
+            upcoming_rows = await conn.fetch(
+                f"""SELECT DISTINCT ON (s.job_id) {_cols},
+                       ir.scheduled_at AS round_scheduled,
+                       EXTRACT(DAY FROM now() - s.last_status_change_at)::integer
+                           AS days_since
+                   FROM job_status s
+                   JOIN jobs j ON j.id = s.job_id
+                   JOIN interview_rounds ir ON ir.job_id = s.job_id
+                   WHERE s.status = 'interviewing'
+                     AND ir.completed_at IS NULL
+                     AND ir.scheduled_at IS NOT NULL
+                     AND ir.scheduled_at <= now() + ($1 || ' days')::interval
+                   ORDER BY s.job_id, ir.scheduled_at ASC""",
+                str(lookahead_days),
+            )
+            interview = [
+                _attention_item_from_record(r, "interview prep") for r in upcoming_rows
+            ]
+            # Also include interviewing jobs with no upcoming round
+            unscheduled_rows = await conn.fetch(
+                f"""SELECT {_cols},
+                       EXTRACT(DAY FROM now() - s.last_status_change_at)::integer
+                           AS days_since
+                   FROM job_status s
+                   JOIN jobs j ON j.id = s.job_id
+                   WHERE s.status = 'interviewing'
+                     AND NOT EXISTS (
+                         SELECT 1 FROM interview_rounds ir
+                         WHERE ir.job_id = s.job_id
+                           AND ir.completed_at IS NULL
+                           AND ir.scheduled_at IS NOT NULL
+                     )
+                   ORDER BY s.last_status_change_at DESC""",
+            )
+            interview.extend(
+                _attention_item_from_record(r, "interviewing, unscheduled")
+                for r in unscheduled_rows
+            )
+
+            # Bucket 3: going_ghosted — every decay-eligible status, not just
+            # applied/interviewing, so substages warn before they are ghosted.
+            warn_days = auto_ghost_days - lookahead_days
+            ghosting_rows = await conn.fetch(
+                f"""SELECT {_cols},
+                       EXTRACT(DAY FROM now() - s.last_status_change_at)::integer AS days_since
+                   FROM job_status s JOIN jobs j ON j.id = s.job_id
+                   WHERE s.status = ANY($2)
+                     AND s.last_status_change_at < now() - ($1 || ' days')::interval
+                   ORDER BY s.last_status_change_at ASC""",
+                str(warn_days),
+                sorted(DECAY_SOURCES),
+            )
+            ghosting = [
+                _attention_item_from_record(r, "going silent") for r in ghosting_rows
+            ]
+
+        return WorkflowAttention(
+            follow_up_today=follow_up,
+            interview_prep=interview,
+            going_ghosted=ghosting,
+        )
+
+    async def compute_reapply_notice(
+        self,
+        *,
+        job_id: str,
+        lookback_days: int = 60,
+    ) -> str | None:
+        """Detect same-company active application.
+
+        Args:
+            job_id: Job to check.
+            lookback_days: How far back to look.
+
+        Returns:
+            Notice string if detected, else None.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            job_row = await conn.fetchrow(
+                "SELECT company, company_norm FROM jobs WHERE id = $1",
+                int(job_id),
+            )
+            if job_row is None:
+                return None
+
+            company_norm = job_row["company_norm"] or normalize_company(
+                job_row["company"]
+            )
+            if not company_norm:
+                return None
+
+            match = await conn.fetchrow(
+                """SELECT j.id, j.title, s.status
+                   FROM jobs j
+                   JOIN job_status s ON s.job_id = j.id
+                   WHERE (j.company_norm = $1 OR $1 = '')
+                     AND j.id != $2
+                     AND s.status = ANY($4)
+                     AND s.last_status_change_at >= now() - ($3 || ' days')::interval
+                   LIMIT 1""",
+                company_norm,
+                int(job_id),
+                str(lookback_days),
+                sorted(ACTIVE_APPLICATION_STATUSES),
+            )
+
+        if match is None:
+            return None
+        return (
+            f"Active application at same company: "
+            f"'{match['title']}' (job {match['id']}, status={match['status']})"
+        )
+
+    async def get_status_history(self, job_id: str) -> list[str]:
+        """Return to_status values from job_status_history, newest-first.
+
+        Ordered by the append-only ``id`` (BIGSERIAL), not ``changed_at``:
+        ``changed_at`` defaults to ``now()`` (the wall clock at transaction
+        start), which is not monotonic under NTP steps or load, so two
+        transitions written milliseconds apart can invert. ``id`` is the
+        gap-free insertion order and stays correct for legacy-imported rows
+        too (their ids preserve original chronology, and the sequence is
+        bumped past them on import).
+
+        Args:
+            job_id: Store-assigned identity.
+
+        Returns:
+            List of status strings in reverse chronological order.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT to_status FROM job_status_history"
+                " WHERE job_id = $1 ORDER BY id DESC",
+                int(job_id),
+            )
+        return [r["to_status"] for r in rows]
+
+    async def expand_twin_ids(self, job_ids: list[int]) -> dict[int, list[int]]:
+        """Expand each job_id to trusted posting aliases at the same location.
+
+        Missing identity or location expands to itself only.
+
+        Args:
+            job_ids: Store-assigned job identities.
+
+        Returns:
+            Mapping of job_id to list of twin cluster member ids.
+        """
+        if not job_ids:
+            return {}
+        pool = self._get_pool()
+        result: dict[int, list[int]] = {}
+        async with pool.acquire() as conn:
+            for jid in job_ids:
+                row = await conn.fetchrow(
+                    "SELECT location, external_identity FROM jobs WHERE id = $1",
+                    jid,
+                )
+                if row is None:
+                    result[jid] = [jid]
+                    continue
+                if row["external_identity"] and posting_location(row["location"]):
+                    twins = await conn.fetch(
+                        "SELECT id,location FROM jobs WHERE external_identity=$1",
+                        row["external_identity"],
+                    )
+                    result[jid] = [
+                        int(twin["id"])
+                        for twin in twins
+                        if posting_location(twin["location"])
+                        == posting_location(row["location"])
+                    ]
+                    continue
+                result[jid] = [jid]
+        return result
+
+    async def transition_status_bulk(
+        self, request: BulkTransitionRequest
+    ) -> BulkResult:
+        """Transition each item plus its twin cluster. Atomic per cluster.
+
+        The selected job gets reason_selected, twins get reason_cascade.
+        Each cluster is transitioned in its own transaction; a failing
+        cluster is recorded and does not block others.
+
+        Time complexity: O(N * C) where N = len(items) and C is the average
+        twin-cluster size (typically 1-3).
+
+        Args:
+            request: Bulk transition parameters unpacked inside this method.
+
+        Returns:
+            Summary of succeeded, failed, and skipped transitions.
+        """
+        items = request.items
+        reason_selected = request.reason_selected
+        reason_cascade = request.reason_cascade
+        force = request.force
+        i_mean_it = request.i_mean_it
+
+        result = BulkResult()
+        twin_map = await self.expand_twin_ids([int(jid) for jid, _ in items])
+        pool = self._get_pool()
+        processed_ids: set[int] = set()
+
+        for job_id, new_status in items:
+            if int(job_id) in processed_ids:
+                continue
+            cluster = twin_map.get(int(job_id), [int(job_id)])
+            try:
+                cluster_ok = 0
+                cluster_skipped = 0
+                cluster_cascaded = 0
+                async with pool.acquire() as conn:
+                    async with conn.transaction():
+                        await self._transition_status_in_tx(
+                            conn,
+                            TransitionRequest(
+                                job_id=job_id,
+                                new_status=new_status,
+                                reason=reason_selected,
+                                force=force,
+                                i_mean_it=i_mean_it,
+                            ),
+                        )
+                        cluster_ok += 1
+                        for twin_id in cluster:
+                            if twin_id == int(job_id):
+                                continue
+                            status_row = await conn.fetchrow(
+                                "SELECT status FROM job_status WHERE job_id = $1",
+                                twin_id,
+                            )
+                            if status_row is None:
+                                continue
+                            if is_terminal(status_row["status"]):
+                                cluster_skipped += 1
+                                continue
+                            await self._transition_status_in_tx(
+                                conn,
+                                TransitionRequest(
+                                    job_id=str(twin_id),
+                                    new_status=new_status,
+                                    reason=reason_cascade,
+                                    force=force,
+                                    i_mean_it=i_mean_it,
+                                ),
+                            )
+                            cluster_ok += 1
+                            cluster_cascaded += 1
+                result.succeeded += cluster_ok
+                result.skipped += cluster_skipped
+                result.cascaded += cluster_cascaded
+                processed_ids.update(cluster)
+            except Exception as exc:
+                result.failed.append((job_id, str(exc)))
+
+        return result
+
+    # ------------------------------------------------------------------
+    # StoreApplicationMixin
+    # ------------------------------------------------------------------
+
+    async def record_application(self, record: ApplicationRecord) -> bool:
+        """Record application with atomic status transition.
+
+        Inserts into the ``applied`` table and, if the row is new,
+        transitions the job status to ``'applied'`` inside the same
+        transaction.  Guards against terminal statuses.
+
+        Args:
+            record: Application audit record.
+
+        Returns:
+            True if new, False if already applied.
+
+        Raises:
+            ValueError: If the job is in a terminal status.
+        """
+        job_id_int = int(record.job_id)
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                # Insert application first (ON CONFLICT DO NOTHING for idempotence).
+                # A duplicate is a no-op regardless of current status, so the
+                # terminal guard must come after this for idempotence.
+                result = await conn.execute(
+                    """INSERT INTO applied
+                           (job_id, applied_at, notes,
+                            master_resume_hash, tailored_resume_hash,
+                            cover_letter, application_method,
+                            verdict_snapshot, fit_snapshot, hooks_snapshot)
+                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+                       ON CONFLICT (job_id) DO NOTHING""",
+                    job_id_int,
+                    record.applied_at,
+                    record.notes,
+                    record.master_resume_hash,
+                    record.tailored_resume_hash,
+                    record.cover_letter,
+                    record.application_method,
+                    record.verdict_snapshot,
+                    record.fit_snapshot,
+                    record.hooks_snapshot,
+                )
+
+                # asyncpg returns status string like "INSERT 0 1" or "INSERT 0 0"
+                if result == "INSERT 0 0":
+                    return False
+
+                # New application: guard against applying from a terminal status.
+                status_row = await conn.fetchrow(
+                    "SELECT status FROM job_status WHERE job_id = $1",
+                    job_id_int,
+                )
+                if status_row is not None and is_terminal(status_row["status"]):
+                    raise ValueError(
+                        f"cannot apply from terminal status '{status_row['status']}'"
+                    )
+
+                # Transition status to applied
+                now = datetime.now(UTC)
+                followup_val = now + timedelta(days=DEFAULT_FOLLOWUP_GRACE_DAYS)
+                from_status: str | None = status_row["status"] if status_row else None
+
+                await conn.execute(
+                    """UPDATE job_status
+                       SET status = 'applied',
+                           last_status_change_at = $1,
+                           next_followup_at = COALESCE($2, next_followup_at),
+                           resume_variant = COALESCE($3, resume_variant)
+                       WHERE job_id = $4""",
+                    now,
+                    followup_val,
+                    None,
+                    job_id_int,
+                )
+
+                await conn.execute(
+                    """INSERT INTO job_status_history
+                           (job_id, from_status, to_status, changed_at,
+                            reason, resume_variant_at_change)
+                       VALUES ($1, $2, 'applied', $3, 'record_application', $4)""",
+                    job_id_int,
+                    from_status,
+                    now,
+                    None,
+                )
+
+        return True
+
+    # -- in-tx helpers ---------------------------------------------------
+
+    async def _save_resume_snapshot_in_tx(
+        self,
+        conn: asyncpg.Connection,
+        snapshot: ResumeSnapshot,
+    ) -> None:
+        """Write a resume snapshot inside an existing transaction.
+
+        Args:
+            conn: Connection with an active transaction.
+            snapshot: Resume snapshot to persist.
+        """
+        await conn.execute(
+            """INSERT INTO resume_snapshots
+                   (resume_hash, captured_at, source, content, notes)
+               VALUES ($1, $2, $3, $4, $5)
+               ON CONFLICT (resume_hash) DO NOTHING""",
+            snapshot.resume_hash,
+            snapshot.captured_at,
+            snapshot.source,
+            snapshot.content,
+            snapshot.notes,
+        )
+
+    async def _register_resume_variant_in_tx(
+        self,
+        conn: asyncpg.Connection,
+        name: str,
+    ) -> None:
+        """Register a resume variant inside an existing transaction.
+
+        Args:
+            conn: Connection with an active transaction.
+            name: Variant name to register.
+        """
+        await conn.execute(
+            """INSERT INTO resume_variants (name, description)
+               VALUES ($1, NULL)
+               ON CONFLICT (name) DO NOTHING""",
+            name,
+        )
+
+    async def record_application_with_snapshots(
+        self,
+        record: ApplicationRecord,
+        *,
+        snapshots: list[ResumeSnapshot] | None = None,
+        resume_variant: str | None = None,
+    ) -> bool:
+        """Record application with resume snapshots in one atomic transaction.
+
+        Order: variant registration -> snapshot upserts -> applied INSERT ->
+        idempotency check -> terminal-status guard -> status transition.
+        On failure after snapshot upsert the entire transaction rolls back.
+
+        Args:
+            record: Application audit record.
+            snapshots: Optional resume snapshots to persist atomically.
+            resume_variant: Optional variant name to set on the job status;
+                auto-registered if not already known.
+
+        Returns:
+            True if new, False if already applied.
+
+        Raises:
+            ValueError: If the job is in a terminal status.
+        """
+        job_id_int = int(record.job_id)
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                # 1. Auto-register variant if provided.
+                if resume_variant is not None:
+                    await self._register_resume_variant_in_tx(conn, resume_variant)
+
+                # 2. Upsert resume snapshots.
+                for snap in snapshots or []:
+                    await self._save_resume_snapshot_in_tx(conn, snap)
+
+                # 3. Insert application (ON CONFLICT DO NOTHING).
+                result = await conn.execute(
+                    """INSERT INTO applied
+                           (job_id, applied_at, notes,
+                            master_resume_hash, tailored_resume_hash,
+                            cover_letter, application_method,
+                            verdict_snapshot, fit_snapshot, hooks_snapshot)
+                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+                       ON CONFLICT (job_id) DO NOTHING""",
+                    job_id_int,
+                    record.applied_at,
+                    record.notes,
+                    record.master_resume_hash,
+                    record.tailored_resume_hash,
+                    record.cover_letter,
+                    record.application_method,
+                    record.verdict_snapshot,
+                    record.fit_snapshot,
+                    record.hooks_snapshot,
+                )
+
+                # 4. Idempotency: duplicate is a no-op.
+                if result == "INSERT 0 0":
+                    return False
+
+                # 5. Terminal-status guard.
+                status_row = await conn.fetchrow(
+                    "SELECT status FROM job_status WHERE job_id = $1",
+                    job_id_int,
+                )
+                if status_row is not None and is_terminal(status_row["status"]):
+                    raise ValueError(
+                        f"cannot apply from terminal status '{status_row['status']}'"
+                    )
+
+                # 6. Transition status to applied — but only if the job is
+                # not already in an active-application status (applied,
+                # interviewing).  Regressing from interviewing to applied
+                # would lose progress.
+                from_status: str | None = status_row["status"] if status_row else None
+                is_already_active = (
+                    from_status is not None
+                    and from_status in ACTIVE_APPLICATION_STATUSES
+                )
+                now = datetime.now(UTC)
+
+                if is_already_active:
+                    # Still record the audit trail without changing status.
+                    await conn.execute(
+                        """INSERT INTO job_status_history
+                               (job_id, from_status, to_status, changed_at,
+                                reason, resume_variant_at_change)
+                           VALUES ($1, $2, $3, $4,
+                                   'record_application_noop', $5)""",
+                        job_id_int,
+                        from_status,
+                        from_status,
+                        now,
+                        resume_variant,
+                    )
+                    # Update resume_variant even when status stays unchanged.
+                    if resume_variant:
+                        await conn.execute(
+                            "UPDATE job_status SET resume_variant = $1"
+                            " WHERE job_id = $2",
+                            resume_variant,
+                            job_id_int,
+                        )
+                else:
+                    followup_val = now + timedelta(
+                        days=DEFAULT_FOLLOWUP_GRACE_DAYS,
+                    )
+                    await conn.execute(
+                        """UPDATE job_status
+                           SET status = 'applied',
+                               last_status_change_at = $1,
+                               next_followup_at = COALESCE($2, next_followup_at),
+                               resume_variant = COALESCE($3, resume_variant)
+                           WHERE job_id = $4""",
+                        now,
+                        followup_val,
+                        resume_variant,
+                        job_id_int,
+                    )
+
+                    await conn.execute(
+                        """INSERT INTO job_status_history
+                               (job_id, from_status, to_status, changed_at,
+                                reason, resume_variant_at_change)
+                           VALUES ($1, $2, 'applied', $3,
+                                   'record_application', $4)""",
+                        job_id_int,
+                        from_status,
+                        now,
+                        resume_variant,
+                    )
+
+        return True
+
+    async def get_application(self, job_id: str) -> ApplicationRecord | None:
+        """Load a single application record by job_id.
+
+        Args:
+            job_id: Store-assigned job identity.
+
+        Returns:
+            Application record if found, else None.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """SELECT job_id, applied_at,
+                          master_resume_hash, tailored_resume_hash,
+                          cover_letter, application_method,
+                          verdict_snapshot, fit_snapshot,
+                          hooks_snapshot, notes
+                   FROM applied WHERE job_id = $1""",
+                int(job_id),
+            )
+        if row is None:
+            return None
+        return ApplicationRecord(
+            job_id=str(row["job_id"]),
+            applied_at=row["applied_at"],
+            master_resume_hash=row["master_resume_hash"],
+            tailored_resume_hash=row["tailored_resume_hash"],
+            cover_letter=row["cover_letter"],
+            application_method=row["application_method"],
+            verdict_snapshot=row["verdict_snapshot"],
+            fit_snapshot=row["fit_snapshot"],
+            hooks_snapshot=row["hooks_snapshot"],
+            notes=row["notes"],
+        )
+
+    async def list_applications(
+        self,
+        *,
+        limit: int = 100,
+        resume_hash_prefix: str | None = None,
+    ) -> list[ApplicationRecord]:
+        """List application records by recency.
+
+        Args:
+            limit: Max records.
+            resume_hash_prefix: Optional literal hash prefix; keeps only
+                records whose master OR tailored resume hash starts with it.
+
+        Returns:
+            Application records.
+        """
+        pattern = (
+            None
+            if resume_hash_prefix is None
+            else _escape_like_prefix(resume_hash_prefix) + "%"
+        )
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                r"""SELECT a.job_id, a.applied_at,
+                          a.master_resume_hash, a.tailored_resume_hash,
+                          a.cover_letter, a.application_method,
+                          a.verdict_snapshot, a.fit_snapshot,
+                          a.hooks_snapshot, a.notes
+                   FROM applied a
+                   JOIN jobs j ON a.job_id = j.id
+                   WHERE $2::text IS NULL
+                      OR a.master_resume_hash LIKE $2 ESCAPE '\'
+                      OR a.tailored_resume_hash LIKE $2 ESCAPE '\'
+                   ORDER BY a.applied_at DESC
+                   LIMIT $1""",
+                limit,
+                pattern,
+            )
+
+        return [
+            ApplicationRecord(
+                job_id=str(r["job_id"]),
+                applied_at=r["applied_at"],
+                master_resume_hash=r["master_resume_hash"],
+                tailored_resume_hash=r["tailored_resume_hash"],
+                cover_letter=r["cover_letter"],
+                application_method=r["application_method"],
+                verdict_snapshot=r["verdict_snapshot"],
+                fit_snapshot=r["fit_snapshot"],
+                hooks_snapshot=r["hooks_snapshot"],
+                notes=r["notes"],
+            )
+            for r in rows
+        ]
+
+    async def application_stats(
+        self,
+        *,
+        since_days_ago: int | None = 30,
+        by_resume: bool = False,
+    ) -> ApplicationStats:
+        """Aggregate application statistics.
+
+        Args:
+            since_days_ago: Time window, or None for all time.
+            by_resume: Include per-variant breakdown.
+
+        Returns:
+            Application statistics.
+        """
+        cutoff = (
+            None
+            if since_days_ago is None
+            else datetime.now(UTC) - timedelta(days=since_days_ago)
+        )
+        _empty = ApplicationStats(
+            applied_count=0,
+            response_count=0,
+            interview_count=0,
+            offer_count=0,
+            rejection_count=0,
+            median_days_to_response=None,
+            by_resume=None,
+        )
+
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            # 1. Applied jobs in window
+            applied_rows = await conn.fetch(
+                """SELECT DISTINCT job_id
+                   FROM job_status_history
+                   WHERE to_status = 'applied'
+                     AND ($1::timestamptz IS NULL OR changed_at >= $1)""",
+                cutoff,
+            )
+            applied_job_ids = {r["job_id"] for r in applied_rows}
+
+            if not applied_job_ids:
+                return _empty
+
+            id_list = sorted(applied_job_ids)
+            resp_sorted = sorted(RESPONSE_STATUSES)
+            # 2. Response statuses reached
+            response_rows = await conn.fetch(
+                """WITH applied_event AS (
+                        SELECT DISTINCT ON (job_id)
+                               job_id, id AS applied_id,
+                               changed_at AS applied_at
+                        FROM job_status_history
+                        WHERE job_id = ANY($1)
+                          AND to_status = 'applied'
+                          AND ($3::timestamptz IS NULL OR changed_at >= $3)
+                        ORDER BY job_id, id ASC
+                    )
+                    SELECT DISTINCT h.job_id, h.to_status
+                    FROM job_status_history h
+                    JOIN applied_event a ON a.job_id = h.job_id
+                    WHERE h.to_status = ANY($2)
+                      AND h.id > a.applied_id""",
+                id_list,
+                resp_sorted,
+                cutoff,
+            )
+
+            job_resp: dict[int, set[str]] = {}
+            for r in response_rows:
+                job_resp.setdefault(r["job_id"], set()).add(r["to_status"])
+
+            resp_ct, int_ct, off_ct, rej_ct = _count_outcomes(job_resp)
+
+            # 3. Median days to first response (single CTE query)
+            resp_job_ids = sorted(job_resp.keys())
+            delta_rows = await conn.fetch(
+                """WITH applied_event AS (
+                       SELECT DISTINCT ON (job_id)
+                              job_id, id AS applied_id,
+                              changed_at AS applied_at
+                       FROM job_status_history
+                       WHERE job_id = ANY($1)
+                         AND to_status = 'applied'
+                         AND ($3::timestamptz IS NULL OR changed_at >= $3)
+                       ORDER BY job_id, id ASC
+                ), response_event AS (
+                       SELECT DISTINCT ON (h.job_id)
+                              h.job_id, h.changed_at AS response_at
+                       FROM job_status_history h
+                       JOIN applied_event a ON a.job_id = h.job_id
+                       WHERE h.to_status = ANY($2)
+                         AND h.id > a.applied_id
+                       ORDER BY h.job_id, h.id ASC
+                   )
+                   SELECT GREATEST(
+                              0,
+                              EXTRACT(DAY FROM r.response_at - a.applied_at)
+                          )::integer AS days
+                   FROM applied_event a
+                   JOIN response_event r ON r.job_id = a.job_id""",
+                resp_job_ids,
+                resp_sorted,
+                cutoff,
+            )
+            deltas = [row["days"] for row in delta_rows]
+            median_days = _median(deltas)
+
+            # 4. Per-variant breakdown (optional)
+            by_resume_dict: dict[str, ResumeVariantStats] | None = None
+            if by_resume:
+                id_ph = ", ".join(f"${i + 1}" for i in range(len(id_list)))
+                vrows = await conn.fetch(
+                    f"""SELECT DISTINCT ON (job_id)
+                               job_id, resume_variant_at_change
+                        FROM job_status_history
+                        WHERE job_id IN ({id_ph})
+                          AND to_status = 'applied'
+                          AND (${len(id_list) + 1}::timestamptz IS NULL
+                               OR changed_at >= ${len(id_list) + 1})
+                        ORDER BY job_id, id ASC""",
+                    *id_list,
+                    cutoff,
+                )
+                variant_rows = [
+                    (r["job_id"], r["resume_variant_at_change"]) for r in vrows
+                ]
+
+                # Build per-variant stats
+                job_variant: dict[int, str] = {}
+                for jid_v, raw_name in variant_rows:
+                    job_variant[jid_v] = raw_name if raw_name is not None else "unknown"
+
+                variant_jobs: dict[str, set[int]] = {}
+                for jid_v, vname in job_variant.items():
+                    variant_jobs.setdefault(vname, set()).add(jid_v)
+
+                by_resume_dict = {}
+                for vname, jids in sorted(variant_jobs.items()):
+                    v_resp = {j: job_resp[j] for j in jids if j in job_resp}
+                    by_resume_dict[vname] = ResumeVariantStats(
+                        sent=len(jids),
+                        responses=len(v_resp),
+                        interviews=sum(
+                            1 for s in v_resp.values() if s & _INTERVIEW_STATUSES
+                        ),
+                        offers=sum(1 for s in v_resp.values() if "offer" in s),
+                        rejections=sum(1 for s in v_resp.values() if "rejected" in s),
+                    )
+
+        return ApplicationStats(
+            applied_count=len(applied_job_ids),
+            response_count=resp_ct,
+            interview_count=int_ct,
+            offer_count=off_ct,
+            rejection_count=rej_ct,
+            median_days_to_response=median_days,
+            by_resume=by_resume_dict,
+        )
+
+    async def save_resume_snapshot(self, snapshot: ResumeSnapshot) -> None:
+        """Content-addressed resume insert (no-op if exists).
+
+        Args:
+            snapshot: Resume snapshot to persist.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO resume_snapshots
+                       (resume_hash, captured_at, source, content, notes)
+                   VALUES ($1, $2, $3, $4, $5)
+                   ON CONFLICT (resume_hash) DO NOTHING""",
+                snapshot.resume_hash,
+                snapshot.captured_at,
+                snapshot.source,
+                snapshot.content,
+                snapshot.notes,
+            )
+
+    async def get_resume_snapshot(
+        self,
+        resume_hash: str,
+    ) -> ResumeSnapshot | None:
+        """Load resume snapshot by hash.
+
+        Args:
+            resume_hash: Content-addressed hash.
+
+        Returns:
+            Snapshot if found, else None.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """SELECT resume_hash, captured_at, source, content, notes
+                   FROM resume_snapshots
+                   WHERE resume_hash = $1""",
+                resume_hash,
+            )
+        if row is None:
+            return None
+        return ResumeSnapshot(
+            resume_hash=row["resume_hash"],
+            captured_at=row["captured_at"],
+            source=row["source"],
+            content=row["content"],
+            notes=row["notes"],
+        )
+
+    async def get_resume_snapshot_by_prefix(self, prefix: str) -> ResumeSnapshot:
+        """Resolve a resume snapshot by a unique hash prefix.
+
+        Args:
+            prefix: Literal hash prefix (LIKE wildcards are escaped).
+
+        Returns:
+            The single matching snapshot.
+
+        Raises:
+            SnapshotNotFoundError: If no snapshot matches the prefix.
+            SnapshotAmbiguousError: If two or more snapshots match.
+        """
+        pattern = _escape_like_prefix(prefix) + "%"
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                r"""SELECT resume_hash, captured_at, source, content, notes
+                   FROM resume_snapshots
+                   WHERE resume_hash LIKE $1 ESCAPE '\'
+                   LIMIT 2""",
+                pattern,
+            )
+        if not rows:
+            raise SnapshotNotFoundError(f"no resume snapshot matches prefix {prefix!r}")
+        if len(rows) > 1:
+            raise SnapshotAmbiguousError(
+                f"resume hash prefix {prefix!r} matches multiple snapshots"
+            )
+        row = rows[0]
+        return ResumeSnapshot(
+            resume_hash=row["resume_hash"],
+            captured_at=row["captured_at"],
+            source=row["source"],
+            content=row["content"],
+            notes=row["notes"],
+        )
+
+    async def list_resume_snapshots(
+        self,
+        source: str | None = None,
+    ) -> list[ResumeSnapshotSummary]:
+        """List every resume snapshot with its applied-row usage count.
+
+        Usage count is the number of ``applied`` rows referencing the hash
+        as master OR tailored resume (LEFT JOIN, so orphans count 0 and
+        still appear).
+
+        Args:
+            source: Optional filter on the stored source column.
+
+        Returns:
+            Snapshot summaries (without content), newest first.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT s.resume_hash, s.captured_at, s.source,
+                          COUNT(a.job_id)::int AS usage_count
+                   FROM resume_snapshots s
+                   LEFT JOIN applied a
+                     ON a.master_resume_hash = s.resume_hash
+                     OR a.tailored_resume_hash = s.resume_hash
+                   WHERE $1::text IS NULL OR s.source = $1
+                   GROUP BY s.resume_hash, s.captured_at, s.source
+                   ORDER BY s.captured_at DESC, s.resume_hash""",
+                source,
+            )
+        return [
+            ResumeSnapshotSummary(
+                resume_hash=r["resume_hash"],
+                captured_at=r["captured_at"],
+                source=r["source"],
+                usage_count=r["usage_count"],
+            )
+            for r in rows
+        ]
+
+    async def register_resume_variant(
+        self,
+        *,
+        name: str,
+        description: str | None = None,
+    ) -> bool:
+        """Register a named resume variant.
+
+        Args:
+            name: Variant name.
+            description: Optional description.
+
+        Returns:
+            True if new, False if existed.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            result = await conn.execute(
+                """INSERT INTO resume_variants (name, description)
+                   VALUES ($1, $2)
+                   ON CONFLICT (name) DO NOTHING""",
+                name,
+                description,
+            )
+        # asyncpg returns "INSERT 0 1" for inserted, "INSERT 0 0" for conflict
+        return bool(result == "INSERT 0 1")
+
+    # ------------------------------------------------------------------
+    # StoreInterviewMixin
+    # ------------------------------------------------------------------
+
+    async def add_interview_round(
+        self,
+        *,
+        job_id: str,
+        label: str,
+        scheduled_at: datetime | None = None,
+    ) -> InterviewRound:
+        """Append a new interview round to a job.
+
+        Assigns round_index atomically via INSERT ... SELECT MAX+1.
+        Retries once on the rare unique-constraint race.
+
+        Args:
+            job_id: Store-assigned job identity.
+            label: Human-readable round label.
+            scheduled_at: Optional scheduled interview time.
+
+        Returns:
+            The newly created interview round.
+        """
+        jid = int(job_id)
+        pool = self._get_pool()
+        sql = (
+            "INSERT INTO interview_rounds"
+            " (job_id, round_index, label, scheduled_at)"
+            " SELECT $1, COALESCE(MAX(round_index), 0) + 1, $2, $3"
+            " FROM interview_rounds WHERE job_id = $1"
+            " RETURNING *"
+        )
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                try:
+                    async with conn.transaction():  # savepoint
+                        row = await conn.fetchrow(sql, jid, label, scheduled_at)
+                except asyncpg.UniqueViolationError:
+                    row = await conn.fetchrow(sql, jid, label, scheduled_at)
+                await conn.execute(
+                    "UPDATE job_status"
+                    " SET last_status_change_at = now()"
+                    " WHERE job_id = $1",
+                    jid,
+                )
+        assert row is not None  # INSERT ... RETURNING always yields a row
+        return _row_to_interview_round(row)
+
+    async def list_interview_rounds(
+        self,
+        job_id: str,
+    ) -> list[InterviewRound]:
+        """List all interview rounds for a job, ordered by round_index.
+
+        Args:
+            job_id: Store-assigned job identity.
+
+        Returns:
+            Interview rounds in ascending round_index order.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM interview_rounds WHERE job_id = $1 ORDER BY round_index",
+                int(job_id),
+            )
+        return [_row_to_interview_round(r) for r in rows]
+
+    async def complete_interview_round(
+        self,
+        *,
+        job_id: str,
+        round_index: int | None = None,
+        notes: str | None = None,
+    ) -> InterviewRound:
+        """Mark an interview round as completed.
+
+        If round_index is None, completes the latest open round.
+
+        Args:
+            job_id: Store-assigned job identity.
+            round_index: Specific round to complete, or None for latest open.
+            notes: Optional notes to attach.
+
+        Returns:
+            The completed interview round.
+
+        Raises:
+            ValueError: If no open interview round exists.
+        """
+        jid = int(job_id)
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                if round_index is not None:
+                    target = await conn.fetchrow(
+                        "SELECT * FROM interview_rounds"
+                        " WHERE job_id = $1 AND round_index = $2"
+                        " AND completed_at IS NULL",
+                        jid,
+                        round_index,
+                    )
+                else:
+                    target = await conn.fetchrow(
+                        "SELECT * FROM interview_rounds"
+                        " WHERE job_id = $1 AND completed_at IS NULL"
+                        " ORDER BY round_index DESC LIMIT 1",
+                        jid,
+                    )
+                if target is None:
+                    raise ValueError(f"no open interview round for job_id={job_id}")
+                row = await conn.fetchrow(
+                    "UPDATE interview_rounds"
+                    " SET completed_at = now(),"
+                    " notes = COALESCE($1, notes)"
+                    " WHERE id = $2 AND completed_at IS NULL"
+                    " RETURNING *",
+                    notes,
+                    target["id"],
+                )
+                if row is None:
+                    raise ValueError(f"no open interview round for job_id={job_id}")
+                await conn.execute(
+                    "UPDATE job_status"
+                    " SET last_status_change_at = now()"
+                    " WHERE job_id = $1",
+                    jid,
+                )
+        return _row_to_interview_round(row)
+
+    async def list_upcoming_interviews(
+        self,
+        *,
+        within_days: int = 7,
+    ) -> list[InterviewRound]:
+        """List future scheduled, incomplete interviews within a time window.
+
+        Only returns rounds whose parent job is currently in 'interviewing'
+        status, so rounds for rejected/ghosted/offered jobs are excluded.
+
+        Args:
+            within_days: Number of days ahead to look.
+
+        Returns:
+            Upcoming interview rounds ordered by scheduled_at.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT ir.* FROM interview_rounds ir"
+                " JOIN job_status js ON js.job_id = ir.job_id"
+                " WHERE ir.scheduled_at IS NOT NULL"
+                " AND ir.scheduled_at >= now()"
+                " AND ir.scheduled_at <= now() + interval '1 day' * $1"
+                " AND ir.completed_at IS NULL"
+                " AND js.status = 'interviewing'"
+                " ORDER BY ir.scheduled_at",
+                within_days,
+            )
+        return [_row_to_interview_round(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # StoreOpsMixin
+    # ------------------------------------------------------------------
+
+    async def upsert_company(self, company: CompanyRecord) -> None:
+        """Insert or update a company record.
+
+        Args:
+            company: Company record.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO companies (
+                       slug, ats_vendor, ats_override, last_verified_at,
+                       last_probe_attempt_at, job_count_last_scan, notes,
+                       consecutive_discover_failures
+                   ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+                   ON CONFLICT (slug) DO UPDATE SET
+                       ats_vendor = COALESCE(EXCLUDED.ats_vendor, companies.ats_vendor),
+                       ats_override = EXCLUDED.ats_override,
+                       last_verified_at = COALESCE(EXCLUDED.last_verified_at,
+                           companies.last_verified_at),
+                       last_probe_attempt_at = COALESCE(EXCLUDED.last_probe_attempt_at,
+                           companies.last_probe_attempt_at),
+                       job_count_last_scan = EXCLUDED.job_count_last_scan,
+                       notes = COALESCE(EXCLUDED.notes, companies.notes),
+                       consecutive_discover_failures = EXCLUDED.consecutive_discover_failures""",
+                company.slug,
+                company.ats_vendor,
+                int(company.ats_override),
+                company.last_verified_at,
+                company.last_probe_attempt_at,
+                company.job_count_last_scan,
+                company.notes,
+                company.consecutive_discover_failures,
+            )
+
+    async def get_company(self, slug: str) -> CompanyRecord | None:
+        """Load a company by slug.
+
+        Args:
+            slug: Company slug.
+
+        Returns:
+            Company record if found, else None.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM companies WHERE slug = $1",
+                slug,
+            )
+        return _company_from_record(row) if row is not None else None
+
+    async def list_companies(
+        self,
+        *,
+        vendor: str | None = None,
+        include_removed: bool = False,
+    ) -> list[CompanyRecord]:
+        """List companies with optional filters.
+
+        Args:
+            vendor: Filter by ATS vendor.
+            include_removed: Include soft-deleted.
+
+        Returns:
+            Matching company records.
+        """
+        clauses: list[str] = []
+        params: list[object] = []
+        param_idx = 0
+
+        if not include_removed:
+            clauses.append("(ats_vendor IS NULL OR ats_vendor != 'removed')")
+        if vendor:
+            param_idx += 1
+            clauses.append(f"ats_vendor = ${param_idx}")
+            params.append(vendor)
+
+        where = " AND ".join(clauses) if clauses else "1=1"
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"SELECT * FROM companies WHERE {where} ORDER BY slug",
+                *params,
+            )
+        return [_company_from_record(r) for r in rows]
+
+    async def mark_company_removed(self, slug: str) -> bool:
+        """Soft-delete via ats_vendor='removed'.
+
+        Args:
+            slug: Company slug.
+
+        Returns:
+            True if a tracked, not-already-removed company was matched.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            result = await conn.execute(
+                """UPDATE companies SET
+                       ats_vendor = 'removed', ats_override = 0,
+                       last_verified_at = NULL
+                   WHERE slug = $1
+                     AND ats_vendor IS DISTINCT FROM 'removed'""",
+                slug,
+            )
+        # asyncpg returns "UPDATE N" where N is the row count
+        return not result.endswith(" 0")
+
+    async def bump_discover_failure(self, slug: str) -> int:
+        """Increment consecutive discover-failure counter.
+
+        Args:
+            slug: Company slug.
+
+        Returns:
+            New failure count.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """UPDATE companies
+                   SET consecutive_discover_failures =
+                       consecutive_discover_failures + 1
+                   WHERE slug = $1
+                   RETURNING consecutive_discover_failures""",
+                slug,
+            )
+        return int(row["consecutive_discover_failures"]) if row else 0
+
+    async def reset_discover_failures(self, slug: str) -> None:
+        """Zero the discover-failure counter.
+
+        Args:
+            slug: Company slug.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE companies SET consecutive_discover_failures = 0 WHERE slug = $1",
+                slug,
+            )
+
+    async def record_application_identity(
+        self,
+        *,
+        job_id: str,
+        expected_apply_url: str | None,
+        ats_url: str | None,
+        state_key: str,
+        state_value: str,
+        run_id: str | None = None,
+        owner_id: str | None = None,
+        generation: int | None = None,
+    ) -> bool:
+        """Commit application evidence and receipt, retrying concurrent merges.
+
+        Legacy PostgreSQL has no durable scan lease capability. Standalone
+        unfenced evidence is supported; an explicitly supplied fence is rejected.
+
+        Args:
+            job_id: Stored source identity.
+            expected_apply_url: Application URL observed before resolution.
+            ats_url: Verified ATS URL, or None for an unresolved outcome.
+            state_key: Resolution receipt key.
+            state_value: Serialized outcome and optional verification facts.
+            run_id: Optional scan lease identity.
+            owner_id: Optional scan lease owner.
+            generation: Optional scan lease generation.
+
+        Returns:
+            Whether the source still matches the URL and verification facts.
+
+        Raises:
+            RuntimeError: If an unsupported scan fence is supplied.
+            ValueError: If only part of the scan fence is supplied.
+            asyncpg.PostgresError: If persistence fails after bounded merge retries.
+        """
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            try:
+                return await self._record_application_identity_once(
+                    job_id=job_id,
+                    expected_apply_url=expected_apply_url,
+                    ats_url=ats_url,
+                    state_key=state_key,
+                    state_value=state_value,
+                    run_id=run_id,
+                    owner_id=owner_id,
+                    generation=generation,
+                )
+            except (
+                IdentityParentChanged,
+                asyncpg.DeadlockDetectedError,
+                asyncpg.SerializationError,
+            ):
+                if attempt == max_attempts - 1:
+                    raise
+        raise AssertionError("unreachable application identity retry state")
+
+    async def _record_application_identity_once(
+        self,
+        *,
+        job_id: str,
+        expected_apply_url: str | None,
+        ats_url: str | None,
+        state_key: str,
+        state_value: str,
+        run_id: str | None = None,
+        owner_id: str | None = None,
+        generation: int | None = None,
+    ) -> bool:
+        fence = (run_id, owner_id, generation)
+        if any(value is not None for value in fence) and any(
+            value is None for value in fence
+        ):
+            raise ValueError("application evidence requires a complete scan fence")
+        async with self._get_pool().acquire() as conn, conn.transaction():
+            # The legacy PostgreSQL adapter has no durable run-lease table.
+            # Fail closed instead of accepting a SQLite-era fence as valid.
+            if run_id is not None:
+                raise RuntimeError("Scan write lease lost")
+            row = await conn.fetchrow(
+                "SELECT * FROM jobs WHERE id=$1 FOR UPDATE", int(job_id)
+            )
+            if row is None or row["apply_url"] != expected_apply_url:
+                return False
+            if ats_url is not None:
+                posting = _job_from_record(row)
+                if not verification_facts_match(posting, state_value):
+                    return False
+                alias = receipt_alias(ats_url, state_value)
+                if alias:
+                    await conn.execute(
+                        "INSERT INTO state(key,value) VALUES ($1,$2) ON CONFLICT(key) DO NOTHING",
+                        *alias,
+                    )
+                posting.identity_evidence_url = ats_url
+                await resolve_postgres_real_job(
+                    conn, int(job_id), posting, include_content=False
+                )
+                await sync_postgres_real_job_input(conn, int(job_id), _job_from_record)
+            await conn.execute(
+                "INSERT INTO state(key,value) VALUES ($1,$2) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                state_key,
+                state_value,
+            )
+        return True
+
+    async def record_enrichment(
+        self,
+        *,
+        job_id: str,
+        jd_text: str,
+        jd_quality: str,
+        enriched_at: datetime,
+        enrich_source: str,
+        jd_lang: str | None = None,
+        posted_at: datetime | None = None,
+        apply_url: str | None = None,
+    ) -> None:
+        """Stamp a job as enriched with JD body and quality.
+
+        Args:
+            job_id: Store-assigned job identity.
+            jd_text: JD body text.
+            jd_quality: Quality band string.
+            enriched_at: Enrichment timestamp.
+            enrich_source: Source label.
+            jd_lang: Optional detected language.
+            posted_at: Optional JD-derived posting date. Fills the column
+                only when it is NULL (COALESCE keeps the stored value) — an
+                exact card-derived date is never overwritten by this
+                approximate relative-text date. None leaves the column
+                untouched.
+            apply_url: Observed external application URL. None preserves the
+                previously stored value.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn, conn.transaction():
+            await conn.execute(
+                """UPDATE jobs SET
+                       jd_text = $1, jd_quality = $2, enriched_at = $3,
+                       enrich_source = $4, jd_lang = $5, enrich_error = NULL,
+                       closed_at = NULL,
+                       posted_at = COALESCE(posted_at, $7),
+                       apply_url = COALESCE($8, apply_url),
+                       -- An enrichment replaces the JD with new content, so the
+                       -- ml_gate_* verdict (computed against the OLD JD) is
+                       -- stale: a stale 'fail' is excluded from the funnel
+                       -- forever and a stale 'pass' is trusted without
+                       -- re-gating. This is an unconditional content change, so
+                       -- NULL the verdict columns to force a re-gate (matching
+                       -- the unconditional enrich_error/closed_at reset above
+                       -- and save_job's input-change reset).
+                       ml_gate_score = NULL, ml_gate_result = NULL,
+                       ml_gate_fail_reason = NULL, ml_gate_at = NULL,
+                       ml_gate_version = NULL, hard_filter = NULL
+                   WHERE id = $6""",
+                jd_text,
+                jd_quality,
+                enriched_at,
+                enrich_source,
+                jd_lang,
+                int(job_id),
+                posted_at,
+                apply_url,
+            )
+            await sync_postgres_real_job_input(conn, int(job_id), _job_from_record)
+
+    async def list_unenriched_jobs(
+        self,
+        *,
+        platform: str,
+        limit: int,
+        job_ids: list[str] | None = None,
+    ) -> list[UnenrichedJob]:
+        """List open jobs on a platform that still have no JD text.
+
+        Args:
+            platform: Source platform to scope the listing to.
+            limit: Maximum rows to return.
+
+        Returns:
+            Rows with jd_text IS NULL and closed_at IS NULL, newest
+            discovered_at first (id breaks ties). Empty when none match.
+        """
+        numeric_ids = None if job_ids is None else _numeric_job_ids(job_ids)
+        if numeric_ids == []:
+            return []
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT id, canonical_id, url FROM jobs
+                   WHERE platform = $1
+                     AND jd_text IS NULL
+                     AND closed_at IS NULL
+                     AND ($3::bigint[] IS NULL OR id = ANY($3))
+                   ORDER BY discovered_at DESC, id DESC
+                   LIMIT $2""",
+                platform,
+                limit,
+                numeric_ids,
+            )
+        return [
+            UnenrichedJob(
+                job_id=str(row["id"]),
+                canonical_id=row["canonical_id"],
+                url=row["url"],
+            )
+            for row in rows
+        ]
+
+    async def mark_job_closed(
+        self,
+        *,
+        job_id: str,
+        closed_at: datetime,
+        reason: str | None = None,
+    ) -> None:
+        """Stamp a single job as closed (posting confirmed gone).
+
+        Args:
+            job_id: Store-assigned job identity.
+            closed_at: Closure timestamp to set.
+            reason: Optional marker recording WHY the row was closed, stamped
+                into enrich_error for ops triage (house convention, e.g.
+                'gone:{status}:{vendor}', 'backfill:stale-no-jd'). None
+                leaves enrich_error untouched (COALESCE keeps the stored
+                value).
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn, conn.transaction():
+            await conn.execute(
+                """UPDATE jobs
+                   SET closed_at = $1,
+                       enrich_error = COALESCE($3, enrich_error)
+                   WHERE id = $2""",
+                closed_at,
+                int(job_id),
+                reason,
+            )
+            await sync_postgres_real_job_input(conn, int(job_id), _job_from_record)
+
+    async def enrich_paste(
+        self,
+        *,
+        platform: str,
+        canonical_id: str,
+        jd_text: str,
+    ) -> str:
+        """Manual JD paste fallback.
+
+        Args:
+            platform: Source platform.
+            canonical_id: Platform-specific identity.
+            jd_text: Pasted JD text.
+
+        Returns:
+            Store-assigned job identity.
+
+        Raises:
+            ValueError: If job not found.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT id FROM jobs WHERE platform = $1 AND canonical_id = $2",
+                platform,
+                canonical_id,
+            )
+        if row is None:
+            raise ValueError(f"job not found: {platform}/{canonical_id}")
+        job_id = str(row["id"])
+        quality = assess_quality(jd_text)
+        await self.record_enrichment(
+            job_id=job_id,
+            jd_text=jd_text,
+            jd_quality=quality.value,
+            enriched_at=datetime.now(tz=UTC),
+            enrich_source="manual-paste",
+        )
+        return job_id
+
+    async def spam_review(
+        self, *, status: str = "pending", limit: int = 50, offset: int = 0
+    ) -> dict[str, object]:
+        """List source findings for human review.
+
+        Args:
+            status: Review tab filter.
+            limit: Page size.
+            offset: Page offset.
+
+        Returns:
+            Findings and matching total.
+        """
+        async with self._get_pool().acquire() as conn:
+            return await SpamDB(conn, postgres=True).review(status, limit, offset)
+
+    async def spam_decide(self, job_id: str, *, scope: str, decision: str) -> None:
+        """Persist a reversible review decision.
+
+        Args:
+            job_id: Source anchoring the decision.
+            scope: Job or exact company.
+            decision: Allow, block, or reset.
+        """
+        async with self._get_pool().acquire() as conn, conn.transaction():
+            await SpamDB(conn, postgres=True).decide(int(job_id), scope, decision)
+
+    async def spam_audit_page(
+        self, *, after: int = 0, limit: int = 100
+    ) -> dict[str, int]:
+        """Explicitly audit a bounded page of historical sources.
+
+        Args:
+            after: Exclusive source ID cursor.
+            limit: Maximum sources to inspect in one transaction.
+
+        Returns:
+            Processed count and next source ID cursor.
+        """
+        async with self._get_pool().acquire() as conn, conn.transaction():
+            db = SpamDB(conn, postgres=True)
+            rows = await db.rows(
+                "SELECT id FROM jobs WHERE id>? ORDER BY id LIMIT ?", after, limit
+            )
+            for row in rows:
+                await db.assess_source(int(row["id"]))
+            return {
+                "processed": len(rows),
+                "after": int(rows[-1]["id"]) if rows else after,
+            }
+
+    async def get_state(self, key: str) -> str | None:
+        """Read a key-value state entry.
+
+        Args:
+            key: State key.
+
+        Returns:
+            Value if found, else None.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT value FROM state WHERE key = $1",
+                key,
+            )
+        return str(row["value"]) if row else None
+
+    async def set_state(self, key: str, value: str) -> None:
+        """Write a key-value state entry.
+
+        Args:
+            key: State key.
+            value: State value.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO state (key, value) VALUES ($1, $2)
+                   ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value""",
+                key,
+                value,
+            )
+
+    async def record_cost(self, *, day: str, spent_usd: float, calls: int = 1) -> None:
+        """Upsert daily cost ledger spend and attempted call count.
+
+        Args:
+            day: YYYY-MM-DD date string.
+            spent_usd: Cost to accumulate.
+            calls: Attempted LLM calls to accumulate.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            await self._record_cost_conn(
+                conn, day=day, spent_usd=spent_usd, calls=calls
+            )
+
+    async def get_cost(self, day: str) -> CostEntry | None:
+        """Read a single day's cost entry.
+
+        Args:
+            day: YYYY-MM-DD date.
+
+        Returns:
+            Cost entry if found, else None.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM cost_ledger WHERE day = $1",
+                day,
+            )
+        if row is None:
+            return None
+        return CostEntry(
+            day=str(row["day"]),
+            spent_usd=float(row["spent_usd"]),
+            calls=int(row["calls"]),
+            last_updated=row["last_updated"],
+        )
+
+    async def get_cost_range(self, *, since_days: int = 30) -> list[CostEntry]:
+        """Read cost entries within a date range.
+
+        Args:
+            since_days: Days to look back.
+
+        Returns:
+            Cost entries ordered by day descending.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT * FROM cost_ledger
+                   WHERE day::date >= CURRENT_DATE - $1::int
+                   ORDER BY day DESC""",
+                since_days,
+            )
+        return [
+            CostEntry(
+                day=str(r["day"]),
+                spent_usd=float(r["spent_usd"]),
+                calls=int(r["calls"]),
+                last_updated=r["last_updated"],
+            )
+            for r in rows
+        ]
+
+    async def digest_stats(self, *, threshold: int = 60) -> DigestStats:
+        """Aggregate counts for digest footer.
+
+        Args:
+            threshold: Score threshold for filtered_count.
+
+        Returns:
+            Digest statistics.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            total = await self._count(conn, "SELECT COUNT(*) FROM jobs")
+            scored_today = await self._count(
+                conn,
+                "SELECT COUNT(*) FROM jobs"
+                " WHERE discovered_at >= CURRENT_DATE"
+                " AND discovered_at < CURRENT_DATE + INTERVAL '1 day'",
+            )
+            stage_b_evaluated = await self._count(
+                conn,
+                "SELECT COUNT(*) FROM evaluations WHERE stage_b_status = 'completed'",
+            )
+            filtered_count = await self._count(
+                conn,
+                """SELECT COUNT(*) FROM evaluations
+                   WHERE stage_b_status = 'completed'
+                     AND (stage_b_fit_json->>'score_0_100')::integer >= $1""",
+                threshold,
+            )
+            cost_row = await conn.fetchrow(
+                "SELECT calls, spent_usd FROM cost_ledger "
+                "WHERE day = CURRENT_DATE::text",
+            )
+        llm_calls = int(cost_row["calls"]) if cost_row else 0
+        cost_usd = float(cost_row["spent_usd"]) if cost_row else 0.0
+        return DigestStats(
+            total_jobs=total,
+            scored_today=scored_today,
+            stage_b_evaluated=stage_b_evaluated,
+            filtered_count=filtered_count,
+            llm_calls_today=llm_calls,
+            total_cost_today_usd=cost_usd,
+        )
+
+    async def needs_attention(
+        self,
+        *,
+        days: int = 7,
+        max_per_category: int = 10,
+    ) -> AttentionReport:
+        """Surface pipeline health concerns.
+
+        Args:
+            days: Look-back window.
+            max_per_category: Max items per category.
+
+        Returns:
+            Attention report.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            enrich_rows = await conn.fetch(
+                """SELECT id, title, company, enrich_error FROM jobs
+                   WHERE enrich_error IS NOT NULL
+                     AND discovered_at >= now() - ($1 || ' days')::interval
+                   LIMIT $2""",
+                str(days),
+                max_per_category,
+            )
+
+            low_q_rows = await conn.fetch(
+                """SELECT j.id, j.title, j.company, j.jd_quality FROM jobs j
+                   JOIN evaluations e ON e.job_id = j.id
+                   WHERE j.jd_quality IN ('stub', 'partial')
+                     AND e.stage_a_status = 'completed'
+                     AND j.discovered_at >= now() - ($1 || ' days')::interval
+                   LIMIT $2""",
+                str(days),
+                max_per_category,
+            )
+
+            # Jobs stuck in error past the retry cap (any age — no longer retried).
+            stuck_rows = await conn.fetch(
+                """SELECT j.id, j.title, j.company,
+                          e.stage_a_error_count, e.stage_b_error_count
+                   FROM jobs j
+                   JOIN evaluations e ON e.job_id = j.id
+                   WHERE e.stage_a_error_count >= $1
+                      OR e.stage_b_error_count >= $1
+                   LIMIT $2""",
+                MAX_STAGE_RETRIES,
+                max_per_category,
+            )
+
+        enrich_errors = [
+            AttentionItem(
+                job_id=str(r["id"]),
+                title=str(r["title"]),
+                company=str(r["company"]),
+                category="enrich_error",
+                detail=str(r["enrich_error"]),
+            )
+            for r in enrich_rows
+        ]
+        low_quality = [
+            AttentionItem(
+                job_id=str(r["id"]),
+                title=str(r["title"]),
+                company=str(r["company"]),
+                category="low_quality_scored",
+                detail=f"quality={r['jd_quality']}",
+            )
+            for r in low_q_rows
+        ]
+        stuck_scoring = [
+            AttentionItem(
+                job_id=str(r["id"]),
+                title=str(r["title"]),
+                company=str(r["company"]),
+                category="stuck_scoring",
+                detail=(
+                    f"stage_a_errors={r['stage_a_error_count']}, "
+                    f"stage_b_errors={r['stage_b_error_count']}"
+                ),
+            )
+            for r in stuck_rows
+        ]
+        return AttentionReport(
+            enrich_errors=enrich_errors,
+            low_quality_scored=low_quality,
+            stuck_scoring=stuck_scoring,
+        )
+
+    async def mark_stale_jobs_closed(
+        self,
+        *,
+        older_than_days: int,
+        dry_run: bool,
+    ) -> int:
+        """Close stale jobs that have no usable JD and have not been closed yet.
+
+        Targets rows where jd_quality IS NULL or IN ('missing', 'abandoned'),
+        discovered_at is older than the given threshold, and closed_at IS NULL.
+
+        Args:
+            older_than_days: Discovery-age threshold (exclusive).
+            dry_run: When True, count matching rows without writing.
+
+        Returns:
+            Row count: matched rows (dry_run=True) or updated rows (dry_run=False).
+
+        Raises:
+            ValueError: If older_than_days < 1 (would select fresh/all rows).
+        """
+        if older_than_days < 1:
+            raise ValueError("older_than_days must be >= 1")
+        _STALE_WHERE = """
+            (jd_quality IS NULL OR jd_quality IN ('missing', 'abandoned'))
+            AND discovered_at < now() - make_interval(days => $1)
+            AND closed_at IS NULL
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn, conn.transaction():
+            if dry_run:
+                return await self._count(
+                    conn,
+                    f"SELECT COUNT(*) FROM jobs WHERE {_STALE_WHERE}",
+                    older_than_days,
+                )
+            rows = await conn.fetch(
+                f"""UPDATE jobs
+                    SET closed_at = now(),
+                        enrich_error = $2
+                    WHERE {_STALE_WHERE} RETURNING id""",
+                older_than_days,
+                _STALE_BACKFILL_MARKER,
+            )
+            for row in rows:
+                await sync_postgres_real_job_input(
+                    conn, int(row["id"]), _job_from_record
+                )
+        return len(rows)
+
+    async def record_llm_usage(self, usage: LLMUsage) -> None:
+        """Record a single LLM call's usage metrics.
+
+        Args:
+            usage: LLM usage metrics for one call.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            await self._record_llm_usage_conn(conn, usage)
+
+    async def record_llm_usage_with_cost(
+        self,
+        *,
+        day: str,
+        spent_usd: float,
+        usage: LLMUsage,
+    ) -> None:
+        """Atomically record a usage row and same-call ledger spend.
+
+        Args:
+            day: YYYY-MM-DD cost ledger day.
+            spent_usd: Cost to accumulate.
+            usage: LLM usage metrics for one call.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                await self._record_llm_usage_conn(conn, usage)
+                await self._record_cost_conn(
+                    conn,
+                    day=day,
+                    spent_usd=spent_usd,
+                    calls=0,
+                )
+
+    # ------------------------------------------------------------------
+    # Private helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    async def _record_cost_conn(
+        conn: asyncpg.Connection,
+        *,
+        day: str,
+        spent_usd: float,
+        calls: int,
+    ) -> None:
+        await conn.execute(
+            """INSERT INTO cost_ledger (day, spent_usd, calls)
+               VALUES ($1, $2, $3)
+               ON CONFLICT (day) DO UPDATE SET
+                   spent_usd = cost_ledger.spent_usd + EXCLUDED.spent_usd,
+                   calls = cost_ledger.calls + EXCLUDED.calls,
+                   last_updated = now()""",
+            day,
+            spent_usd,
+            calls,
+        )
+
+    @staticmethod
+    async def _record_llm_usage_conn(
+        conn: asyncpg.Connection,
+        usage: LLMUsage,
+    ) -> None:
+        await conn.execute(
+            """INSERT INTO llm_usage (model, input_tokens, output_tokens, cost_usd,
+               cached, latency_ms, timestamp, job_id, stage, run_id)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)""",
+            usage.model,
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cost_usd,
+            usage.cached,
+            usage.latency_ms,
+            usage.timestamp,
+            int(usage.job_id) if usage.job_id is not None else None,
+            usage.stage,
+            usage.run_id,
+        )
+
+    @staticmethod
+    async def _count(
+        conn: asyncpg.Connection,
+        sql: str,
+        *args: object,
+    ) -> int:
+        """Execute a COUNT query and return the integer result.
+
+        Args:
+            conn: Active asyncpg connection.
+            sql: SQL query that returns a single COUNT(*) value.
+            *args: Query parameters.
+
+        Returns:
+            Integer count.
+        """
+        row = await conn.fetchrow(sql, *args)
+        return int(row[0]) if row else 0

@@ -1,0 +1,8 @@
+.application-form-fields { margin: 0; }
+.application-form-field { padding: 1rem 0; border-top: 1px solid var(--jf-color-border); }
+.application-form-field dt { font-weight: 600; margin-bottom: 0.5rem; overflow-wrap: anywhere; }
+.application-form-field dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.application-form-answer { white-space: pre-wrap; overflow-wrap: anywhere; }
+.application-form-field-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1rem; margin-top: 0.5rem; font-size: 0.875rem; color: var(--jf-color-text-secondary); }
+.application-form-written { margin-top: 0.5rem; }
+.application-form-count { font-weight: normal; }

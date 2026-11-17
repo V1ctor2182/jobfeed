@@ -1,0 +1,374 @@
+import Alert from "@cloudscape-design/components/alert";
+import Box from "@cloudscape-design/components/box";
+import Button from "@cloudscape-design/components/button";
+import Checkbox from "@cloudscape-design/components/checkbox";
+import ColumnLayout from "@cloudscape-design/components/column-layout";
+import Container from "@cloudscape-design/components/container";
+import ContentLayout from "@cloudscape-design/components/content-layout";
+import ExpandableSection from "@cloudscape-design/components/expandable-section";
+import Form from "@cloudscape-design/components/form";
+import FormField from "@cloudscape-design/components/form-field";
+import Header from "@cloudscape-design/components/header";
+import Input from "@cloudscape-design/components/input";
+import Select from "@cloudscape-design/components/select";
+import type { SelectProps } from "@cloudscape-design/components/select";
+import SpaceBetween from "@cloudscape-design/components/space-between";
+import Textarea from "@cloudscape-design/components/textarea";
+import { type FormEvent, type ReactNode, useState } from "react";
+import { useNavigate } from "react-router";
+
+import {
+  type ConfigurationResponse,
+  type EditableConfiguration,
+  toEditableConfiguration,
+  useConfiguration,
+  useSaveConfiguration,
+} from "@/api/configuration";
+import type { components } from "@/api/types.gen";
+import { PreferenceSummary } from "@/components/profile/PreferenceSummary";
+import OnboardingProviderPage from "@/routes/onboarding-provider";
+
+type Sources = components["schemas"]["SourcesConfig"];
+type SourceKey = keyof Sources;
+type LinkedInSearch = string | components["schemas"]["SourcesLinkedInSearchConfig"];
+
+const MODEL_OPTIONS: SelectProps.Options = [
+  {
+    label: "Signed-in local apps",
+    description: "Uses your installed Codex or Claude app. No API key required.",
+    options: [
+      { label: "GPT-5.6 Luna — Codex login", value: "codex-cli/gpt-5.6-luna" },
+      { label: "GPT-5.6 Terra — Codex login", value: "codex-cli/gpt-5.6-terra" },
+      { label: "GPT-5.6 Sol — Codex login", value: "codex-cli/gpt-5.6-sol" },
+      { label: "Claude Sonnet 5 — Claude login", value: "claude-cli/claude-sonnet-5" },
+      { label: "Claude Opus 4.8 — Claude login", value: "claude-cli/claude-opus-4-8" },
+      { label: "Claude Fable 5 — Claude login", value: "claude-cli/claude-fable-5" },
+    ],
+  },
+  {
+    label: "Direct API",
+    description: "Calls the configured OpenAI-compatible endpoint with an API key.",
+    options: [
+      { label: "GPT-5.6 Luna — API key", value: "openai-compat/gpt-5.6-luna" },
+      { label: "GPT-5.6 Terra — API key", value: "openai-compat/gpt-5.6-terra" },
+      { label: "GPT-5.6 Sol — API key", value: "openai-compat/gpt-5.6-sol" },
+    ],
+  },
+  {
+    label: "Older local models",
+    description: "Still available for existing configurations.",
+    options: [
+      { label: "GPT-5.5 — Codex login", value: "codex-cli/gpt-5.5" },
+      { label: "GPT-5.4 — Codex login", value: "codex-cli/gpt-5.4" },
+      { label: "GPT-5.4 mini — Codex login", value: "codex-cli/gpt-5.4-mini" },
+    ],
+  },
+];
+
+/** First-run onboarding and persistent local workspace settings. */
+export default function ConfigurationPage() {
+  const current = useConfiguration().data!;
+  if (!current.configured) return <OnboardingProviderPage />;
+  return <WorkspaceSettings current={current} />;
+}
+
+function WorkspaceSettings({ current }: { current: ConfigurationResponse }) {
+  const [form, setForm] = useState<EditableConfiguration>(() => toEditableConfiguration(current));
+  const [validation, setValidation] = useState<string | null>(null);
+  const save = useSaveConfiguration();
+  const navigate = useNavigate();
+
+  function updateSection<K extends keyof EditableConfiguration>(
+    section: K,
+    value: NonNullable<EditableConfiguration[K]>,
+  ) {
+    setForm((previous) => ({ ...previous, [section]: value }));
+  }
+
+  function updateSource<K extends SourceKey>(source: K, value: NonNullable<Sources[K]>) {
+    updateSection("sources", { ...form.sources, [source]: value });
+  }
+
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    const error = validateSources(form.sources!);
+    setValidation(error);
+    if (error !== null) return;
+    save.mutate(form, { onSuccess: () => navigate("/library", { replace: true }) });
+  }
+
+  const llm = form.llm!;
+  const scoring = form.scoring!;
+  const sources = form.sources!;
+  const performance = current.ml_gate_performance;
+  const error = validation ?? save.error?.message;
+
+  return (
+    <div data-testid="cloudscape-configuration">
+      <ContentLayout
+        maxContentWidth={1180}
+        header={
+          <Header
+            variant="h1"
+            description="Choose what Jobfeed watches and how it scores. Settings and job data stay on this computer."
+            actions={
+              <Button onClick={() => navigate("/setup/provider")}>Run onboarding again</Button>
+            }
+          >
+            Workspace settings
+          </Header>
+        }
+      >
+        <form onSubmit={submit}>
+          <Form
+            errorText={error}
+            errorIconAriaLabel="Error"
+            actions={
+              <SpaceBetween direction="horizontal" size="xs" alignItems="center">
+                <Box color="text-body-secondary">Saved changes apply without a restart.</Box>
+                <Button
+                  variant="primary"
+                  formAction="submit"
+                  loading={save.isPending}
+                  loadingText="Saving settings"
+                >
+                  Save changes
+                </Button>
+              </SpaceBetween>
+            }
+          >
+            <SpaceBetween size="l">
+              <LocalDataNotice />
+              <SettingsSection
+                title="Evaluation settings"
+                description="Models, evidence, and limits used to evaluate each role."
+              >
+                <ColumnLayout columns={2} minColumnWidth={280}>
+                  <div><Box variant="strong">Scoring résumé</Box><Box>{current.llm!.master_resume_path.split(/[\\/]/).pop()}</Box>
+                    <Button formAction="none" onClick={() => navigate("/profile?section=resume")}>Manage résumés</Button></div>
+                  <Field label="Quick evaluation model">
+                    <Select
+                      selectedOption={modelOption(llm.stage_a)}
+                      options={MODEL_OPTIONS}
+                      onChange={({ detail }) => updateSection("llm", { ...llm, stage_a: detail.selectedOption.value! })}
+                    />
+                  </Field>
+                  <Field label="Detailed review model">
+                    <Select
+                      selectedOption={modelOption(llm.stage_b)}
+                      options={MODEL_OPTIONS}
+                      onChange={({ detail }) => updateSection("llm", { ...llm, stage_b: detail.selectedOption.value! })}
+                    />
+                  </Field>
+                  <NumberField label="Detailed review threshold" value={scoring.stage_a_threshold} min={0} max={100} onChange={(value) => updateSection("scoring", { ...scoring, stage_a_threshold: value })} />
+                  <NumberField label="Daily model call limit" value={llm.max_daily_score_calls} min={0} onChange={(value) => updateSection("llm", { ...llm, max_daily_score_calls: value })} />
+                  <NumberField label="Daily cost limit (USD)" value={llm.max_daily_cost_usd} min={0} step="0.5" onChange={(value) => updateSection("llm", { ...llm, max_daily_cost_usd: value })} />
+                  <NumberField label="Parallel evaluations" value={llm.max_concurrent} min={1} onChange={(value) => updateSection("llm", { ...llm, max_concurrent: value })} />
+                </ColumnLayout>
+                <Box variant="small" color="text-body-secondary">
+                  Signed-in models use your installed Codex or Claude app. API-key models
+                  call the configured endpoint with <code>{llm.openai_compat_api_key_env}</code>;
+                  Jobfeed never stores the key.
+                </Box>
+              </SettingsSection>
+
+              <SettingsSection title="Job sources" description="Start narrow; additional feeds can be enabled later.">
+                <SourceToggle label="Company career pages" detail="Greenhouse, Lever and Ashby companies" checked={sources.ats!.enabled} onChange={(enabled) => updateSource("ats", { ...sources.ats!, enabled })}>
+                  <SpaceBetween size="m">
+                    <NumberField label="Company career pages maximum jobs per scan" value={sources.ats!.max_jobs} min={1} onChange={(value) => updateSource("ats", { ...sources.ats!, max_jobs: value })} />
+                    <ListField label="ATS target job titles" value={sources.ats!.title_keywords} onChange={(value) => updateSource("ats", { ...sources.ats!, title_keywords: value })} />
+                    <Box variant="small" color="text-body-secondary">Only matching ATS titles count toward this source limit. Onboarding fills these from your confirmed searches.</Box>
+                    <ListField label="Company slugs" value={sources.ats!.seed_companies} onChange={(value) => updateSource("ats", { ...sources.ats!, seed_companies: value })} />
+                  </SpaceBetween>
+                </SourceToggle>
+                <SourceToggle label="Job board search" detail="Finds new company boards on Ashby, Greenhouse and Lever through web search" checked={sources.ats_search!.enabled} onChange={(enabled) => updateSource("ats_search", { ...sources.ats_search!, enabled })}>
+                  <SpaceBetween size="m">
+                    <NumberField label="Job board search maximum new boards per scan" value={sources.ats_search!.max_new_boards} min={1} max={25} onChange={(max_new_boards) => updateSource("ats_search", { ...sources.ats_search!, max_new_boards })} />
+                    <ListField label="Job board search queries" value={sources.ats_search!.queries} onChange={(queries) => updateSource("ats_search", { ...sources.ats_search!, queries })} />
+                    <Box variant="small" color="text-body-secondary">A board is added only when it lists a job matching the ATS target job titles above. Company career pages then checks it on every scan.</Box>
+                  </SpaceBetween>
+                </SourceToggle>
+                <SourceToggle label="Portfolio company discovery" detail="Finds company boards on Ashby, Greenhouse and Lever from VC portfolio job boards and Hacker News hiring threads" checked={sources.ats_discovery!.enabled} onChange={(enabled) => updateSource("ats_discovery", { ...sources.ats_discovery!, enabled })}>
+                  <SpaceBetween size="m">
+                    <ListField label="Getro portfolio board URLs" value={sources.ats_discovery!.getro_boards} onChange={(getro_boards) => updateSource("ats_discovery", { ...sources.ats_discovery!, getro_boards })} />
+                    <Checkbox checked={sources.ats_discovery!.a16z} onChange={({ detail }) => updateSource("ats_discovery", { ...sources.ats_discovery!, a16z: detail.checked })}>a16z portfolio board</Checkbox>
+                    <NumberField label="Hacker News hiring threads" value={sources.ats_discovery!.hn_threads} min={0} max={12} onChange={(hn_threads) => updateSource("ats_discovery", { ...sources.ats_discovery!, hn_threads })} />
+                    <NumberField label="Portfolio company lookups per scan" value={sources.ats_discovery!.max_lookups_per_scan} min={1} max={5000} onChange={(max_lookups_per_scan) => updateSource("ats_discovery", { ...sources.ats_discovery!, max_lookups_per_scan })} />
+                    <Box variant="small" color="text-body-secondary">Every company found is added, and Company career pages checks it on every scan. Lookups beyond the per-scan limit continue on the next scan.</Box>
+                  </SpaceBetween>
+                </SourceToggle>
+                <SourceToggle label="LinkedIn guest search" detail="Anonymous search; no browser login" checked={sources.linkedin_guest!.enabled} onChange={(enabled) => updateSource("linkedin_guest", { ...sources.linkedin_guest!, enabled })}>
+                  <SpaceBetween size="m">
+                    <NumberField label="LinkedIn guest maximum jobs per scan" value={sources.linkedin_guest!.max_jobs} min={1} onChange={(value) => updateSource("linkedin_guest", { ...sources.linkedin_guest!, max_jobs: value })} />
+                    <ListField label="LinkedIn search URLs" value={sources.linkedin_guest!.search_urls} onChange={(value) => updateSource("linkedin_guest", { ...sources.linkedin_guest!, search_urls: value })} />
+                  </SpaceBetween>
+                </SourceToggle>
+                <SourceToggle label="Indeed search" detail="JobSpy search URLs" checked={sources.indeed!.enabled} onChange={(enabled) => updateSource("indeed", { ...sources.indeed!, enabled })}>
+                  <SpaceBetween size="m">
+                    <NumberField label="Indeed maximum jobs per scan" value={sources.indeed!.max_jobs} min={1} onChange={(value) => updateSource("indeed", { ...sources.indeed!, max_jobs: value })} />
+                    <ListField label="Indeed search URLs" value={sources.indeed!.search_urls} onChange={(value) => updateSource("indeed", { ...sources.indeed!, search_urls: value })} />
+                  </SpaceBetween>
+                </SourceToggle>
+                  <SourceToggle label="LinkedIn · browser profile" detail="Uses your local browser profile" checked={sources.linkedin!.enabled} onChange={(enabled) => updateSource("linkedin", { ...sources.linkedin!, enabled })}>
+                    <SpaceBetween size="m">
+                      <NumberField label="Authenticated LinkedIn maximum jobs per scan" value={sources.linkedin!.max_jobs} min={1} onChange={(value) => updateSource("linkedin", { ...sources.linkedin!, max_jobs: value })} />
+                      <ListField label="Authenticated LinkedIn search URLs" value={linkedinValues(sources.linkedin!.search_urls)} onChange={(value) => updateSource("linkedin", { ...sources.linkedin!, search_urls: value })} />
+                    </SpaceBetween>
+                  </SourceToggle>
+                {(["linkedin_extension", "handshake"] as const).map((key) => {
+                  const source = sources[key]!;
+                  const linkedin = key === "linkedin_extension";
+                  const label = linkedin ? "LinkedIn" : "Handshake";
+                  return (
+                    <SourceToggle key={key} label={`${label} · signed in`} detail="Uses your signed-in Chrome session through the Jobfeed extension" checked={source.enabled} onChange={(enabled) => updateSource(key, { ...source, enabled })}>
+                      <SpaceBetween size="m">
+                        <NumberField label={`${label} ${linkedin ? "signed-in " : ""}maximum jobs per scan`} value={source.max_jobs} min={1} max={1000} onChange={(max_jobs) => updateSource(key, { ...source, max_jobs })} />
+                        <ListField label={`${label} search queries`} value={source.queries} onChange={(queries) => updateSource(key, { ...source, queries })} />
+                        {linkedin ? (
+                          <ListField label="LinkedIn signed-in search URLs" value={source.search_urls} onChange={(search_urls) => updateSource(key, { ...source, search_urls })} />
+                        ) : (
+                          <Field label="Handshake search URL (optional)">
+                            <Input value={source.search_url ?? ""} onChange={({ detail }) => updateSource(key, { ...source, search_url: detail.value.trim() || null })} />
+                          </Field>
+                        )}
+                        <Box variant="small" color="text-body-secondary">{linkedin ? "Optional LinkedIn search-results URLs with keywords override search queries." : "An optional Handshake category search URL sorted by newest overrides search queries."}</Box>
+                      </SpaceBetween>
+                    </SourceToggle>
+                  );
+                })}
+                <SourceToggle label="Jobright recommendations" detail="Uses your signed-in Chrome session through the Jobfeed extension" checked={sources.jobright!.enabled} onChange={(enabled) => updateSource("jobright", { ...sources.jobright!, enabled })}>
+                  <SpaceBetween size="m">
+                    <NumberField label="Jobright maximum jobs per scan" value={sources.jobright!.max_jobs} min={1} onChange={(value) => updateSource("jobright", { ...sources.jobright!, max_jobs: value })} />
+                    <NumberField label="Jobright request spacing (seconds)" value={sources.jobright!.pacing_s} min={0.25} step="0.5" onChange={(value) => updateSource("jobright", { ...sources.jobright!, pacing_s: value })} />
+                    <Box variant="small" color="text-body-secondary">Requires the local Jobfeed Jobright Source Chrome extension. The default one-second spacing is the verified safe operating rate.</Box>
+                  </SpaceBetween>
+                </SourceToggle>
+                <SourceToggle label="GitHub job lists" detail="Software job lists hosted on GitHub" checked={sources.speedyapply!.enabled} onChange={(enabled) => updateSource("speedyapply", { ...sources.speedyapply!, enabled })}>
+                  <SpaceBetween size="m">
+                    <NumberField label="GitHub job lists maximum jobs per scan" value={sources.speedyapply!.max_jobs} min={1} onChange={(value) => updateSource("speedyapply", { ...sources.speedyapply!, max_jobs: value })} />
+                    <ListField label="GitHub job list URLs" value={sources.speedyapply!.search_urls} onChange={(value) => updateSource("speedyapply", { ...sources.speedyapply!, search_urls: value })} />
+                  </SpaceBetween>
+                </SourceToggle>
+                <SourceToggle label="a16z speedrun talent network" detail="Jobs from the speedrun talent network API" checked={sources.speedrun!.enabled} onChange={(enabled) => updateSource("speedrun", { ...sources.speedrun!, enabled })}>
+                  <SpaceBetween size="m">
+                    <NumberField label="Speedrun maximum jobs per scan" value={sources.speedrun!.max_jobs} min={1} onChange={(value) => updateSource("speedrun", { ...sources.speedrun!, max_jobs: value })} />
+                    <NumberField label="Speedrun request spacing (seconds)" value={sources.speedrun!.pacing_s} min={0.25} step="0.5" onChange={(value) => updateSource("speedrun", { ...sources.speedrun!, pacing_s: value })} />
+                    <ListField label="Speedrun API URLs" value={sources.speedrun!.search_urls} onChange={(value) => updateSource("speedrun", { ...sources.speedrun!, search_urls: value })} />
+                    <Box variant="small" color="text-body-secondary">Use the API form, https://speedrun-talent-network.com/api/v1/jobs?fn=engineering&amp;sort=new. The website's /jobs page is not accepted. Bursts trip the rate limit, and three-second spacing has run clean.</Box>
+                  </SpaceBetween>
+                </SourceToggle>
+              </SettingsSection>
+
+              <PreferenceSummary configuration={current} />
+              <SettingsSection title="Personal job filter" description="Control the trained filter used before evaluation.">
+                <Alert type={scoring.ml_gate_enabled ? "success" : "info"} header={`Personal job filter · ${form.ml_gate!.model_version}`}>
+                  <SpaceBetween size="xs">
+                    <Checkbox
+                      checked={scoring.ml_gate_enabled}
+                      onChange={({ detail }) => updateSection("scoring", { ...scoring, ml_gate_enabled: detail.checked })}
+                    >
+                      Enable personal ML filter
+                    </Checkbox>
+                    <Box variant="small" color="text-body-secondary">
+                      {scoring.ml_gate_enabled
+                        ? "Active. Jobs predicted irrelevant skip Quick evaluation and remain recoverable in the Job library."
+                        : "Uses the existing trained model immediately. Readiness checks remain advisory; recent recall can still pause filtering automatically."}
+                    </Box>
+                    {performance && (
+                      <Box variant="small" color="text-body-secondary">
+                        Model evaluation at threshold {performance.threshold}: {formatPercent(performance.recall)} recall · {formatPercent(performance.irrelevant_rejection)} irrelevant jobs rejected · {formatPercent(performance.precision)} precision · {formatPercent(performance.f1)} F1 · {performance.training_jobs.toLocaleString("en-US")} labeled jobs
+                      </Box>
+                    )}
+                  </SpaceBetween>
+                </Alert>
+              </SettingsSection>
+
+              <ExpandableSection variant="container" headerText="Advanced settings" headerDescription="Custom model endpoints, calibration, and authenticated search.">
+                <SpaceBetween size="m">
+                  <ColumnLayout columns={2} minColumnWidth={280}>
+                    <Field label="Personal calibration file"><Input placeholder="Optional Markdown path" value={llm.preamble_personal_path ?? ""} onChange={({ detail }) => updateSection("llm", { ...llm, preamble_personal_path: detail.value || null })} /></Field>
+                    <Field label="OpenAI-compatible base URL"><Input value={llm.openai_compat_base_url} onChange={({ detail }) => updateSection("llm", { ...llm, openai_compat_base_url: detail.value })} /></Field>
+                    <Field label="API key environment variable"><Input value={llm.openai_compat_api_key_env} onChange={({ detail }) => updateSection("llm", { ...llm, openai_compat_api_key_env: detail.value })} /></Field>
+                    <NumberField label="Maximum unique jobs to evaluate per run" value={scoring.default_eval_limit} min={1} onChange={(value) => updateSection("scoring", { ...scoring, default_eval_limit: value })} />
+                    <NumberField label="Local filter candidate limit" value={form.ml_gate!.max_candidates} min={1} onChange={(value) => updateSection("ml_gate", { ...form.ml_gate!, max_candidates: value })} />
+                  </ColumnLayout>
+
+                </SpaceBetween>
+              </ExpandableSection>
+            </SpaceBetween>
+          </Form>
+        </form>
+      </ContentLayout>
+    </div>
+  );
+}
+
+function formatPercent(value: number): string {
+  return `${(value * 100).toFixed(1)}%`;
+}
+
+function modelOption(value: string) {
+  const option = MODEL_OPTIONS.flatMap((group) =>
+    "options" in group ? group.options : [group],
+  ).find(
+    (candidate) => candidate.value === value,
+  );
+  return option ?? {
+    label: value,
+    value,
+  };
+}
+
+function LocalDataNotice() {
+  return <Alert type="info" header="Local by default">Your workspace is stored in <code>data/jobfeed.sqlite</code>. Ordinary use does not require Docker or PostgreSQL.</Alert>;
+}
+
+function SettingsSection({ title, description, children }: { title: string; description: string; children: ReactNode }) {
+  return <Container header={<Header variant="h2" description={description}>{title}</Header>}><SpaceBetween size="m">{children}</SpaceBetween></Container>;
+}
+
+function Field({ label, children }: { label: string; children: ReactNode }) {
+  return <FormField label={label}>{children}</FormField>;
+}
+
+function NumberField({ label, value, min, max, step, onChange }: { label: string; value: number; min: number; max?: number; step?: string; onChange: (value: number) => void }) {
+  return <Field label={label}><Input type="number" value={String(value)} step={step === "0.5" ? 0.5 : undefined} nativeInputAttributes={{ min, max }} onChange={({ detail }) => onChange(Number(detail.value))} /></Field>;
+}
+
+function SourceToggle({ label, detail, checked, onChange, children }: { label: string; detail: string; checked: boolean; onChange: (checked: boolean) => void; children: ReactNode }) {
+  return (
+    <Container>
+      <SpaceBetween size="m">
+        <Checkbox ariaLabel={label} checked={checked} onChange={({ detail: event }) => onChange(event.checked)}>
+          <SpaceBetween size="xxs">
+            <Box variant="strong">{label}</Box>
+            <Box color="text-body-secondary">{detail}</Box>
+          </SpaceBetween>
+        </Checkbox>
+        {checked && children}
+      </SpaceBetween>
+    </Container>
+  );
+}
+
+function ListField({ label, value, onChange }: { label: string; value?: string[]; onChange: (value: string[]) => void }) {
+  return <Field label={`${label} — one per line`}><Textarea ariaLabel={label} rows={3} resize="vertical" value={lines(value)} onChange={({ detail }) => onChange(parseLines(detail.value))} /></Field>;
+}
+
+function lines(values: string[] | undefined) { return (values ?? []).join("\n"); }
+function linkedinValues(values: LinkedInSearch[] | undefined) { return (values ?? []).map((value) => typeof value === "string" ? value : value.url); }
+function parseLines(value: string) { return value.split("\n").map((item) => item.trim()).filter(Boolean); }
+
+function validateSources(sources: Sources): string | null {
+  if (sources.ats_search?.enabled && (!sources.ats?.enabled || !sources.ats.title_keywords?.length)) return "Job board search needs Company career pages turned on with at least one ATS target job title.";
+  if (sources.ats_search?.queries?.length === 0) return "Add at least one job board search query.";
+  if ((sources.ats_search?.queries?.length ?? 0) > 6) return "Use at most six job board search queries.";
+  if (sources.ats_discovery?.enabled && !sources.ats?.enabled) return "Portfolio company discovery needs Company career pages turned on.";
+  if (sources.ats_discovery?.enabled && !sources.ats_discovery.getro_boards?.length && !sources.ats_discovery.a16z && !sources.ats_discovery.hn_threads) return "Turn on at least one portfolio discovery origin.";
+  if (sources.linkedin_guest?.enabled && !sources.linkedin_guest.search_urls?.length) return "Add at least one LinkedIn search URL.";
+  if (sources.indeed?.enabled && !sources.indeed.search_urls?.length) return "Add at least one Indeed search URL.";
+  if (sources.speedyapply?.enabled && !sources.speedyapply.search_urls?.length) return "Add at least one GitHub job list URL.";
+  if (sources.speedrun?.enabled && !sources.speedrun.search_urls?.length) return "Add at least one speedrun API URL.";
+  if (sources.linkedin?.enabled && !sources.linkedin.search_urls?.length) return "Add at least one authenticated LinkedIn search URL.";
+  return null;
+}

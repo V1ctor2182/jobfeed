@@ -1,0 +1,40 @@
+.setup-checklist {
+  padding: 24px;
+}
+.setup-checks {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.setup-check {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 16px 0;
+}
+.setup-check + .setup-check {
+  border-top: 1px solid var(--jf-color-border);
+}
+.setup-check-copy {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.setup-check-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: end;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.setup-example {
+  margin: 0;
+  padding: 16px;
+  border-left: 3px solid currentColor;
+}
+@media (max-width: 600px) {
+  .setup-checklist { padding: 16px; }
+  .setup-check { flex-direction: column; gap: 12px; }
+  .setup-check-actions { align-items: start; }
+}

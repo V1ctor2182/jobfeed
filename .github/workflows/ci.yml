@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      browser: ${{ steps.filter.outputs.browser }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            backend:
+              - 'src/**'
+              - 'tests/**'
+              - 'scripts/**'
+              - 'Makefile'
+              - 'pyproject.toml'
+              - 'uv.lock'
+              - '.github/workflows/ci.yml'
+            browser:
+              - 'web-ui/**'
+              - 'src/jobfeed/web/**'
+              - 'src/jobfeed/adapters/sources/*linkedin*'
+              - 'tests/integration/test_linkedin_browser.py'
+              - 'pyproject.toml'
+              - 'uv.lock'
+              - '.github/workflows/ci.yml'
+
+  quality-gate:
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          # Cache pip's wheel/HTTP download dir so the heavy ML deps
+          # (xgboost / numpy / fastembed+onnxruntime / playwright) aren't
+          # re-downloaded every run; keyed on pyproject.toml.
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      # Python repost regression tests execute the extension's real DOM parser.
+      - name: Set up Node.js for extension and frontend verification
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install frontend test dependencies
+        run: |
+          npm install --global pnpm@10.33.0
+          pnpm --dir web-ui install --frozen-lockfile
+
+      - name: Run quality gate (lint + unit/contract tests, no PG)
+        run: make quality
+
+      - name: Verify extension and frontend
+        run: |
+          node --test tests/extension/*.test.cjs
+          pnpm --dir web-ui lint
+          pnpm --dir web-ui test
+          pnpm --dir web-ui build
+
+  browser-tests:
+    needs: changes
+    if: needs.changes.outputs.browser == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          # Cache pip's wheel/HTTP download dir so the heavy ML deps
+          # (xgboost / numpy / fastembed+onnxruntime / playwright) aren't
+          # re-downloaded every run; keyed on pyproject.toml.
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Install Chromium
+        run: python -m playwright install chromium
+
+      - name: Run browser tests
+        run: pytest -m browser -o "addopts=" -v --tb=short

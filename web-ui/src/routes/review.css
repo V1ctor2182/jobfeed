@@ -1,0 +1,32 @@
+.jf-review { display: flex; flex-direction: column; gap: 16px; max-width: 920px; font-family: var(--jf-sans); font-size: 14px; color: var(--jf-ink); }
+.jf-review-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.jf-review-note, .jf-review-meta, .jf-review-empty { color: var(--jf-ink-3); }
+.jf-review-meta { margin-top: 4px; font-family: var(--jf-mono); font-size: 12.5px; }
+.jf-review-empty { margin: 0; padding: 28px 22px; background: var(--jf-color-surface); border: 1px solid var(--jf-line); border-radius: 20px; }
+.jf-pills { display: inline-flex; gap: 2px; padding: 4px; background: var(--jf-line-soft); border-radius: 14px; }
+.jf-pills button { padding: 6px 14px; border: 0; border-radius: 10px; background: none; color: var(--jf-ink-3); font: inherit; font-weight: 500; cursor: pointer; }
+.jf-pills button b { font-family: var(--jf-mono); font-size: 11.5px; font-weight: 400; }
+.jf-pills button[aria-pressed="true"] { background: var(--jf-color-surface); color: var(--jf-ink); box-shadow: 0 1px 2px rgb(0 0 0 / 6%), 0 0 0 1px var(--jf-line); }
+
+.jf-review-card { padding: 20px 22px; background: var(--jf-color-surface); border: 1px solid var(--jf-line); border-radius: 20px; box-shadow: 0 1px 2px rgb(0 0 0 / 2.5%); }
+.jf-review-card header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.jf-review-card h2 { margin: 0; font-size: 18px; font-weight: 500; letter-spacing: -0.01em; }
+.jf-review-links { display: flex; gap: 8px; flex: none; }
+.jf-review-links a { padding: 5px 11px; border-radius: 10px; background: var(--jf-hover); color: var(--jf-ink-2); font-size: 13px; font-weight: 500; text-decoration: none; }
+.jf-review-text { margin: 14px 0; line-height: 1.5; white-space: pre-wrap; }
+.jf-review-draft { margin: 0 0 14px; padding: 12px 14px; background: var(--jf-panel); border-radius: 12px; line-height: 1.5; white-space: pre-wrap; }
+.jf-review-draft span { display: block; margin-bottom: 4px; color: var(--jf-ink-3); font-size: 12.5px; }
+.jf-review-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.jf-review-actions button { padding: 9px 16px; border: 0; border-radius: 12px; background: var(--jf-line-soft); color: var(--jf-ink); font: inherit; font-weight: 500; cursor: pointer; }
+.jf-review-actions button:hover { background: var(--jf-line); }
+.jf-review-actions button.primary { background: var(--jf-logo); color: var(--jf-color-surface); }
+.jf-review-actions button.quiet { margin-left: auto; background: none; color: var(--jf-ink-3); }
+.jf-review-actions button.danger { margin-left: auto; background: var(--jf-accent-soft); color: var(--jf-accent-text); }
+.jf-review-actions button:disabled { opacity: 0.5; cursor: default; }
+.jf-review-form { display: flex; flex-direction: column; gap: 8px; }
+.jf-review-form label { color: var(--jf-ink-3); font-size: 13px; }
+.jf-review-form textarea { padding: 10px 12px; border: 1px solid var(--jf-ink-4); border-radius: 12px; font: inherit; color: var(--jf-ink); resize: vertical; }
+.jf-review-warn { margin: 12px 0 0; color: var(--jf-accent-text); }
+.jf-review-more { display: flex; justify-content: space-between; padding: 14px 22px; background: var(--jf-color-surface); border: 1px solid var(--jf-line); border-radius: 16px; color: var(--jf-ink-2); text-decoration: none; }
+.jf-review-card.site { border-color: var(--jf-accent-2); background: var(--jf-accent-soft); }
+.jf-review-nested { display: flex; flex-direction: column; gap: 12px; margin-top: 16px; }

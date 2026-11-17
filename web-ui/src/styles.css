@@ -1,0 +1,70 @@
+:root {
+  --jf-color-text: #161d26;
+  --jf-color-text-secondary: #414d5c;
+  --jf-color-text-muted: #5f6b7a;
+  --jf-color-code: #354150;
+  --jf-color-border: #d5dbdb;
+  --jf-color-surface: #fff;
+  --jf-color-info-border: #8ebff0;
+  --jf-color-info: #0972d3;
+  --jf-color-info-strong: #033160;
+  --jf-color-info-surface: #f3f8fe;
+  --jf-color-selected-surface: #eaf3ff;
+  --jf-color-linkedin: #0a66c2;
+  --jf-color-indeed: #4b47b8;
+  --jf-color-success-text: #164b1a;
+  --jf-color-success-surface: #d7ead8;
+  --jf-shadow-floating: 0 10px 28px rgb(15 42 66 / 24%);
+  --jf-trace-model: #8456ce;
+  --jf-trace-browser: #2f86e0;
+  --jf-trace-backend: #1d9a74;
+  --jf-trace-shell: #7d8998;
+  --jf-trace-human: #d99a16;
+  --jf-trace-human-text: #8a5d00;
+  --jf-trace-worker: #687078;
+  --jf-trace-applier: #2f86e0;
+  --jf-trace-failed: #d91515;
+  --jf-trace-done: #1f7a4d;
+  --jf-trace-hatch: rgb(22 29 38 / 22%);
+  --jf-trace-badge-surface: #fdf3dc;
+  --jf-trace-badge-border: #f2dca6;
+}
+
+/* Redesign palette from docs/design/dashboard-mockup.html. */
+:root {
+  --jf-bg: #f4f3f0;
+  --jf-shell: #fbfaf8;
+  --jf-panel: #f5f4f1;
+  --jf-line: #ebe9e5;
+  --jf-line-soft: #f1efec;
+  --jf-hover: #f3f2ef;
+  --jf-ink: #171614;
+  --jf-ink-2: #4f4c47;
+  --jf-ink-3: #8d8982;
+  --jf-ink-4: #b4b0a9;
+  --jf-accent: #e8742a;
+  --jf-accent-soft: #fdeee3;
+  --jf-accent-text: #b5551a;
+  --jf-accent-2: #f3c4a0;
+  --jf-chart-ink: #2b2926;
+  --jf-ok: #2f8a4e;
+  --jf-ok-soft: #e9f3ec;
+  --jf-warn: #c96a12;
+  --jf-warn-soft: #fdf3e8;
+  --jf-bad: #c8402f;
+  --jf-bad-soft: #fbeae7;
+  --jf-logo: #1c1b19;
+  /* Earlier tokens, moved onto the redesign palette so pages written against them match. */
+  --jf-color-text: #171614;
+  --jf-color-text-secondary: #4f4c47;
+  --jf-color-text-muted: #8d8982;
+  --jf-color-code: #4f4c47;
+  --jf-color-border: #ebe9e5;
+  --jf-color-info-border: #f3c4a0;
+  --jf-color-info: #171614;
+  --jf-color-info-strong: #171614;
+  --jf-color-info-surface: #f5f4f1;
+  --jf-color-selected-surface: #fdeee3;
+  --jf-mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --jf-sans: Geist, system-ui, -apple-system, "Segoe UI", sans-serif;
+}

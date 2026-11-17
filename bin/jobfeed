@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_PATH="$0"
+while [ -L "$SCRIPT_PATH" ]; do
+    SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
+    LINK_TARGET="$(readlink "$SCRIPT_PATH")"
+    case "$LINK_TARGET" in
+        /*) SCRIPT_PATH="$LINK_TARGET" ;;
+        *) SCRIPT_PATH="$SCRIPT_DIR/$LINK_TARGET" ;;
+    esac
+done
+REPO_ROOT="$(CDPATH= cd -- "$(dirname -- "$SCRIPT_PATH")/.." && pwd)"
+
+fail() {
+    printf 'error: %s\n' "$*" >&2
+    exit 2
+}
+
+HOST_JOBFEED="$REPO_ROOT/.venv/bin/jobfeed"
+if [ ! -x "$HOST_JOBFEED" ]; then
+    fail "host runtime is not installed; run ./setup.sh"
+fi
+
+cd "$REPO_ROOT"
+if [ "$#" -eq 0 ]; then
+    set -- serve --port "${JOBFEED_PORT:-7654}"
+fi
+exec "$HOST_JOBFEED" "$@"

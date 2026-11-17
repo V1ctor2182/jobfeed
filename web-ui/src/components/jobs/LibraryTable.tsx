@@ -1,0 +1,128 @@
+import { useJobStars } from "@/api/job-stars";
+import { StarButton } from "./StarButton";
+import Badge from "@cloudscape-design/components/badge";
+import Box from "@cloudscape-design/components/box";
+import Button from "@cloudscape-design/components/button";
+import SpaceBetween from "@cloudscape-design/components/space-between";
+import Table, { type TableProps } from "@cloudscape-design/components/table";
+
+import type { JobsQuery, JobSummary } from "@/api/queries";
+import { VerdictPill } from "@/components/jobs/VerdictPill";
+import { formatEstimatedPostedDate, formatRelativeAge } from "@/lib/dates";
+import { useDensity } from "@/lib/density";
+
+interface LibraryTableProps {
+  jobs: JobSummary[];
+  onOpen: (job: JobSummary) => void;
+  sort: LibrarySort;
+  onSort: (sort: LibrarySort) => void;
+}
+
+type LibrarySort = NonNullable<JobsQuery["sort"]>;
+
+/** Cloudscape table for one Library page. */
+export function LibraryTable({ jobs, onOpen, sort, onSort }: LibraryTableProps) {
+  const { density } = useDensity();
+  const stars = useJobStars(jobs.map(job => job.id));
+  const columnDefinitions: TableProps.ColumnDefinition<JobSummary>[] = [
+    { id: "star", header: "Star", width: 60, cell: job => <StarButton sourceId={job.id} label={`${job.company} ${job.title}`} stars={stars} /> },
+    {
+      id: "company",
+      header: "Company",
+      cell: (job) => (
+        <span data-testid={`job-row-${job.id}`}>
+          <Button
+            variant="inline-link"
+            ariaLabel={`Open ${job.company} ${job.title}`}
+            onClick={() => onOpen(job)}
+          >
+            {job.company}
+          </Button>
+        </span>
+      ),
+      width: 180,
+    },
+    {
+      id: "title",
+      header: "Title",
+      cell: (job) => (
+        <SpaceBetween direction="horizontal" size="xs">
+          <Box key="title">{job.title}</Box>
+          {job.is_repost === true && <Badge color="grey">Reposted</Badge>}
+          {job.closed_at !== null && <Badge key="closed" color="grey">Closed</Badge>}
+          {job.evaluation_stale_reason && (
+            <Badge key="stale" color="blue">Old score · re-evaluation pending</Badge>
+          )}
+        </SpaceBetween>
+      ),
+      width: 320,
+    },
+    {
+      id: "decision",
+      header: "Your decision",
+      cell: (job) => decisionLabel(job.decision),
+    },
+    {
+      id: "real-job",
+      header: "Real job",
+      cell: (job) => job.real_job_id ? `#${job.real_job_id}` : "—",
+    },
+    {
+      id: "verdict",
+      header: "Recommendation",
+      cell: (job) => (
+        <VerdictPill verdict={job.verdict} stageBStatus={job.stage_b_status} />
+      ),
+    },
+    {
+      id: "score",
+      header: "Fit score",
+      sortingField: "score",
+      cell: (job) => job.evaluation_stale_reason === "legacy_policy_unknown"
+        ? "Old score · pending"
+        : job.stage_b_fit_score ?? job.stage_a_score ?? (job.is_repost === true ? <div style={{ whiteSpace: "normal" }}>Skipped scoring: repost</div> : "—"),
+    },
+    {
+      id: "posted",
+      header: "Posted",
+      sortingField: "posted",
+      cell: (job) => job.posted_at === null
+        ? formatEstimatedPostedDate(job.discovered_at)
+        : formatRelativeAge(job.posted_at),
+    },
+  ];
+  const sortingField = sort.startsWith("score") ? "score" : "posted";
+  const sortingColumn = columnDefinitions.find(
+    (column) => column.sortingField === sortingField,
+  );
+  return (
+    <Table
+      variant="embedded"
+      trackBy="id"
+      items={jobs}
+      stripedRows
+      stickyHeader
+      wrapLines={false}
+      resizableColumns
+      contentDensity={density}
+      sortingColumn={sortingColumn}
+      sortingDescending={sort.endsWith("_desc")}
+      onSortingChange={({ detail }) => {
+        const field = detail.sortingColumn.sortingField;
+        if (field === "score" || field === "posted") {
+          onSort(`${field}_${detail.isDescending ? "desc" : "asc"}`);
+        }
+      }}
+      ariaLabels={{ tableLabel: "Library jobs" }}
+      columnDefinitions={columnDefinitions}
+    />
+  );
+}
+
+function decisionLabel(decision: JobSummary["decision"]): string {
+  if (decision === "results") return "Results";
+  if (decision === "wait") return "Wait";
+  if (decision === "applied") return "Applied";
+  if (decision === "ignored") return "Ignored";
+  return "—";
+}

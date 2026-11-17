@@ -1,0 +1,7 @@
+.runs-mobile-list { list-style: none; margin: 0; padding: 0; }
+.runs-mobile-list > li { padding-block: 1rem; }
+.runs-mobile-list > li + li { border-top: 1px solid var(--jf-color-border); }
+.runs-mobile-list > li:first-child { padding-top: 0; }
+.runs-mobile-list > li:last-child { padding-bottom: 0; }
+
+.run-history tbody tr { cursor: pointer; }

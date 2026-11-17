@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Backward-compatible alias for the clone-to-GUI setup entrypoint.
+set -euo pipefail
+REPO_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+exec "$REPO_ROOT/setup.sh" "$@"

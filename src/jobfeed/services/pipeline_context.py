@@ -1,0 +1,41 @@
+"""Run-scoped durable work context inherited by the four source coroutines."""
+
+from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
+from typing import Any
+
+from pydantic import TypeAdapter
+
+from jobfeed.domain.models import JobPosting
+from jobfeed.ports.pipeline import PipelineStep
+
+current_pipeline: ContextVar[PipelineStep | None] = ContextVar(
+    "scan_pipeline", default=None
+)
+POSTING = TypeAdapter(JobPosting)
+POSTINGS = TypeAdapter(list[JobPosting])
+
+
+async def durable_posting(
+    name: str, payload: Any, work: Callable[[Any], Awaitable[JobPosting | None]]
+) -> JobPosting | None:
+    """Run posting work through the current journal when one is active.
+
+    Args:
+        name: Stable operation or source name.
+        payload: JSON-compatible operation input.
+        work: Async operation to execute with saved input.
+
+    Returns:
+        The saved or freshly constructed posting, or None.
+    """
+    pipeline = current_pipeline.get()
+    if pipeline is None:
+        return await work(payload)
+
+    async def execute(saved: Any) -> Any:
+        result = await work(saved)
+        return None if result is None else POSTING.dump_python(result, mode="json")
+
+    result = await pipeline.step(name, payload, execute)
+    return None if result is None else POSTING.validate_python(result)

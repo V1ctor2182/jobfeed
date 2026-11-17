@@ -1,0 +1,432 @@
+"""FastAPI application factory for the Jobfeed web API."""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import secrets
+from collections.abc import AsyncIterator
+from contextlib import AsyncExitStack, asynccontextmanager
+from pathlib import Path
+from typing import cast
+
+import click
+from fastapi import FastAPI
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+from jobfeed.account_password import AccountPasswordService
+from jobfeed.answer_bank import AnswerBankService
+from jobfeed.application_queue import ApplicationQueueService
+from jobfeed.application_reruns import ApplicationRerunService
+from jobfeed.application_submissions import ApplicationSubmissionService
+from jobfeed.application_tabs import ApplicationTabs
+from jobfeed.applier_trace import ApplierTraceReader
+from jobfeed.apply_health import ApplyHealthReader
+from jobfeed.cli import AppContext, create_app
+from jobfeed.cli._evaluate_factory import EvalBuildParams, build_evaluate_service
+from jobfeed.cli._scan_sources import build_scan_sources
+from jobfeed.config_editor import ConfigurationEditor
+from jobfeed.domain.errors import SourceConfigError
+from jobfeed.observability import get_logger, init_otel, init_sentry
+from jobfeed.pipeline_readiness import PipelineReadiness
+from jobfeed.ports.store_perf import StorePerfMixin
+from jobfeed.review import ReviewService
+from jobfeed.scan_wiring import build_scan_service
+from jobfeed.services.application import ApplicationService, ApplicationStore
+from jobfeed.services.insights import InsightsService, InsightsStore
+from jobfeed.services.jobs_view import JobsViewService, JobsViewStore
+from jobfeed.services.performance import PerformanceService
+from jobfeed.services.run_manager import RunManager, SourceResolver
+from jobfeed.services.scan import SourceSpec
+from jobfeed.services.workflow import WorkflowService, WorkflowStore
+from jobfeed.tracker import TrackerService
+from jobfeed.web.config_runtime import apply_runtime_settings
+from jobfeed.web.errors import install_error_handling
+from jobfeed.web.onboarding_app import (
+    _configure_onboarding,
+    _include_onboarding_routers,
+    _make_post_scan_hook,
+)
+from jobfeed.web.recruiter_sheet_hook import make_post_evaluate_hook
+from jobfeed.web.routes.account_password import router as account_password_router
+from jobfeed.web.routes.answer_bank import router as answer_bank_router
+from jobfeed.web.routes.application_backfill import (
+    router as application_backfill_router,
+)
+from jobfeed.web.routes.application_queue import router as application_queue_router
+from jobfeed.web.routes.application_reruns import router as application_reruns_router
+from jobfeed.web.routes.application_submissions import (
+    router as application_submissions_router,
+)
+from jobfeed.web.routes.application_tabs import router as application_tabs_router
+from jobfeed.web.routes.applications import router as applications_router
+from jobfeed.web.routes.applier_runs import router as applier_runs_router
+from jobfeed.web.routes.apply_health import router as apply_health_router
+from jobfeed.web.routes.apply_readiness import router as apply_readiness_router
+from jobfeed.web.routes.companies import router as companies_router
+from jobfeed.web.routes.configuration import router as configuration_router
+from jobfeed.web.routes.health import router as health_router
+from jobfeed.web.routes.insights import router as insights_router
+from jobfeed.web.routes.job_stars import router as job_stars_router
+from jobfeed.web.routes.jobright_bridge import router as jobright_bridge_router
+from jobfeed.web.routes.jobs import router as jobs_router
+from jobfeed.web.routes.performance import router as performance_router
+from jobfeed.web.routes.real_jobs import router as real_jobs_router
+from jobfeed.web.routes.real_jobs_workflow import router as real_jobs_workflow_router
+from jobfeed.web.routes.recruiter_sheet import router as recruiter_sheet_router
+from jobfeed.web.routes.review import router as review_router
+from jobfeed.web.routes.run_sources import router as run_sources_router
+from jobfeed.web.routes.runs import router as runs_router
+from jobfeed.web.routes.spam import router as spam_router
+from jobfeed.web.routes.tracker import router as tracker_router
+from jobfeed.web.routes.workflow import router as workflow_router
+
+
+def create_web_app(config_path: Path | None = None) -> FastAPI:
+    """Build the web app from configuration, one assembly per process.
+
+    Args:
+        config_path: Optional path to the TOML configuration file.
+
+    Returns:
+        FastAPI app over a freshly assembled dependency graph.
+
+    Raises:
+        FileNotFoundError: If an explicit config path does not exist.
+    """
+    return build_web_app(create_app(config_path))
+
+
+# Default location of the built SPA bundle, relative to the repo root
+# (src/jobfeed/web/app.py -> repo root). Absent in API-only deployments.
+_DEFAULT_DIST_DIR = Path(__file__).resolve().parents[3] / "web-ui" / "dist"
+
+
+def build_web_app(context: AppContext, static_dir: Path | None = None) -> FastAPI:
+    """Build the FastAPI app around an existing dependency graph.
+
+    The context is constructed once per process and shared via ``app.state``;
+    the lifespan only opens and closes the store connection, mirroring the
+    CLI's ``run_with_store`` lifecycle.
+
+    Args:
+        context: Assembled dependency graph (store, services, settings).
+        static_dir: SPA dist directory to serve at ``/``; defaults to the
+            repo's ``web-ui/dist``. Ignored when no built bundle exists.
+
+    Returns:
+        Configured FastAPI app serving the ``/api`` routes, plus the SPA
+        when a built bundle is present; ``app.state.is_spa_mounted`` records
+        which of the two modes this process is in.
+    """
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        await context["store"].connect()
+        try:
+            if hasattr(_app.state, "run_manager"):
+                await _app.state.run_manager.recover_stale_runs()
+        except Exception:
+            get_logger().warning("run_recovery_skipped")
+
+        async def recover_durable_scans() -> None:
+            while True:
+                await asyncio.sleep(10)
+                try:
+                    await _app.state.run_manager.recover_stale_runs()
+                    if context["settings"].redis_pipeline.enabled:
+                        await _app.state.run_manager.resume_interrupted_redis_scan()
+                except Exception:
+                    get_logger().warning("redis_run_recovery_deferred")
+
+        recovery = asyncio.create_task(recover_durable_scans())
+        submissions = asyncio.create_task(
+            _app.state.application_submissions.run_reconciler()
+        )
+        try:
+            yield
+        finally:
+            recovery.cancel()
+            submissions.cancel()
+            await asyncio.gather(recovery, submissions, return_exceptions=True)
+            manager = getattr(_app.state, "run_manager", None)
+            shutdown = getattr(manager, "shutdown", None)
+            if shutdown is not None:
+                await shutdown()
+            await context["store"].close()
+
+    init_otel(context["settings"].observability)
+    init_sentry(context["settings"].observability)
+
+    app = FastAPI(title="Jobfeed API", lifespan=lifespan)
+    app.state.context = context
+    apply_override = os.environ.get("JOBFEED_APPLY_ROOT")
+    app.state.apply_health_reader = ApplyHealthReader(
+        root=Path(apply_override)
+        if apply_override is not None
+        else (Path(__file__).resolve().parents[4] / "resume-application-pipeline"),
+        source="explicit_override"
+        if apply_override is not None
+        else "combined_sibling",
+    )
+    app.state.applier_traces = ApplierTraceReader(app.state.apply_health_reader.root)
+    app.state.answer_bank_service = AnswerBankService(
+        app.state.apply_health_reader.root
+    )
+    app.state.review_service = ReviewService(
+        app.state.apply_health_reader.root, context["settings"].db.path
+    )
+    app.state.account_password_service = AccountPasswordService(
+        app.state.apply_health_reader.root
+    )
+    app.state.tracker_service = TrackerService(
+        app.state.apply_health_reader.root, context["settings"].db.path
+    )
+    app.state.application_reruns = ApplicationRerunService(
+        app.state.apply_health_reader.root, context["settings"].db.path
+    )
+    app.state.application_queue = ApplicationQueueService(
+        app.state.apply_health_reader.root,
+        context["settings"].db.path,
+        context["store"],
+    )
+    app.state.application_submissions = ApplicationSubmissionService(
+        app.state.apply_health_reader.root, context["settings"].db.path
+    )
+    app.state.application_tabs = ApplicationTabs(
+        app.state.apply_health_reader.root, context["settings"].db.path
+    )
+    app.state.apply_readiness = PipelineReadiness(
+        app.state.apply_health_reader.root, context["settings"].db.path
+    )
+    app.state.readiness_csrf_token = secrets.token_urlsafe(32)
+    # .get() tolerates minimal fake contexts that never exercise the probe.
+    app.state.probe_company = context.get("probe_company")
+
+    logger = get_logger()
+    store = context["store"]
+    app.state.run_manager = RunManager(
+        store=store,
+        logger=logger,
+        scan_service_factory=lambda: build_scan_service(
+            store,
+            logger,
+            context.get("run_orchestrator"),
+            intermediary=context["settings"].intermediary,
+            redis_url=context["settings"].redis_pipeline.url
+            if context["settings"].redis_pipeline.enabled
+            else None,
+            redis_namespace=context["settings"].redis_pipeline.namespace,
+            bridge=context.get("jobright_bridge"),
+        ),
+        evaluate_service_factory=lambda **kw: build_evaluate_service(
+            context,
+            EvalBuildParams(
+                stage=kw.get("stage", "both"),
+                corpus=kw.get("corpus", "unrated"),
+                limit=kw.get("limit"),
+                max_days=kw.get("max_days"),
+            ),
+        ),
+        scan_source_resolver=_make_scan_source_resolver(context),
+        run_orchestrator=context.get("run_orchestrator"),
+        post_scan_hook=_make_post_scan_hook(context),
+        post_evaluate_hook=make_post_evaluate_hook(
+            context, app.state.apply_health_reader.root
+        ),
+        auto_restart_allowed=lambda source: (
+            source != "application-backfill"
+            and (
+                source
+                not in {
+                    "all",
+                    "jobright",
+                    "speedyapply",
+                    "linkedin-extension",
+                    "handshake",
+                }
+                or bool(
+                    context.get("jobright_bridge")
+                    and context["jobright_bridge"].connected
+                )
+            )
+        ),
+    )
+
+    app.state.jobs_view_service = JobsViewService(
+        store=cast(JobsViewStore, context["store"]),
+        hard_filters=context["settings"].hard_filters.to_domain(),
+    )
+    # get_logger() is the same instance create_app wires into the context;
+    # using it directly keeps the factory's build-time context needs minimal.
+    app.state.workflow_service = WorkflowService(
+        cast(WorkflowStore, context["store"]), logger
+    )
+    application_service = ApplicationService(
+        cast(ApplicationStore, context["store"]), logger
+    )
+    app.state.application_service = application_service
+    app.state.insights_service = InsightsService(cast(InsightsStore, context["store"]))
+    app.state.performance_service = PerformanceService(cast(StorePerfMixin, store))
+    config_path = context.get("config_path") or Path("config.toml")
+    app.state.configuration_editor = ConfigurationEditor(
+        config_path,
+        context["settings"],
+        lambda settings: apply_runtime_settings(app, context, settings),
+    )
+    project_root = config_path.resolve().parent
+    _configure_onboarding(app, context, project_root, logger, store)
+    install_error_handling(app)
+    app.include_router(spam_router, prefix="/api")
+    app.include_router(health_router, prefix="/api")
+    app.include_router(apply_health_router, prefix="/api")
+    app.include_router(application_tabs_router, prefix="/api")
+    app.include_router(applier_runs_router, prefix="/api")
+    app.include_router(application_reruns_router, prefix="/api")
+    app.include_router(application_queue_router, prefix="/api")
+    app.include_router(application_submissions_router, prefix="/api")
+    app.include_router(answer_bank_router, prefix="/api")
+    app.include_router(review_router, prefix="/api")
+    app.include_router(account_password_router, prefix="/api")
+    app.include_router(tracker_router, prefix="/api")
+    app.include_router(apply_readiness_router, prefix="/api")
+    app.include_router(configuration_router, prefix="/api")
+    _include_onboarding_routers(app)
+    app.include_router(jobs_router, prefix="/api")
+    app.include_router(job_stars_router, prefix="/api")
+    app.include_router(recruiter_sheet_router, prefix="/api")
+    app.include_router(jobright_bridge_router, prefix="/api")
+    app.include_router(workflow_router, prefix="/api")
+    app.include_router(real_jobs_workflow_router, prefix="/api")
+    app.include_router(applications_router, prefix="/api")
+    app.include_router(real_jobs_router, prefix="/api")
+    app.include_router(insights_router, prefix="/api")
+    app.include_router(runs_router, prefix="/api")
+    app.include_router(application_backfill_router, prefix="/api")
+    app.include_router(run_sources_router, prefix="/api")
+    app.include_router(companies_router, prefix="/api")
+    app.include_router(performance_router, prefix="/api")
+    dist_dir = static_dir if static_dir is not None else _DEFAULT_DIST_DIR
+    is_spa_mounted = _mount_spa(app, dist_dir)
+    app.state.is_spa_mounted = is_spa_mounted
+    if is_spa_mounted:
+        logger.info("web_ui_mounted", dist_dir=str(dist_dir))
+    else:
+        logger.info(
+            "web_ui_not_built",
+            dist_dir=str(dist_dir),
+            hint="serving API only; run `make web-build` to build the UI",
+        )
+    return app
+
+
+def _make_scan_source_resolver(context: AppContext) -> SourceResolver:
+    """Adapt the CLI source builder into RunManager's injected resolver.
+
+    Keeps the service layer free of CLI/adapter imports and translates the
+    builder's Click-flavored configuration failures (e.g. a disabled source)
+    into the domain's SourceConfigError, which the trigger route maps to 400.
+
+    Args:
+        context: Assembled dependency graph the builders read config from.
+
+    Returns:
+        Async resolver from a source token to SourceSpec entries.
+    """
+
+    async def _resolve(name: str, stack: AsyncExitStack) -> list[SourceSpec]:
+        try:
+            return await build_scan_sources(context, name, stack)
+        except click.ClickException as exc:
+            raise SourceConfigError(exc.message) from exc
+
+    return _resolve
+
+
+def _mount_spa(app: FastAPI, dist_dir: Path) -> bool:
+    """Serve the built SPA from ``dist_dir`` with client-route fallback.
+
+    No-op when no built bundle (``index.html``) exists, preserving the
+    JSON-404-everywhere behavior of an API-only process. The catch-all is
+    registered after the routers and excluded from the OpenAPI schema, so
+    the committed snapshot is identical with and without a bundle. Unknown
+    ``/api`` paths keep the JSON error shape: the catch-all re-raises a 404
+    for them instead of serving HTML.
+
+    Args:
+        app: FastAPI app with the ``/api`` routers already included.
+        dist_dir: Directory holding the Vite build output.
+
+    Returns:
+        True when a built bundle was found and mounted; False when the
+        process stays API-only.
+    """
+    # Resolved so the no-cache check below also matches a direct
+    # /index.html request, which _static_file_or_index resolves.
+    index_file = (dist_dir / "index.html").resolve()
+    if not index_file.is_file():
+        return False
+    assets_dir = dist_dir / "assets"
+    if assets_dir.is_dir():
+        # StaticFiles gives hashed Vite assets correct content types and
+        # JSON-shaped 404s on misses (an asset miss must not get HTML).
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
+    @app.api_route("/{spa_path:path}", methods=["GET", "HEAD"], include_in_schema=False)
+    async def serve_spa(spa_path: str) -> FileResponse:
+        """Serve a dist file when one matches, else the SPA index page.
+
+        Registered for GET and HEAD; ``FileResponse`` answers HEAD with
+        headers only.
+
+        Args:
+            spa_path: Request path relative to ``/``.
+
+        Returns:
+            File response for the matched dist file or ``index.html``. The
+            index carries ``Cache-Control: no-cache`` so browsers revalidate
+            the shell on every navigation instead of heuristically caching
+            it; hashed ``/assets`` files keep their default caching.
+
+        Raises:
+            StarletteHTTPException: 404 for unknown ``/api`` paths and for
+                ``assets/`` misses, which the shared handler renders in the
+                JSON error shape.
+        """
+        if spa_path == "api" or spa_path.startswith("api/"):
+            raise StarletteHTTPException(status_code=404, detail="Not Found")
+        if spa_path.startswith("assets/"):
+            # Reached only when dist has no assets/ dir (no mount); an asset
+            # miss must 404 rather than serve index.html as a script.
+            raise StarletteHTTPException(status_code=404, detail="Not Found")
+        target = _static_file_or_index(dist_dir, index_file, spa_path)
+        if target == index_file:
+            return FileResponse(target, headers={"Cache-Control": "no-cache"})
+        return FileResponse(target)
+
+    return True
+
+
+def _static_file_or_index(dist_dir: Path, index_file: Path, spa_path: str) -> Path:
+    """Resolve the dist file for a request path, falling back to the index.
+
+    Args:
+        dist_dir: Directory holding the Vite build output.
+        index_file: The SPA ``index.html`` inside ``dist_dir``.
+        spa_path: Request path relative to ``/``.
+
+    Returns:
+        The matching file inside ``dist_dir``, or ``index_file`` for client
+        router paths and for any path escaping the dist directory.
+    """
+    if not spa_path:
+        return index_file
+    candidate = (dist_dir / spa_path).resolve()
+    if candidate.is_relative_to(dist_dir.resolve()) and candidate.is_file():
+        return candidate
+    return index_file
+
+
+__all__ = ["build_web_app", "create_web_app"]

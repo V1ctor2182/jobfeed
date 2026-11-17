@@ -1,0 +1,52 @@
+body { background: var(--jf-bg); }
+
+.jf-app { display: grid; grid-template-columns: 268px minmax(0, 1fr); max-width: 1560px; margin: 18px auto; min-height: calc(100vh - 36px); background: var(--jf-shell); border: 1px solid var(--jf-line); border-radius: 28px; box-shadow: 0 1px 2px rgb(0 0 0 / 3%), 0 24px 60px -30px rgb(60 40 20 / 18%); font-family: var(--jf-sans); color: var(--jf-ink); }
+.jf-side { position: sticky; top: 18px; height: calc(100vh - 38px); overflow: auto; padding: 18px 14px; border-right: 1px solid var(--jf-line-soft); scrollbar-width: thin; }
+.jf-side a { color: inherit; text-decoration: none; }
+.jf-brand { display: flex; align-items: center; gap: 11px; padding: 8px 8px 14px; }
+.jf-brand-logo { display: grid; place-items: center; width: 38px; height: 38px; border-radius: 11px; background: var(--jf-logo); color: var(--jf-color-surface); font-weight: 600; font-size: 15px; }
+.jf-brand b { display: block; font-weight: 600; font-size: 15px; }
+.jf-brand small { display: block; color: var(--jf-ink-3); font-size: 12.5px; white-space: nowrap; }
+.jf-nav { display: flex; flex-direction: column; gap: 2px; }
+.jf-nav a { display: flex; align-items: center; gap: 12px; padding: 9px 12px; border-radius: 12px; color: var(--jf-ink-2); font-weight: 500; font-size: 15px; }
+.jf-nav a svg { flex: none; width: 18px; height: 18px; color: var(--jf-ink-3); }
+.jf-nav a:hover { background: var(--jf-hover); }
+.jf-nav a[aria-current="page"] { background: var(--jf-color-surface); color: var(--jf-ink); box-shadow: 0 1px 2px rgb(0 0 0 / 5%), 0 0 0 1px var(--jf-line); }
+.jf-nav a[aria-current="page"] svg { color: var(--jf-ink); }
+.jf-nav-count { margin-left: auto; font-family: var(--jf-mono); font-size: 12px; color: var(--jf-ink-3); }
+.jf-nav-count.hot { color: var(--jf-accent); }
+.jf-side-label { padding: 18px 12px 6px; font-size: 13px; color: var(--jf-ink-3); }
+
+.jf-main-col { min-width: 0; }
+.jf-crumbs { display: flex; align-items: center; gap: 10px; padding: 26px 32px 0; color: var(--jf-ink-3); font-size: 15px; }
+.jf-crumbs b { color: var(--jf-ink); font-weight: 500; }
+.jf-crumbs i { font-style: normal; color: var(--jf-ink-4); }
+.jf-main { padding: 22px 32px 48px; }
+.jf-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.jf-head h1 { margin: 0; font-family: var(--jf-sans); font-size: 30px; font-weight: 500; letter-spacing: -0.025em; color: var(--jf-ink); }
+
+@media (max-width: 1100px) {
+  .jf-app { grid-template-columns: 224px minmax(0, 1fr); margin: 0; border: 0; border-radius: 0; min-height: 100vh; }
+  .jf-side { top: 0; height: 100vh; }
+  .jf-crumbs, .jf-main { padding-left: 22px; padding-right: 22px; }
+}
+@media (max-width: 760px) {
+  .jf-app { grid-template-columns: 72px minmax(0, 1fr); }
+  .jf-side { padding: 14px 10px; }
+  .jf-brand { justify-content: center; padding: 4px 0 12px; }
+  .jf-brand > span:not(.jf-brand-logo), .jf-nav-label, .jf-nav-count { display: none; }
+  .jf-nav a { justify-content: center; padding: 11px 0; }
+  .jf-side-label { font-size: 0; padding: 12px 0 4px; margin: 6px auto 0; width: 70%; border-top: 1px solid var(--jf-line-soft); }
+  .jf-crumbs, .jf-main { padding-left: 14px; padding-right: 14px; }
+}
+
+/* Cloudscape pieces the theme tokens cannot reach. The class names carry a build hash, so match the stable prefix. */
+.jf-main [class*="awsui_header-cell-text"] { font-weight: 400; color: var(--jf-ink-3); }
+.jf-main [class*="awsui_container_"][class*="awsui_variant-default"] { box-shadow: 0 1px 2px rgb(0 0 0 / 2.5%); }
+.jf-main [class*="awsui_tabs-tab-label"] { letter-spacing: -0.005em; }
+.jf-head [class*="awsui_button_"] { box-shadow: none; }
+/* A labelled figure inside a Cloudscape container, sized like the Dashboard's headline numbers. */
+.jf-figure-label { color: var(--jf-ink-3); }
+.jf-figure-value { margin: 8px 0 4px; font-family: var(--jf-sans); font-size: 30px; line-height: 1.15; font-weight: 500; letter-spacing: -0.03em; font-variant-numeric: tabular-nums; color: var(--jf-ink); }
+/* Cloudscape raises its own specificity with :not(#\9), so an override has to match it. */
+.jf-main [class*="awsui_badge_"]:not(#\9) { font-weight: 500; white-space: nowrap; }

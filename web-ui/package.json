@@ -1,0 +1,48 @@
+{
+  "name": "jobfeed-ui",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "packageManager": "pnpm@10.33.0",
+  "scripts": {
+    "predev": "pnpm gen:api",
+    "dev": "vite",
+    "prebuild": "pnpm gen:api",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "gen:api": "openapi-typescript ../src/jobfeed/web/openapi.json -o src/api/types.gen.ts",
+    "check:types": "node scripts/check-types-gen.mjs",
+    "check:design": "node scripts/check-design-bans.mjs",
+    "lint": "eslint .",
+    "typecheck": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@cloudscape-design/collection-hooks": "^1.0.106",
+    "@cloudscape-design/components": "^3.0.1345",
+    "@cloudscape-design/global-styles": "^1.0.66",
+    "@tanstack/react-query": "^5.62.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-router": "^7.18.2"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@testing-library/jest-dom": "^6.6.0",
+    "@testing-library/react": "^16.1.0",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "eslint": "^10.4.1",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "globals": "^17.6.0",
+    "happy-dom": "^15.11.0",
+    "openapi-typescript": "^7.4.0",
+    "typescript": "^5.7.2",
+    "typescript-eslint": "^8.61.0",
+    "vite": "^6.0.3",
+    "vitest": "^3.2.0"
+  }
+}

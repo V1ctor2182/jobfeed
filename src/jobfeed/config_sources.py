@@ -1,0 +1,493 @@
+"""Configuration models for job source adapters."""
+
+from __future__ import annotations
+
+from urllib.parse import parse_qs, urlparse, urlsplit
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+SPEEDRUN_JOBS_API_URL = "https://speedrun-talent-network.com/api/v1/jobs"
+
+
+class SourcesATSConfig(BaseModel):
+    """Runtime limits and tuning knobs for the ATS source."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    max_jobs: int = Field(default=1000, ge=1)
+    title_keywords: list[str] = Field(default_factory=list)
+    max_concurrent: int = Field(default=10, ge=1)
+    probe_ttl_days: int = Field(default=7, ge=0)
+    failure_threshold: int = Field(default=3, ge=1)
+    probe_timeout_s: float = Field(default=5.0, gt=0)
+    scan_timeout_s: float = Field(default=30.0, gt=0)
+    seed_companies: list[str] = Field(default_factory=list)
+
+
+class SourcesSpeedyApplyConfig(BaseModel):
+    """Runtime limits and tuning knobs for the SpeedyApply source.
+
+    ``search_urls`` lists the GitHub markdown job lists to scan. Enabled
+    configs must set it explicitly because list fields are TOML-only: the
+    nested env setter stores a bare string at the leaf, which Pydantic will not
+    coerce into a list, so ``JOBFEED_SOURCES__SPEEDYAPPLY__SEARCH_URLS`` is
+    unsupported.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    search_urls: list[str] = Field(default_factory=list)
+    max_jobs: int = Field(default=1000, ge=1)
+    max_concurrent: int = Field(default=10, ge=1)
+    fetch_timeout_s: float = Field(default=30.0, gt=0)
+
+    @model_validator(mode="after")
+    def _require_urls_when_enabled(self) -> SourcesSpeedyApplyConfig:
+        """Fail loud if enabled with no explicit markdown list URL."""
+        if self.enabled and (
+            not self.search_urls or any(not url.strip() for url in self.search_urls)
+        ):
+            raise ValueError(
+                "SpeedyApply source is enabled but search_urls is empty or has "
+                "a blank entry; set the recruiting-cycle list URL explicitly "
+                "or set enabled = false."
+            )
+        return self
+
+
+class SourcesSpeedrunConfig(BaseModel):
+    """Runtime limits and pacing knobs for the a16z speedrun talent network source.
+
+    ``search_urls`` lists the jobs API URLs to scan, each with its filters in the
+    query string. ``pacing_s`` spaces every HTTP request. The API trips HTTP 429
+    on bursts, and a 3 second gap has run clean.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    search_urls: list[str] = Field(default_factory=list)
+    max_jobs: int = Field(default=500, ge=1)
+    pacing_s: float = Field(default=3.0, gt=0)
+    timeout_s: float = Field(default=30.0, gt=0)
+
+    @model_validator(mode="after")
+    def _require_api_urls(self) -> SourcesSpeedrunConfig:
+        """Fail loud if enabled with no URL, or on any non-API URL."""
+        if self.enabled and not self.search_urls:
+            raise ValueError(
+                "Speedrun source is enabled but search_urls is empty; set at least "
+                f"one {SPEEDRUN_JOBS_API_URL}?<filters> URL or set enabled = false."
+            )
+        for url in self.search_urls:
+            if urlsplit(url)._replace(query="", fragment="").geturl() != (
+                SPEEDRUN_JOBS_API_URL
+            ):
+                raise ValueError(
+                    f"Speedrun search URL {url!r} must use the API form "
+                    f"{SPEEDRUN_JOBS_API_URL}?<filters>. The website's /jobs page "
+                    "sits behind a Cloudflare challenge for non-browser clients."
+                )
+        return self
+
+
+class _JobSpySourceConfig(BaseModel):
+    """Shared shape and guards for JobSpy-backed sources."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    search_urls: list[str] = Field(default_factory=list)
+    max_jobs: int = Field(default=100, ge=1)
+    hours_old: int | None = None
+    max_concurrent: int = Field(default=2, ge=1)
+    timeout_s: float = Field(default=60.0, gt=0)
+    # JobSpy backends (Indeed especially) return a non-deterministic subset per
+    # call; re-running each URL ``repeat`` times and unioning by canonical_id
+    # recovers postings a single pass misses (legacy platforms.indeed.repeat).
+    repeat: int = Field(default=1, ge=1)
+
+    @model_validator(mode="after")
+    def _require_urls_when_enabled(self) -> _JobSpySourceConfig:
+        """Fail loud if enabled with no usable URL."""
+        if self.enabled and (
+            not self.search_urls or any(not url.strip() for url in self.search_urls)
+        ):
+            raise ValueError(
+                "JobSpy source is enabled but search_urls is empty or has a blank "
+                "entry; JobSpy has no default search, so every entry must be a real "
+                "URL. Fix search_urls or set enabled = false."
+            )
+        return self
+
+
+class SourcesIndeedConfig(_JobSpySourceConfig):
+    """Runtime limits and tuning knobs for the Indeed (JobSpy) source."""
+
+    country_indeed: str = "usa"
+
+    @field_validator("country_indeed")
+    @classmethod
+    def _reject_blank_country(cls, value: str) -> str:
+        """Reject blank JobSpy country names that would hide geo mistakes."""
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("country_indeed must not be blank")
+        return stripped
+
+
+class SourcesLinkedInGuestConfig(BaseModel):
+    """Runtime limits and pacing knobs for the LinkedIn guest source.
+
+    The guest source scrapes LinkedIn's anonymous guest endpoints (no login,
+    no browser). ``pacing_s`` spaces both list-page fetches and JD enrich
+    requests; ``enrich_batch_limit`` caps how many unenriched jobs one
+    enrich pass attempts. ``enrich_after_scan`` makes ``scan`` run one such
+    pass automatically after this source is scanned (set false to keep scan
+    discover-only and run ``enrich-linkedin-guest`` manually).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    search_urls: list[str] = Field(default_factory=list)
+    max_jobs: int = Field(default=1000, ge=1)
+    pacing_s: float = Field(default=1.0, gt=0)
+    enrich_batch_limit: int = Field(default=500, ge=1)
+    enrich_after_scan: bool = True
+    proxies: str | None = None
+    timeout_s: float = Field(default=15.0, gt=0)
+
+    @field_validator("proxies")
+    @classmethod
+    def _normalize_blank_proxies(cls, value: str | None) -> str | None:
+        """Strip proxies and treat a blank string as "no proxy" (None)."""
+        if value is None:
+            return None
+        stripped = value.strip()
+        return stripped or None
+
+    @model_validator(mode="after")
+    def _require_urls_when_enabled(self) -> SourcesLinkedInGuestConfig:
+        """Fail loud if enabled with no usable guest search URL."""
+        if self.enabled and (
+            not self.search_urls or any(not url.strip() for url in self.search_urls)
+        ):
+            raise ValueError(
+                "LinkedIn guest source is enabled but search_urls is empty or "
+                "has a blank entry; set at least one search URL or set "
+                "enabled = false."
+            )
+        return self
+
+
+class SourcesLinkedInSearchConfig(BaseModel):
+    """One LinkedIn Playwright search URL with optional local budgets."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    url: str
+    max_jobs: int | None = Field(default=None, ge=1)
+    group: str | None = None
+    group_max_jobs: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def _reject_blank_fields(self) -> SourcesLinkedInSearchConfig:
+        """Reject blank URL/group values that would create empty searches."""
+        if not self.url.strip():
+            raise ValueError("LinkedIn search url must not be blank")
+        if self.group is not None and not self.group.strip():
+            raise ValueError("LinkedIn search group must not be blank")
+        return self
+
+
+class SourcesLinkedInConfig(BaseModel):
+    """Runtime limits and profile paths for the LinkedIn Playwright source."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    search_urls: list[str | SourcesLinkedInSearchConfig] = Field(default_factory=list)
+    max_jobs: int = Field(default=100, ge=1)
+    headless: bool = True
+    tier2_cap: int = Field(default=30, ge=0)
+    profile_dir: str = "~/.cache/jobfeed/linkedin"
+    lock_path: str = "~/.cache/jobfeed/enrich.lock"
+
+    @model_validator(mode="after")
+    def _require_urls_when_enabled(self) -> SourcesLinkedInConfig:
+        """Fail loud if enabled with no usable LinkedIn search URL."""
+        if self.enabled and (
+            not self.search_urls
+            or any(_is_blank_linkedin_search(v) for v in self.search_urls)
+        ):
+            raise ValueError(
+                "LinkedIn source is enabled but search_urls is empty or has a "
+                "blank entry; set at least one search URL or set enabled = false."
+            )
+        return self
+
+
+class SourcesJobrightConfig(BaseModel):
+    """Chrome-extension bridge limits for personalized Jobright scans."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    max_jobs: int = Field(default=1000, ge=1)
+    batch_size: int = Field(default=20, ge=1, le=50)
+    pacing_s: float = Field(default=1.0, gt=0)
+    timeout_s: float = Field(default=900.0, gt=0)
+
+
+class SourcesBoardExtensionConfig(BaseModel):
+    """Bounded authenticated job-board scans through the local Chrome bridge."""
+
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = False
+    queries: list[str] = Field(
+        default_factory=lambda: ["Software Engineer New Grad", "AI Engineer New Grad"],
+        min_length=1,
+    )
+    search_url: str | None = None
+    search_urls: list[str] = Field(default_factory=list)
+    max_jobs: int = Field(default=500, ge=1, le=1000)
+    batch_size: int = Field(default=25, ge=1, le=25)
+    pacing_s: float = Field(default=1.0, gt=0)
+    timeout_s: float = Field(default=900.0, gt=0)
+
+    @field_validator("search_urls")
+    @classmethod
+    def _valid_linkedin_urls(cls, values: list[str]) -> list[str]:
+        for value in values:
+            parsed = urlparse(value)
+            if (
+                parsed.scheme != "https"
+                or parsed.netloc != "www.linkedin.com"
+                or parsed.path != "/jobs/search-results/"
+                or not parse_qs(parsed.query).get("keywords")
+            ):
+                raise ValueError("Use LinkedIn search-results URLs with keywords")
+        return values
+
+    @field_validator("search_url")
+    @classmethod
+    def _valid_search_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        parsed = urlparse(value)
+        params = parse_qs(parsed.query)
+        allowed = {
+            "jobRoleGroups",
+            "employmentTypes",
+            "jobType",
+            "sort",
+            "page",
+            "per_page",
+        }
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname != "app.joinhandshake.com"
+            or not parsed.path.startswith("/job-search")
+            or set(params) - allowed
+            or params.get("sort") != ["posted_date_desc"]
+        ):
+            raise ValueError("Use a Handshake category search URL sorted by newest")
+        for key in ("jobRoleGroups", "employmentTypes", "jobType"):
+            if key not in params or any(
+                not part.isdigit() for item in params[key] for part in item.split(",")
+            ):
+                raise ValueError(f"Missing or invalid {key}")
+        return value
+
+    @field_validator("queries")
+    @classmethod
+    def _valid_queries(cls, value: list[str]) -> list[str]:
+        if any(
+            not q.strip() or len(q.strip()) > 200  # noqa: PLR2004
+            for q in value
+        ):
+            raise ValueError("Queries must contain 1 to 200 characters")
+        return list(dict.fromkeys(q.strip() for q in value))
+
+
+class SourcesATSSearchConfig(BaseModel):
+    """Bounded web-search discovery of employer ATS boards."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    queries: list[str] = Field(
+        default_factory=lambda: [
+            'site:jobs.ashbyhq.com "software engineer" "new grad"',
+            'site:job-boards.greenhouse.io "software engineer" "new grad"',
+            'site:jobs.lever.co "software engineer" "new grad"',
+        ],
+        min_length=1,
+        max_length=6,
+    )
+    max_new_boards: int = Field(default=10, ge=1, le=25)
+    search_timeout_s: float = Field(default=120.0, gt=0, le=300)
+
+    @field_validator("queries")
+    @classmethod
+    def _valid_queries(cls, value: list[str]) -> list[str]:
+        if any(
+            not q.strip() or len(q.strip()) > 200  # noqa: PLR2004
+            for q in value
+        ):
+            raise ValueError("Queries must contain 1 to 200 characters")
+        return list(dict.fromkeys(q.strip() for q in value))
+
+
+class SourcesATSDiscoveryConfig(BaseModel):
+    """Discovery of employer ATS boards on VC portfolio job boards and Hacker News.
+
+    ``getro_boards`` lists Getro-hosted portfolio boards by base URL (for
+    example ``https://jobs.accel.com``). Each lookup of one portfolio company
+    costs a request, so ``max_lookups_per_scan`` bounds every scan and the
+    rest waits for the next one.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    getro_boards: list[str] = Field(default_factory=list)
+    a16z: bool = True
+    hn_threads: int = Field(default=3, ge=0, le=12)
+    max_lookups_per_scan: int = Field(default=400, ge=1, le=5000)
+    max_concurrent: int = Field(default=4, ge=1, le=16)
+    pacing_s: float = Field(default=0.5, ge=0, le=10)
+    recheck_days: int = Field(default=30, ge=1, le=365)
+    timeout_s: float = Field(default=20.0, gt=0, le=120)
+
+    @field_validator("getro_boards")
+    @classmethod
+    def _valid_getro_boards(cls, values: list[str]) -> list[str]:
+        boards: list[str] = []
+        for value in values:
+            board = value.strip().rstrip("/")
+            parsed = urlsplit(board)
+            if (
+                parsed.scheme != "https"
+                or not parsed.hostname
+                or parsed.path
+                or parsed.query
+                or parsed.fragment
+            ):
+                raise ValueError(
+                    "Use Getro board base URLs such as https://jobs.accel.com"
+                )
+            boards.append(board)
+        return list(dict.fromkeys(boards))
+
+    @model_validator(mode="after")
+    def _require_an_origin_when_enabled(self) -> SourcesATSDiscoveryConfig:
+        """Fail loud if enabled with nothing to discover from."""
+        if self.enabled and not (self.getro_boards or self.a16z or self.hn_threads):
+            raise ValueError(
+                "ATS discovery is enabled but has no origin; list getro_boards, "
+                "set a16z = true or hn_threads above 0, or set enabled = false."
+            )
+        return self
+
+
+class SourcesConfig(BaseModel):
+    """Container for all job-data source configurations."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    linkedin_extension: SourcesBoardExtensionConfig = Field(
+        default_factory=SourcesBoardExtensionConfig
+    )
+    handshake: SourcesBoardExtensionConfig = Field(
+        default_factory=SourcesBoardExtensionConfig
+    )
+    ats: SourcesATSConfig = Field(default_factory=SourcesATSConfig)
+    ats_search: SourcesATSSearchConfig = Field(default_factory=SourcesATSSearchConfig)
+    ats_discovery: SourcesATSDiscoveryConfig = Field(
+        default_factory=SourcesATSDiscoveryConfig
+    )
+    speedyapply: SourcesSpeedyApplyConfig = Field(
+        default_factory=SourcesSpeedyApplyConfig
+    )
+    speedrun: SourcesSpeedrunConfig = Field(default_factory=SourcesSpeedrunConfig)
+    indeed: SourcesIndeedConfig = Field(default_factory=SourcesIndeedConfig)
+    linkedin_guest: SourcesLinkedInGuestConfig = Field(
+        default_factory=SourcesLinkedInGuestConfig
+    )
+    linkedin: SourcesLinkedInConfig = Field(default_factory=SourcesLinkedInConfig)
+    jobright: SourcesJobrightConfig = Field(default_factory=SourcesJobrightConfig)
+
+    @model_validator(mode="after")
+    def _derive_ats_titles_from_searches(self) -> SourcesConfig:
+        """Backfill ATS relevance terms for configs saved before this field existed."""
+        if self.ats.title_keywords:
+            return self
+        titles: list[str] = []
+        if self.indeed.enabled:
+            titles.extend(_search_terms(self.indeed.search_urls, "q"))
+        if self.linkedin_guest.enabled:
+            titles.extend(_search_terms(self.linkedin_guest.search_urls, "keywords"))
+        if titles:
+            self.ats = self.ats.model_copy(
+                update={"title_keywords": list(dict.fromkeys(titles))}
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _require_ats_titles_for_search(self) -> SourcesConfig:
+        """Fail loud when search would admit every live board it finds."""
+        if self.ats_search.enabled and not (
+            self.ats.enabled and self.ats.title_keywords
+        ):
+            raise ValueError(
+                "ATS search is enabled but it needs the ATS source enabled with "
+                "title_keywords set, because a board is added only when it has a "
+                "matching title. Enable [sources.ats], set its title_keywords, or "
+                "set ats_search.enabled = false."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _require_ats_for_discovery(self) -> SourcesConfig:
+        """Discovered boards are fetched and then polled by the ATS source."""
+        if self.ats_discovery.enabled and not self.ats.enabled:
+            raise ValueError(
+                "ATS discovery is enabled but it needs the ATS source enabled, "
+                "which fetches and then polls every discovered board. Enable "
+                "[sources.ats] or set ats_discovery.enabled = false."
+            )
+        return self
+
+
+def _is_blank_linkedin_search(value: str | SourcesLinkedInSearchConfig) -> bool:
+    if isinstance(value, str):
+        return not value.strip()
+    return not value.url.strip()
+
+
+def _search_terms(urls: list[str], parameter: str) -> list[str]:
+    terms: list[str] = []
+    for url in urls:
+        value = parse_qs(urlparse(url).query).get(parameter, [""])[0].strip()
+        if value:
+            terms.append(value)
+    return terms
+
+
+__all__ = [
+    "SourcesATSConfig",
+    "SourcesATSDiscoveryConfig",
+    "SourcesATSSearchConfig",
+    "SourcesConfig",
+    "SourcesIndeedConfig",
+    "SourcesJobrightConfig",
+    "SourcesLinkedInConfig",
+    "SourcesLinkedInGuestConfig",
+    "SourcesLinkedInSearchConfig",
+    "SourcesSpeedrunConfig",
+    "SourcesSpeedyApplyConfig",
+]

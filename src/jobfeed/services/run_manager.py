@@ -1,0 +1,814 @@
+"""Async task lifecycle for web-triggered pipeline runs.
+
+Concurrency locks (one scan + one evaluate at a time), progress broadcast via
+per-subscriber asyncio.Queue, and fenced persistence delegated to the shared
+run-lease orchestrator.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import json
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
+from functools import wraps
+from typing import TYPE_CHECKING, Any, cast
+
+from jobfeed.domain.errors import RunConflictError, RunLeaseLostError
+from jobfeed.domain.models import PipelineRun
+from jobfeed.ports.run_leases import (
+    ApplicationBackfillStopStore,
+    BackfillStopReason,
+    RecoverableRunLeaseStore,
+    RunLeaseStore,
+)
+from jobfeed.services.run_orchestration import RunLeaseOrchestrator, RunLeaseSession
+from jobfeed.services.run_tracking import ActiveRun, RunProgressBroker
+from jobfeed.services.scan import SourceSpec, run_source_name
+
+if TYPE_CHECKING:
+    from jobfeed.observability import JobfeedLogger
+    from jobfeed.ports.store import JobStore
+    from jobfeed.services.evaluate import EvaluateService
+    from jobfeed.services.scan import ScanService
+
+RUN_DONE = object()
+"""Queue sentinel signalling that a subscribed run has finished."""
+
+_EVALUATION_CHECKPOINT_INTERVAL = 100
+
+SourceResolver = Callable[[str, contextlib.AsyncExitStack], Awaitable[list[SourceSpec]]]
+"""Composition-injected resolver: source token -> SourceSpec entries; raises a
+domain error (SourceConfigError) so this service never imports CLI/adapters."""
+
+PostScanHook = Callable[
+    [PipelineRun, list[SourceSpec], Callable[[PipelineRun], None]], Awaitable[None]
+]
+"""Optional web-only work that extends a scan's live progress stream."""
+
+PostEvaluateHook = Callable[[PipelineRun], Awaitable[None]]
+"""Optional web-only work after a persisted evaluation ends, holding no run lock."""
+
+
+def _track_setup(
+    method: Callable[..., Awaitable[str]],
+) -> Callable[..., Awaitable[str]]:
+    """Keep shutdown from overtaking an already admitted run setup."""
+
+    @wraps(method)
+    async def wrapped(self: RunManager, *args: Any, **kwargs: Any) -> str:
+        self._require_running()
+        setup = asyncio.get_running_loop().create_future()
+        self._setup_tasks.add(setup)
+        try:
+            async with self._admission_lock:
+                self._require_running()
+                return await method(self, *args, **kwargs)
+        finally:
+            setup.set_result(None)
+            self._setup_tasks.discard(setup)
+
+    return wrapped
+
+
+class RunManager:
+    """Async task lifecycle manager for web-triggered pipeline runs.
+
+    Serializes admissions and retains one lock per run type. Normal work
+    awaits historical backfill cleanup before acquiring its own ownership.
+    """
+
+    def __init__(  # noqa: PLR0913 - factories plus shared lease orchestration
+        self,
+        store: JobStore,
+        logger: JobfeedLogger,
+        scan_service_factory: Callable[[], ScanService],
+        evaluate_service_factory: Callable[..., EvaluateService],
+        scan_source_resolver: SourceResolver | None = None,
+        run_orchestrator: RunLeaseOrchestrator | None = None,
+        post_scan_hook: PostScanHook | None = None,
+        auto_restart_allowed: Callable[[str], bool] | None = None,
+        post_evaluate_hook: PostEvaluateHook | None = None,
+    ) -> None:
+        """Create a RunManager with injected factories and source resolver."""
+        self._logger = logger
+        self._store = store
+        self._scan_factory = scan_service_factory
+        self._eval_factory = evaluate_service_factory
+        self._source_resolver = scan_source_resolver
+        self._post_scan_hook = post_scan_hook
+        self._post_evaluate_hook = post_evaluate_hook
+        self._post_evaluate_tasks: set[asyncio.Task[None]] = set()
+        self._auto_restart_allowed = auto_restart_allowed or (lambda _source: True)
+        self._run_orchestrator = run_orchestrator or RunLeaseOrchestrator(
+            cast(RunLeaseStore, store)
+        )
+        self._scan_lock = asyncio.Lock()
+        self._eval_lock = asyncio.Lock()
+        self._admission_lock = asyncio.Lock()
+        self._active: dict[str, ActiveRun] = {}
+        self._progress = RunProgressBroker(RUN_DONE)
+        self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._shutting_down = False
+        self._setup_tasks: set[asyncio.Future[None]] = set()
+        self._checkpoint_tasks: dict[str, set[asyncio.Task[bool]]] = {}
+        self._scan_checkpoint_flush: dict[str, asyncio.Event] = {}
+
+    @_track_setup
+    async def trigger_scan(
+        self,
+        source_name_or_specs: str | list[SourceSpec],
+        *,
+        restart_count: int = 0,
+        resume_from_run_id: str | None = None,
+    ) -> str:
+        """Start a scan if none active.
+
+        Args:
+            source_name_or_specs: Source token or pre-built SourceSpec list.
+                The lease is acquired before resolver store work; resolver
+                failures are returned immediately after fenced failure.
+
+        Returns: The new run's run_id.
+        Raises: RunConflictError if a scan is already running.
+        """
+        self._require_running()
+        await self._preempt_application_backfill(self._scan_lock, "scan")
+        self._require_unlocked(self._scan_lock, "scan")
+        await self._scan_lock.acquire()
+        stack = contextlib.AsyncExitStack()
+        session: RunLeaseSession | None = None
+        try:
+            service = self._scan_factory()
+            source = self._source_label_before_resolution(source_name_or_specs)
+            session = await self._run_orchestrator.start(
+                "scan", source, restart_count=restart_count
+            )
+            session.run.resume_from_run_id = resume_from_run_id
+            self._register(session.run, source)
+            specs = await self._resolve_sources(source_name_or_specs, stack)
+            cb = self._make_progress(session.run.run_id, session)
+
+            async def _work(active_session: RunLeaseSession) -> None:
+                source_failure = None
+                try:
+                    await service.run(
+                        specs,
+                        on_progress=cb,
+                        lease_session=active_session,
+                    )
+                except RuntimeError as exc:
+                    if (
+                        str(exc)
+                        != "Scan has failed source work; inspect source progress"
+                        or not active_session.run.errors
+                        or not active_session.run.scan_inserted_job_ids
+                    ):
+                        raise
+                    source_failure = exc
+                    if not await self._run_orchestrator.checkpoint(active_session):
+                        raise RunLeaseLostError(
+                            "Scan lost its lease before publishing partial results"
+                        ) from exc
+                active_session.ensure_active()
+                await self._persist_scan_insertions(active_session.run)
+                if self._post_scan_hook is not None:
+                    active_session.ensure_active()
+
+                    def post_scan_progress(run: PipelineRun) -> None:
+                        active_session.ensure_active()
+                        cb(run)
+
+                    await self._post_scan_hook(
+                        active_session.run, specs, post_scan_progress
+                    )
+                    active_session.ensure_active()
+                if source_failure is not None:
+                    raise source_failure
+
+            self._tasks[session.run.run_id] = asyncio.create_task(
+                self._execute_run(
+                    self._scan_lock,
+                    session,
+                    _work,
+                    stack,
+                    on_finish=getattr(service, "release_completed_pipeline", None),
+                )
+            )
+            return session.run.run_id
+        except BaseException as exc:
+            try:
+                if session is not None:
+                    self._active.pop(session.run.run_id, None)
+                    await self._run_orchestrator.fail(session, exc)
+            finally:
+                try:
+                    await stack.aclose()
+                finally:
+                    self._scan_lock.release()
+            raise
+
+    async def _resolve_evaluation_scope(self, kwargs: dict[str, Any]) -> str:
+        scope = str(kwargs.pop("scope", "latest_scan"))
+        if scope == "latest_scan":
+            kwargs["job_ids"] = await self._latest_scan_inserted_job_ids()
+        elif scope != "backlog":
+            raise ValueError(f"unknown evaluation scope: {scope!r}")
+        return scope
+
+    @_track_setup
+    async def trigger_application_backfill(
+        self,
+        work: Callable[
+            [RunLeaseSession, Callable[[PipelineRun], None]], Awaitable[None]
+        ],
+    ) -> str:
+        """Own historical identity work under the existing scan lock and fence.
+
+        Args:
+            work: Backfill operation and its persisted progress callback.
+
+        Returns:
+            A stoppable run ID, without source scans or post-scan enrichment.
+
+        Raises:
+            RunConflictError: If scan/evaluate is active or shutdown has begun.
+        """
+        self._require_running()
+        self._require_unlocked(self._scan_lock, "scan")
+        self._require_unlocked(self._eval_lock, "evaluation")
+        await self._scan_lock.acquire()
+        session = None
+        try:
+            session = await self._run_orchestrator.start("scan", "application-backfill")
+            self._register(session.run, session.run.source)
+            progress = self._make_progress(session.run.run_id, session)
+
+            async def execute(active: RunLeaseSession) -> None:
+                await work(active, progress)
+
+            self._tasks[session.run.run_id] = asyncio.create_task(
+                self._execute_run(self._scan_lock, session, execute)
+            )
+            return session.run.run_id
+        except BaseException as exc:
+            try:
+                if session is not None:
+                    self._active.pop(session.run.run_id, None)
+                    await self._run_orchestrator.fail(session, exc)
+            finally:
+                self._scan_lock.release()
+            raise
+
+    @_track_setup
+    async def trigger_evaluate(self, **kwargs: Any) -> str:
+        """Start an evaluate if none active.
+
+        Args:
+            kwargs: Forwarded to evaluate_service_factory and service.run().
+                The service is built before the run is registered, so a
+                factory failure leaves no phantom active run.
+
+        Returns: The new run's run_id.
+        Raises: RunConflictError if an evaluate is already running.
+        """
+        self._require_running()
+        self._require_unlocked(self._eval_lock, "evaluation")
+        await self._preempt_application_backfill(self._eval_lock, "evaluation")
+        await self._eval_lock.acquire()
+        run: PipelineRun | None = None
+        session: RunLeaseSession | None = None
+        try:
+            scope = await self._resolve_evaluation_scope(kwargs)
+            service = self._eval_factory(**kwargs)
+            ready = getattr(self._store, "canonical_evaluation_ready", None)
+            if ready is not None and await ready():
+                kwargs["canonical"] = True
+            dry_run = bool(kwargs.get("dry_run", False))
+            if dry_run:
+                run = self._run_orchestrator.new_unpersisted_run("evaluate")
+            else:
+                session = await self._run_orchestrator.start("evaluate", "evaluate")
+                run = session.run
+            run.evaluation_scope = scope
+            scoped_job_ids = kwargs.get("job_ids")
+            run.evaluation_input_total = (
+                len(scoped_job_ids) if isinstance(scoped_job_ids, list) else None
+            )
+            self._register(run, "evaluate")
+            cb = self._make_progress(run.run_id, session)
+
+            if session is None:
+
+                async def _dry_call() -> None:
+                    await service.run(on_progress=cb, run=run, **kwargs)
+
+                task = self._execute_unpersisted_run(self._eval_lock, run, _dry_call)
+            else:
+
+                async def _work(active_session: RunLeaseSession) -> None:
+                    await service.run(
+                        on_progress=cb,
+                        lease_session=active_session,
+                        **kwargs,
+                    )
+
+                task = self._execute_evaluation(session, _work)
+            self._tasks[run.run_id] = asyncio.create_task(task)
+            return run.run_id
+        except BaseException as exc:
+            if run is not None:
+                self._active.pop(run.run_id, None)
+            try:
+                if session is not None:
+                    await self._run_orchestrator.fail(session, exc)
+            finally:
+                self._eval_lock.release()
+            raise
+
+    async def _persist_scan_insertions(self, run: PipelineRun) -> None:
+        setter = getattr(self._store, "set_state", None)
+        if setter is None:
+            return
+        payload = json.dumps(
+            {"run_id": run.run_id, "job_ids": run.scan_inserted_job_ids},
+            separators=(",", ":"),
+        )
+        await setter("latest_scan_inserted_job_ids", payload)
+
+    async def _latest_scan_inserted_job_ids(self) -> list[str]:
+        getter = getattr(self._store, "get_state", None)
+        if getter is None:
+            return []
+        raw = await getter("latest_scan_inserted_job_ids")
+        if raw is None:
+            return []
+        try:
+            payload = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            return []
+        values = payload.get("job_ids") if isinstance(payload, dict) else None
+        if not isinstance(values, list):
+            return []
+        return [value for value in values if isinstance(value, str)]
+
+    async def _execute_run(
+        self,
+        lock: asyncio.Lock,
+        session: RunLeaseSession,
+        work: Callable[[RunLeaseSession], Awaitable[None]],
+        stack: contextlib.AsyncExitStack | None = None,
+        on_finish: Callable[[PipelineRun], Awaitable[None]] | None = None,
+    ) -> None:
+        """Run work through fenced finalization, then release process state."""
+        lease_lost = False
+
+        async def _work_and_drain(active_session: RunLeaseSession) -> None:
+            try:
+                await work(active_session)
+            finally:
+                await self._drain_checkpoints(active_session.run.run_id)
+
+        try:
+            await self._run_orchestrator.execute(session, _work_and_drain)
+        except RunLeaseLostError as exc:
+            lease_lost = True
+            self._logger.error("run_failed", run_id=session.run.run_id, error=str(exc))
+        except Exception as exc:
+            self._logger.error("run_failed", run_id=session.run.run_id, error=str(exc))
+        finally:
+            try:
+                if on_finish is not None:
+                    await on_finish(session.run)
+            finally:
+                try:
+                    if stack is not None:
+                        await stack.aclose()
+                finally:
+                    try:
+                        await self._persist_backfill_stop_reason(session.run)
+                    finally:
+                        self._finish_tracking(session.run)
+                        lock.release()
+        if lease_lost and session.kind == "scan":
+            await self.recover_stale_runs()
+
+    async def _execute_evaluation(
+        self,
+        session: RunLeaseSession,
+        work: Callable[[RunLeaseSession], Awaitable[None]],
+    ) -> None:
+        """Run a persisted evaluation, then start its hook once the lock is free.
+
+        A failed or stopped run may have saved evaluations, so it starts after every
+        end except a shutdown.
+        """
+        try:
+            await self._execute_run(self._eval_lock, session, work)
+        finally:
+            if self._post_evaluate_hook is not None and not self._shutting_down:
+                task = asyncio.create_task(
+                    self._post_evaluate(self._post_evaluate_hook, session.run)
+                )
+                self._post_evaluate_tasks.add(task)
+                task.add_done_callback(self._post_evaluate_tasks.discard)
+
+    async def _post_evaluate(self, hook: PostEvaluateHook, run: PipelineRun) -> None:
+        try:
+            await hook(run)
+        except Exception as exc:
+            self._logger.error(
+                "post_evaluate_hook_failed", run_id=run.run_id, error=str(exc)
+            )
+
+    async def _persist_backfill_stop_reason(self, run: PipelineRun) -> None:
+        """Correct late cancellation before publishing released local ownership.
+
+        Args:
+            run: Finalized owned run whose reason can change during commit.
+
+        Returns:
+            After the optional conditional correction; ordinary runs are unchanged.
+        """
+        if (
+            run.source == "application-backfill"
+            and run.status == "failed"
+            and run.failure_code in {"user_stopped", "interrupted"}
+            and isinstance(self._store, ApplicationBackfillStopStore)
+        ):
+            reason = cast(BackfillStopReason, run.failure_code)
+            await self._store.override_application_backfill_stop(
+                run.run_id, failure_code=reason
+            )
+            # A user Stop arriving during shutdown correction takes precedence.
+            if reason == "interrupted" and run.failure_code == "user_stopped":
+                await self._store.override_application_backfill_stop(
+                    run.run_id, failure_code="user_stopped"
+                )
+
+    async def _execute_unpersisted_run(
+        self,
+        lock: asyncio.Lock,
+        run: PipelineRun,
+        service_call: Callable[[], Awaitable[None]],
+    ) -> None:
+        """Run a dry-run preview without any lease or pipeline-row write."""
+        try:
+            await service_call()
+            if run.status == "running":
+                self._run_orchestrator.finish_unpersisted(run, "succeeded")
+        except Exception as exc:
+            self._logger.error("run_failed", run_id=run.run_id, error=str(exc))
+            self._run_orchestrator.finish_unpersisted(run, "failed")
+        finally:
+            self._finish_tracking(run)
+            lock.release()
+
+    async def _resolve_sources(
+        self,
+        name_or_specs: str | list[SourceSpec],
+        stack: contextlib.AsyncExitStack,
+    ) -> list[SourceSpec]:
+        """Build SourceSpec list from a name string or pass through a list."""
+        if isinstance(name_or_specs, list):
+            return name_or_specs
+        if self._source_resolver is None:
+            msg = "RunManager has no scan source resolver configured"
+            raise RuntimeError(msg)
+        return await self._source_resolver(name_or_specs, stack)
+
+    @staticmethod
+    def _source_label_before_resolution(
+        name_or_specs: str | list[SourceSpec],
+    ) -> str:
+        """Label a run before source construction can perform store work."""
+        if isinstance(name_or_specs, str):
+            return name_or_specs
+        return run_source_name(name_or_specs)
+
+    def _register(self, run: PipelineRun, source: str) -> None:
+        """Track a run as active."""
+        self._active[run.run_id] = ActiveRun(
+            run_id=run.run_id,
+            source=source,
+            started_at=run.started_at,
+            run=run,
+        )
+
+    @staticmethod
+    def _require_unlocked(lock: asyncio.Lock, label: str) -> None:
+        """Raise RunConflictError if the lock is already held."""
+        if lock.locked():
+            raise RunConflictError(f"A {label} is already running")
+
+    def _require_running(self) -> None:
+        if self._shutting_down:
+            raise RunConflictError("Run manager is shutting down")
+
+    async def _preempt_application_backfill(
+        self, foreground_lock: asyncio.Lock, label: str
+    ) -> None:
+        """Await one historical task's complete finalization before admission.
+
+        Args:
+            foreground_lock: Ordinary foreground run's existing ownership lock.
+            label: Conflict label when ordinary work already owns that lock.
+
+        Returns:
+            After backfill cleanup, checkpoints, and durable lease release.
+        """
+        backfill = next(
+            (
+                run
+                for run in self._active.values()
+                if run.source == "application-backfill"
+            ),
+            None,
+        )
+        if backfill is None:
+            self._require_unlocked(foreground_lock, label)
+            return
+        task = self._tasks.get(backfill.run_id)
+        if task is None:
+            raise RunConflictError("Application backfill is still starting")
+        # Newly registered tasks must enter their finalize/finally scopes.
+        await asyncio.sleep(0)
+        if not task.done() and not task.cancelling():
+            task.cancel("foreground_priority")
+        # A cancelled foreground caller must not cancel historical cleanup again.
+        result = (await asyncio.shield(asyncio.gather(task, return_exceptions=True)))[0]
+        if isinstance(result, Exception):
+            raise result
+        self._require_running()
+
+    def _mark_cancel_reason(self, run_id: str, *, shutdown: bool) -> None:
+        """Preserve an explicit Stop/shutdown while priority cleanup is pending.
+
+        Args:
+            run_id: Locally owned run to mark.
+            shutdown: Whether the process is ending instead of a user Stop.
+
+        Returns:
+            None; the existing finalizer persists the failure fields.
+        """
+        active = self._active.get(run_id)
+        if active is not None and (
+            not shutdown or active.run.failure_code != "user_stopped"
+        ):
+            active.run.failure_code = "interrupted" if shutdown else "user_stopped"
+            active.run.failure_message = (
+                "Run interrupted by service shutdown"
+                if shutdown
+                else "Run stopped by user"
+            )
+
+    async def shutdown(self) -> None:
+        """Stop scheduling and await owned work before the store is closed."""
+        self._shutting_down = True
+        for run_id in list(self._tasks):
+            self._mark_cancel_reason(run_id, shutdown=True)
+        if self._setup_tasks:
+            await asyncio.gather(*list(self._setup_tasks), return_exceptions=True)
+        tasks = list(self._tasks.values())
+        for run_id in list(self._tasks):
+            self._mark_cancel_reason(run_id, shutdown=True)
+        # Let newly registered coroutines enter their cleanup/finalize scope.
+        await asyncio.sleep(0)
+        for task in tasks:
+            if not task.done() and not task.cancelling():
+                task.cancel("service_shutdown")
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        # Workers normally drain these in their finally blocks; also cover
+        # a task cancelled before its coroutine began running.
+        for run_id in list(self._checkpoint_tasks):
+            await self._drain_checkpoints(run_id)
+        hooks = list(self._post_evaluate_tasks)
+        for task in hooks:
+            task.cancel("service_shutdown")
+        if hooks:
+            await asyncio.gather(*hooks, return_exceptions=True)
+
+    def _finish_tracking(self, run: PipelineRun) -> None:
+        """Broadcast a final snapshot and release in-process tracking only."""
+        self._progress.broadcast(run.run_id, run)
+        self._progress.close(run.run_id)
+        self._active.pop(run.run_id, None)
+        self._tasks.pop(run.run_id, None)
+
+    def get_active_runs(self) -> list[ActiveRun]:
+        """Return all currently active runs.
+
+        Returns: Active runs, ordered by start time.
+        """
+        return sorted(self._active.values(), key=lambda r: r.started_at)
+
+    def subscribe(self, run_id: str) -> asyncio.Queue[PipelineRun | object]:
+        """Register a progress queue for a run.
+
+        Args:
+            run_id: Run to stream progress for.
+
+        Returns: Queue of PipelineRun snapshots followed by RUN_DONE. A run
+            no longer active gets RUN_DONE immediately, so a subscriber that
+            loses the finish race terminates instead of waiting forever.
+            Pass the queue to unsubscribe() when done.
+        """
+        return self._progress.subscribe(run_id, active=run_id in self._active)
+
+    def unsubscribe(
+        self, run_id: str, queue: asyncio.Queue[PipelineRun | object]
+    ) -> None:
+        """Remove a subscriber queue registered via subscribe().
+
+        Args:
+            run_id: Run the queue was subscribed to.
+            queue: The queue returned by subscribe().
+        """
+        self._progress.unsubscribe(run_id, queue)
+
+    def _make_progress(
+        self, run_id: str, session: RunLeaseSession | None = None
+    ) -> Callable[[PipelineRun], None]:
+        """Broadcast progress and checkpoint persisted runs."""
+        broadcast = self._progress.callback(run_id)
+
+        def _callback(run: PipelineRun) -> None:
+            broadcast(run)
+            if (
+                session is None
+                or session.lease_lost
+                or not _should_checkpoint_evaluation_progress(run)
+            ):
+                return
+            if session.kind == "scan":
+                if self._checkpoint_tasks.get(run_id):
+                    return
+                flush = asyncio.Event()
+                self._scan_checkpoint_flush[run_id] = flush
+                task = asyncio.create_task(self._checkpoint_scan(session, flush))
+            else:
+                task = asyncio.create_task(self._run_orchestrator.checkpoint(session))
+            self._checkpoint_tasks.setdefault(run_id, set()).add(task)
+            task.add_done_callback(
+                lambda completed: self._checkpoint_done(run_id, completed)
+            )
+
+        return _callback
+
+    async def _checkpoint_scan(
+        self, session: RunLeaseSession, flush: asyncio.Event
+    ) -> bool:
+        """Coalesce scan bursts; keep SSE live without spawning SQLite writers."""
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(flush.wait(), timeout=1.0)
+        return await self._run_orchestrator.checkpoint(session)
+
+    def _checkpoint_done(self, run_id: str, task: asyncio.Task[bool]) -> None:
+        tasks = self._checkpoint_tasks.get(run_id)
+        if tasks is not None:
+            tasks.discard(task)
+            if not tasks:
+                self._checkpoint_tasks.pop(run_id, None)
+                self._scan_checkpoint_flush.pop(run_id, None)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            self._logger.warning("run_checkpoint_failed", error=str(exc))
+
+    async def _drain_checkpoints(self, run_id: str) -> None:
+        flush = self._scan_checkpoint_flush.get(run_id)
+        if flush is not None:
+            flush.set()
+        tasks = tuple(self._checkpoint_tasks.get(run_id, ()))
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def stop_run(self, run_id: str) -> bool:
+        """Stop a local task or atomically clear a durable stale run.
+
+        Args:
+            run_id: Pipeline run identity to stop.
+
+        Returns:
+            True when the run was stopped.
+        """
+        task = self._tasks.get(run_id)
+        if task is not None:
+            self._mark_cancel_reason(run_id, shutdown=False)
+            await asyncio.sleep(0)
+            if not task.done() and not task.cancelling():
+                task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.shield(task)
+            return True
+        if isinstance(self._store, RecoverableRunLeaseStore):
+            return await self._store.stop_pipeline_run(run_id, now=datetime.now(UTC))
+        return False
+
+    async def recover_stale_runs(self) -> int:
+        """Recover expired durable leases when the store supports it.
+
+        Returns:
+            Number of stale runs recovered.
+        """
+        if self._shutting_down:
+            return 0
+        if isinstance(self._store, RecoverableRunLeaseStore):
+            recovered = await self._store.recover_expired_run_leases(
+                now=datetime.now(UTC)
+            )
+            for old in recovered:
+                if (
+                    old.kind != "scan"
+                    or old.restart_count != 0
+                    or not self._auto_restart_allowed(old.source)
+                ):
+                    continue
+                try:
+                    replacement = await self.trigger_scan(
+                        old.source,
+                        restart_count=old.restart_count + 1,
+                        resume_from_run_id=old.run_id,
+                    )
+                except Exception as exc:
+                    self._logger.warning(
+                        "run_auto_restart_skipped",
+                        run_id=old.run_id,
+                        source=old.source,
+                        error=str(exc),
+                    )
+                    continue
+                await self._store.link_restarted_run(old.run_id, replacement)
+            return len(recovered)
+        return 0
+
+    async def resume_interrupted_redis_scan(self) -> str | None:
+        """Resume the latest crashed durable scan once its browser is connected.
+
+        Never resurrect an older scan superseded by a newer user action. Normal
+        source errors and manual stops require an explicit retry, not a loop.
+
+        Returns:
+            Replacement run ID when resumption starts, or None when no scan is resumed.
+        """
+        if self._shutting_down or self._scan_lock.locked():
+            return None
+        getter = getattr(self._store, "get_state", None)
+        listing = getattr(self._store, "list_pipeline_runs", None)
+        if getter is None or listing is None:
+            return None
+        offset = 0
+        while True:
+            runs, total = await listing(limit=50, offset=offset)
+            old = next((run for run in runs if run.source != "evaluate"), None)
+            if old is not None or not runs or offset + len(runs) >= total:
+                break
+            offset += len(runs)
+        if (
+            old is None
+            or old.status != "failed"
+            or old.failure_code != "interrupted"
+            or old.restarted_by_run_id
+            or not self._auto_restart_allowed(old.source)
+            or not await getter(f"redis-pipeline-run:{old.run_id}")
+        ):
+            return None
+        replacement = await self.trigger_scan(
+            old.source,
+            restart_count=old.restart_count + 1,
+            resume_from_run_id=old.run_id,
+        )
+        await cast(RecoverableRunLeaseStore, self._store).link_restarted_run(
+            old.run_id, replacement
+        )
+        return replacement
+
+
+__all__ = [
+    "RUN_DONE",
+    "ActiveRun",
+    "PostEvaluateHook",
+    "RunConflictError",
+    "RunManager",
+    "SourceResolver",
+]
+
+
+def _should_checkpoint_evaluation_progress(run: PipelineRun) -> bool:
+    """Keep per-job SSE live while bounding durable evaluation writes."""
+    if run.source != "evaluate":
+        return True
+    if run.progress_stage == "stage_a":
+        processed, total = run.stage_a_processed, run.stage_a_total
+    elif run.progress_stage == "stage_b":
+        processed, total = run.stage_b_processed, run.stage_b_total
+    else:
+        return True
+    return (
+        processed == 0
+        or processed % _EVALUATION_CHECKPOINT_INTERVAL == 0
+        or (total is not None and processed == total)
+    )

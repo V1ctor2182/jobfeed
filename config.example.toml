@@ -1,0 +1,297 @@
+[db]
+# Shared persistent SQLite file. JOBFEED_DB__PATH overrides JOBFEED_DB_PATH.
+path = "data/jobfeed.sqlite"
+
+[redis_pipeline]
+# Start compose.redis.yaml before enabling. Redis failure fails the scan visibly.
+enabled = false
+url = "redis://127.0.0.1:6379/0"
+namespace = "jobfeed"
+
+[llm]
+# Recommended: the low-latency pair. codex-cli reuses your subscription auth at
+# zero marginal token cost; openai-compat (below) serves users without a
+# subscription, or CI/server contexts, via any OpenAI-compatible API.
+# Measured Stage-B P99 (Phase 3 Decision 5): codex-cli 28s vs claude-cli 128s,
+# so claude-cli + the Anthropic compat endpoint are the higher-latency
+# alternatives shown commented below.
+stage_a = "codex-cli/gpt-5.4-mini"         # or "openai-compat/gpt-4o-mini", "claude-cli/claude-haiku-4-5", "mock/stage-a"
+stage_b = "codex-cli/gpt-5.5"              # or "openai-compat/gpt-4o",      "claude-cli/claude-sonnet-4-6", "mock/stage-b"
+codex_timeout_s = 60
+claude_timeout_s = 210
+
+# --- openai-compat backend (Decision 9) ---------------------------------
+# ONE adapter drives every OpenAI-compatible provider, parameterised only by
+# base_url + which env var holds the key + the model in the spec string. Adding
+# a provider is a config change, not code. SECURITY: only the env-var NAME goes
+# in this file (openai_compat_api_key_env) — NEVER the key value itself. The
+# adapter reads os.environ[that name] at build time. The normal host runtime
+# reads that environment variable directly. For custom providers, set
+# openai_compat_api_key_env = "JOBFEED_OPENAI_COMPAT_API_KEY" and put the key in
+# that generic host env var.
+#
+# Both openai-compat/* specs (stage_a AND stage_b) target the SINGLE
+# openai_compat_base_url below; cross-provider stage_a/stage_b over
+# openai-compat is out of Phase 4 scope.
+#
+# Latency note: openai-compat latency is the PROVIDER's, not the adapter's. A
+# local Ollama or a large model can be slow, so the low-latency recommendation
+# is bound to a FAST hosted provider (OpenAI / DeepSeek / MiniMax).
+#
+# OpenAI (default):
+# openai_compat_base_url = "https://api.openai.com/v1"
+# openai_compat_api_key_env = "OPENAI_API_KEY"
+# openai_compat_timeout_s = 60
+#
+# DeepSeek:
+# openai_compat_base_url = "https://api.deepseek.com"
+# openai_compat_api_key_env = "DEEPSEEK_API_KEY"   # then: stage_a = "openai-compat/deepseek-chat"
+#
+# MiniMax:
+# openai_compat_base_url = "https://api.minimax.io/v1"
+# openai_compat_api_key_env = "MINIMAX_API_KEY"    # then: stage_a = "openai-compat/MiniMax-Text-01"
+#
+# Local Ollama (no real key; the SDK still requires the env var to be non-empty):
+# openai_compat_base_url = "http://localhost:11434/v1"
+# openai_compat_api_key_env = "JOBFEED_OPENAI_COMPAT_API_KEY"  # set JOBFEED_OPENAI_COMPAT_API_KEY=ollama; then: stage_a = "openai-compat/llama3.1"
+#   The normal host runtime can use this localhost URL directly.
+#
+# Anthropic via its OpenAI-compat endpoint (higher latency; test-only per
+# Anthropic — no prompt caching / extended thinking, but the eval use case
+# needs none of those). Subscription users should prefer claude-cli instead.
+# openai_compat_base_url = "https://api.anthropic.com/v1/"
+# openai_compat_api_key_env = "ANTHROPIC_API_KEY"  # then: stage_b = "openai-compat/claude-sonnet-4-6"
+# ------------------------------------------------------------------------
+
+# --- Azure OpenAI backend ------------------------------------------------
+# The GUI onboarding flow is recommended: enter the resource endpoint and API
+# key, enter existing deployment aliases, map each alias to its base model,
+# review the per-million-token prices, and explicitly confirm them. The key is
+# stored only in data/secrets.toml; this file contains its env-var name only.
+# Manual equivalent (prices below are examples, not a pricing guarantee):
+# stage_a = "azure-openai/quick-prod"
+# stage_b = "azure-openai/detailed-prod"
+# azure_openai_endpoint = "https://YOUR-RESOURCE.openai.azure.com/openai/v1"
+# azure_openai_api_key_env = "AZURE_OPENAI_API_KEY"
+# azure_openai_timeout_s = 60
+# azure_deployment_pricing = [
+#   { deployment = "quick-prod", base_model = "gpt-4.1-mini", input_usd_per_million = 0.40, output_usd_per_million = 1.60, cached_input_usd_per_million = 0.10 },
+#   { deployment = "detailed-prod", base_model = "gpt-4.1", input_usd_per_million = 2.00, output_usd_per_million = 8.00, cached_input_usd_per_million = 0.50 },
+# ]
+# ------------------------------------------------------------------------
+
+max_daily_score_calls = 150
+max_daily_cost_usd = 10.0
+max_concurrent = 4
+# jobfeed scores each job against YOUR master résumé. This points at the committed
+# example so `evaluate` runs the moment you clone. To use your own (it's personal
+# data — never commit it):  cp resume.example.md resume.md  (resume.md is gitignored)
+# then edit resume.md and set:  master_resume_path = "resume.md"
+master_resume_path = "resume.example.md"
+# Optional: personal calibration anchors (hiring window, real-outcome anchors, GPA
+# notes) appended to the scoring prompt — see preamble_personal.example.md. To enable:
+#   cp preamble_personal.example.md preamble_personal.md   (preamble_personal.md is gitignored)
+# then edit it and uncomment the next line:
+# preamble_personal_path = "preamble_personal.md"
+
+[scoring]
+stage_a_threshold = 60
+# Bump the affected explicit version when a scoring prompt or resume input
+# changes. Completed canonical scores with an older version are archived and
+# reclaimed; no content fingerprint is added.
+# stage_a_prompt_version = "v1"
+# stage_b_prompt_version = "v1"
+# resume_version = "v1"
+# ml_gate_enabled = false       # Phase 5 pre-Stage-A XGBoost filter (see [ml_gate] below)
+# Default per-stage cap for `jobfeed evaluate` when neither --limit nor --full
+# is passed. CLI flags still override this; --full ignores it entirely.
+default_eval_limit = 150
+
+# Digest file output — when output_dir is set, `jobfeed digest` also writes
+# today.md plus a dated YYYY-MM-DD.md there (both overwritten each run), and
+# `digest --quiet` writes silently. Keep this under ~/.cache/jobfeed/ —
+# ~/.jobfeed/ is read-only. The canonical host wrapper (`./bin/jobfeed`)
+# runs from the repo and expands this path directly on the host.
+[digest]
+# output_dir = "~/.cache/jobfeed/digests"
+
+[execution]
+default_runner = "in_process"
+
+[observability]
+log_level = "info"
+log_format = "human"
+# otel_enabled = false          # set true to export traces to the OTLP endpoint
+# otel_endpoint = "http://localhost:4317"
+# otel_service_name = "jobfeed"
+# sentry_dsn =                  # unset = Sentry disabled; set to your project DSN
+# sentry_environment = "dev"
+
+[sources.ats]
+enabled = true
+max_concurrent = 10
+probe_ttl_days = 7
+failure_threshold = 3
+seed_companies = ["anthropic", "openai", "palantir"]
+
+# Finds new company boards through Codex web search. A board is added only when
+# its own vendor API confirms a job matching sources.ats.title_keywords, and the
+# ats source polls it from then on. Needs the ats source enabled with
+# title_keywords set. Removed boards stay removed.
+[sources.ats_search]
+enabled = false
+# queries = [
+#   'site:jobs.ashbyhq.com "software engineer" "new grad"',
+#   'site:job-boards.greenhouse.io "software engineer" "new grad"',
+#   'site:jobs.lever.co "software engineer" "new grad"',
+# ]                          # at most 6
+# max_new_boards = 10        # boards added per scan, at most 25
+# search_timeout_s = 120.0   # at most 300
+
+# Finds employer boards on Ashby, Greenhouse and Lever from VC portfolio job
+# boards (Getro-hosted boards and a16z) and recent Hacker News "Who is hiring?"
+# threads, adds every new company to the ats source, and returns the target-title
+# jobs of the boards it added. Lookup answers are cached in
+# data/ats_discovery_cache.json, so later scans only look up new companies.
+# Needs the ats source enabled. Removed companies stay removed.
+# `jobfeed discover-companies` previews the same discovery; --apply adds the
+# companies without scanning jobs.
+[sources.ats_discovery]
+enabled = false
+# getro_boards = ["https://jobs.accel.com", "https://jobs.generalcatalyst.com"]
+# a16z = true
+# hn_threads = 3              # newest hiring threads; 0 turns HN off
+# max_lookups_per_scan = 400  # one request per portfolio company; the rest waits
+# max_concurrent = 4
+# pacing_s = 0.5              # gap between requests to one host
+# recheck_days = 30           # re-ask companies that had no ATS link
+# timeout_s = 20.0
+
+# NOTE: list fields below (e.g. search_urls) are TOML-only. They cannot be set
+# via JOBFEED_SOURCES__*__SEARCH_URLS env vars: the nested-env setter stores a
+# bare string at the leaf, which Pydantic will not coerce into a list.
+
+[sources.speedyapply]
+enabled = false
+# search_urls = ["https://raw.githubusercontent.com/speedyapply/2026-SWE-College-Jobs/main/README.md"]
+# max_concurrent = 10
+# fetch_timeout_s = 30.0
+
+# a16z speedrun talent network. search_urls must use the jobs API form; the
+# website's /jobs page sits behind a Cloudflare challenge for non-browser clients.
+[sources.speedrun]
+enabled = false
+# search_urls = ["https://speedrun-talent-network.com/api/v1/jobs?fn=engineering&lvl=new_grad,junior,mid&posted=7d&sort=new"]
+# max_jobs = 500
+# pacing_s = 3.0            # spacing between requests; bursts trip HTTP 429
+# timeout_s = 30.0
+
+[sources.indeed]
+enabled = false
+# search_urls = []
+# max_jobs = 100
+# max_concurrent = 2
+# timeout_s = 60.0
+# country_indeed = "usa"
+# hours_old =               # unset; when set, overrides each URL's fromage window
+# repeat = 1                # re-run each URL N times, union by canonical_id;
+#                           # raise (e.g. 4) for Indeed's non-deterministic backend
+
+# LinkedIn guest scraper — hits LinkedIn's anonymous guest endpoints directly
+# (no login, no browser). Paste regular LinkedIn jobs search URLs; query params
+# like f_TPR pass through verbatim (e.g. f_TPR=r86400 = posted in the last 24h).
+# Discovery stores list-card data only; run `./bin/jobfeed enrich-linkedin-guest`
+# (the canonical host CLI) afterwards for the paced JD-fetch pass over the
+# same per-IP budget.
+[sources.linkedin_guest]
+enabled = false
+# search_urls = ["https://www.linkedin.com/jobs/search/?keywords=software%20engineer%20intern&location=United%20States&f_TPR=r86400"]
+# max_jobs = 1000            # cap on postings collected per scan
+# pacing_s = 1.0             # sleep between guest requests (list pages + JD fetches)
+# enrich_batch_limit = 500   # max rows one enrich pass attempts
+# enrich_after_scan = true   # scan runs one JD-enrich pass after this source;
+#                            # false = discover-only (run enrich-linkedin-guest manually)
+# proxies =                  # unset = direct; e.g. "http://user:pass@host:port"
+# timeout_s = 15.0           # per-request read timeout
+
+# LinkedIn guest (anonymous, above) and LinkedIn Playwright (authenticated,
+# below) are alternative LinkedIn paths; pick at most one for routine scans to
+# avoid doubled LinkedIn traffic.
+[sources.linkedin]
+enabled = false
+# search_urls = [
+#   "https://www.linkedin.com/jobs/search/?keywords=software%20engineer%20intern",
+#   { url = "https://www.linkedin.com/jobs/search/?keywords=fall%202026%20intern", max_jobs = 25, group = "fall", group_max_jobs = 10 },
+# ]
+# max_jobs = 100
+# headless = true
+# tier2_cap = 30
+# profile_dir = "~/.cache/jobfeed/linkedin"
+# lock_path = "~/.cache/jobfeed/enrich.lock"
+
+# Phase 5 hard filters — cheap rule-based pre-LLM filtering.
+# All lists default to empty (no filtering). posted_within_hours takes priority;
+# posted_within_days remains readable for old configs. title_blocklist is NOT
+# applied here; it moved to the ML gate.
+[hard_filters]
+title_blocklist = []             # accepted for back-compat but NOT applied here — the ML gate handles seniority/title
+company_blocklist = []           # e.g. ["staffing agency", "recruiting firm"]
+location_allowlist = []          # e.g. ["remote", "san francisco"] — empty = any location
+location_blocklist = []          # e.g. ["new york", "london"]
+# posted_within_hours = 36       # exact cutoff except Indeed keeps 48h; posted_at preferred, then discovered_at
+# posted_within_days =           # legacy whole-day setting; ignored when posted_within_hours is set
+big_company_list = []            # e.g. ["google", "meta", "apple"] — get big_company_days leniency
+big_company_days = 90            # stale cutoff for big-company postings (default 90 days)
+
+# Top New York jobs for your recruiters. See docs/recruiter-sheet.md. Autopilot does not
+# apply to a job on this sheet. These are the defaults, except for excluded_companies.
+[recruiter_sheet]
+min_fit = 78
+max_major_gaps = 2
+excluded_companies = []          # e.g. ["Digital Waffle", "CyberCoders"] — staffing agencies; case-insensitive
+min_pay = 130000                 # annual midpoint of the posting's stated range; a posting with no stated range fails
+funding_within_months = 12       # how recent a company's last funding round must be; a company not checked yet stays on the sheet and held
+# locations: regular expressions, case-insensitive. Leave unset for New York City without
+# upstate New York. Setting it replaces the whole default list in domain/recruiter_sheet.py.
+# locations = ['\bnyc\b', '\bnew york city\b']
+# The Google Sheet that recruiter_sheet_sync keeps in step. Empty means the sync does nothing.
+google_sheet_id = ""             # the long ID in the sheet's URL
+google_sheet_tab_id = 0          # the gid of the Jobs tab
+
+# Phase 5 ML gate — the trained XGBoost model ships in-repo under models/ml_gate/.
+# Override threshold_override (0–1) to tune the gate's acceptance threshold at
+# runtime without retraining; leave unset to use the model's built-in threshold.
+[ml_gate]
+model_dir = "models/ml_gate"
+model_version = "v20260601T170453Z"
+# policy_version = "v1"   # bump when gate decision rules change
+embedding_model = "all-MiniLM-L6-v2"
+embedding_max_chars = 2000
+# threshold_override =    # unset; when set, overrides the model's built-in threshold
+max_candidates = 5000
+
+# Uses your signed-in Chrome through the existing Jobfeed extension.
+[sources.linkedin_extension]
+enabled = false
+queries = ["Software Engineer New Grad", "AI Engineer New Grad"]
+max_jobs = 500
+batch_size = 25
+pacing_s = 1.0
+timeout_s = 900.0
+
+[sources.handshake]
+enabled = false
+queries = ["Software Engineer New Grad", "AI Engineer New Grad"]
+# Initial Most Relevant backfill precedes newest-first incremental scans.
+max_jobs = 500
+batch_size = 25
+pacing_s = 1.0
+timeout_s = 900.0
+
+[intermediary]
+# Resolve Dice/Haystack/Jobverse against internal ATS records before web search.
+enabled = true
+external_search = true
+search_model = "gpt-5.6-luna"
+max_searches_per_scan = 3
+search_timeout_s = 60

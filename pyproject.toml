@@ -1,0 +1,183 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jobfeed"
+version = "0.1.0"
+description = "Local-first job scanning and evaluation pipeline."
+requires-python = ">=3.11"
+dependencies = [
+    "aiosqlite >= 0.20",
+    "redis >= 5, < 7",
+    "alembic >= 1.15",
+    "asyncpg >= 0.30",
+    "beautifulsoup4 >= 4.12",
+    # Native Amazon Bedrock provider: credential chain, model discovery, and
+    # the provider-neutral Converse runtime API.
+    "boto3 >= 1.42, < 2",
+    "click",
+    # FastAPI thin shell served by uvicorn from `jobfeed
+    # serve`; python-multipart backs the multipart apply-upload route.
+    # >= 0.115: first release with query-parameter Pydantic models
+    # (`Annotated[JobsListParams, Query()]`), which the /api/jobs route uses;
+    # an older constrained FastAPI would not parse that query contract. The
+    # floor keeps locked/constrained installs reproducible, not just fresh
+    # latest-resolves.
+    "fastapi >= 0.115",
+    # ML gate: numpy (feature vectorizer), xgboost (model load), and
+    # the fastembed ONNX embedder are all core — exercised by `make quality`
+    # unit tests and lazy-imported in the gate. fastembed runs `all-MiniLM-L6-v2`
+    # via onnxruntime (~200MB, NO torch), so there is no OpenMP/torch segfault
+    # risk. Its only outbound
+    # network is a one-time HuggingFace download of the ONNX model weights.
+    "fastembed >= 0.4",
+    "httpx >= 0.28",
+    "jinja2 >= 3.1",
+    "numpy >= 1.26",
+    "xgboost >= 3.2.0",
+    # OpenAI SDK drives the `openai-compat` LLM backend (Decision 9). Lazy-imported
+    # inside the factory branch + under TYPE_CHECKING in the adapter, so the rest
+    # of the package imports cleanly even when the SDK is absent.
+    # >= 1.57.1: first release compatible with httpx 0.28 (which dropped the
+    # `proxies` kwarg). Older SDKs pass `proxies` and crash constructing
+    # AsyncOpenAI under our httpx floor — see openai-python#1902. The floor keeps
+    # locked/constrained installs reproducible, not just fresh latest-resolves.
+    "openai >= 1.57.1, < 3",
+    "psycopg2-binary >= 2.9",
+    "pydantic",
+    "Pillow >= 10",
+    "playwright >= 1.48",
+    # Onboarding extracts supported résumé formats locally before any model call.
+    "pypdf >= 5.0",
+    "python-docx >= 1.1",
+    # >= 1.1.82: the version we validate against; older 1.1.x predates the
+    # country_indeed / linkedin_fetch_description kwargs _jobspy.scrape passes,
+    # which would otherwise raise (contained as JobSpyError -> silent 0 jobs).
+    "python-jobspy >= 1.1.82",
+    # >= 0.0.7: the python-multipart API FastAPI's Form/File parsing requires
+    # for the apply-upload route; older releases break the multipart handler.
+    "python-multipart >= 0.0.7",
+    "structlog",
+    # >= 0.30: the uvicorn that runs `jobfeed serve`; a modern floor keeps the
+    # loopback server's lifespan/shutdown behavior reproducible across installs.
+    "uvicorn >= 0.30",
+    # Uvicorn's base install has no WebSocket transport. The Jobright Chrome
+    # bridge needs this at runtime; without it every Upgrade request returns 404.
+    "websockets >= 15, < 16",
+    # Observability: OpenTelemetry SDK + exporters + auto-instrumentation
+    # for httpx, asyncpg, and FastAPI; Sentry error tracking with FastAPI integration.
+    "opentelemetry-api >= 1.25",
+    "opentelemetry-sdk >= 1.25",
+    "opentelemetry-exporter-otlp-proto-grpc >= 1.25",
+    "opentelemetry-instrumentation-httpx >= 0.46b",
+    "opentelemetry-instrumentation-asyncpg >= 0.46b",
+    "opentelemetry-instrumentation-fastapi >= 0.46b",
+    "sentry-sdk[fastapi] >= 2.0",
+    "sqlalchemy >= 2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "mypy",
+    "pre-commit",
+    "pytest",
+    "pytest-asyncio",
+    "pytest-playwright",
+    "respx >= 0.22",
+    "ruff == 0.15.14",
+    "scipy-stubs==1.15.3.0",
+    "optype==0.9.3",  # Newer releases use syntax incompatible with the 3.11 mypy target.
+    "testcontainers[postgres] >= 4.0",
+]
+
+[project.scripts]
+jobfeed = "jobfeed.cli:cli"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"jobfeed.adapters.migration" = ["canonical_schema_manifest_v1.json"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "C4", "C901", "RET", "ARG", "PL", "RUF"]
+ignore = ["PLR0911", "PLR0912", "PLR0915"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/jobfeed/ports/*.py" = ["ARG002", "PLR0913"]
+"src/jobfeed/adapters/store/postgres.py" = ["ARG002", "E501", "PLR0913", "SIM117"]
+"tests/**/test_ports.py" = ["ARG002", "PLR0913"]
+# The dedupe tests build JobPosting fixtures via a keyword-only `_job` helper
+# that exposes every dedup-relevant field (>5 kwargs) so each test can pin one
+# decisive key; that is the point of the helper, not accidental sprawl.
+"tests/unit/test_dedupe.py" = ["PLR0913"]
+"tests/contract/test_dedupe_contract.py" = ["PLR0913"]
+# The evaluation-persistence contract pins exact Stage A / Stage B / gate scores
+# (75, 72, …) as frozen fixtures; those literals ARE the contract, so PLR2004
+# magic-value warnings on them are noise.
+"tests/contract/test_evaluation_persistence.py" = ["PLR2004"]
+"tests/conftest.py" = ["PLC0415"]
+# SpeedyApply markdown-table fixtures embed HTML anchors that are inherently
+# wider than 88 chars; the table rows cannot be wrapped without corrupting the
+# fixture. E501 stays active everywhere else.
+"tests/unit/test_speedyapply_markdown.py" = ["E501"]
+"tests/unit/test_speedyapply_routing.py" = ["E501"]
+"tests/fixtures/generate_legacy_fixture.py" = ["PLR2004", "E501", "C901", "PLC0415"]
+# The ML-feature parity battery asserts the exact legacy-pinned vocab widths
+# (39 techs, 9 domains, STRUCTURED_DIM=66); those literals ARE the contract,
+# so PLR2004 magic-value warnings on them are noise.
+"tests/unit/test_ml_features.py" = ["PLR2004"]
+# The vectorize + gate batteries pin the exact 450-dim layout widths, block
+# sums, the meta threshold (0.5), and small batch/survivor counts; those
+# literals ARE the contract, so PLR2004 magic-value warnings are noise.
+"tests/unit/test_ml_vectorize.py" = ["PLR2004"]
+"tests/unit/test_xgboost_gate_load.py" = ["PLR2004"]
+"tests/unit/test_job_priority.py" = ["PLR2004"]
+# Interview round store tests assert sequential round_index values (1, 2, 3)
+# and scheduled date components; those literals ARE the contract.
+"tests/integration/test_interview_rounds_store.py" = ["PLR2004"]
+# Twin cascade / status query tests assert cluster sizes, succeeded counts,
+# and history lengths; those literals ARE the contract.
+"tests/integration/test_status_queries_store.py" = ["PLR2004"]
+"tests/integration/test_twin_cascade_store.py" = ["PLR2004"]
+"migrations/env.py" = ["PLC0415"]
+"migrations/versions/*.py" = ["E501"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.pylint]
+max-args = 5
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unused_ignores = true
+warn_return_any = true
+disallow_any_generics = true
+mypy_path = "src"
+
+# jobspy and pandas ship no type stubs / py.typed marker. They are confined to
+# the JobSpy isolation boundary (adapters/sources/_jobspy*.py); treat their
+# imports as untyped rather than failing strict mode. xgboost, fastembed, and
+# onnxruntime likewise ship no stubs and are confined to the lazily imported
+# ML-gate adapter (adapters/ml/*); treat them as untyped too.
+[[tool.mypy.overrides]]
+module = ["boto3.*", "botocore.*", "jobspy.*", "pandas", "xgboost.*", "fastembed.*", "onnxruntime.*", "opentelemetry.*", "sentry_sdk.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+markers = [
+    "sqlite: default SQLite runtime and store-contract lane",
+    "postgres: explicit PostgreSQL migration, rollback, or compatibility lane",
+    "live: requires real HTTP to external APIs (manual only)",
+    "browser: requires Playwright browser binaries",
+    "mlmodel: requires the real ML model + embedder download",
+]
+addopts = "-m 'not postgres and not live and not browser and not mlmodel'"

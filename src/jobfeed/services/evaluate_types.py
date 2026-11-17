@@ -1,0 +1,73 @@
+"""Typed containers used to configure EvaluateService."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Literal
+
+from jobfeed.domain.filtering import HardFilters
+from jobfeed.personal_ml_learning import PersonalMLLearningService
+from jobfeed.ports.llm import LLMClient
+from jobfeed.ports.ml_gate import MLGate
+from jobfeed.ports.prompts import PromptRenderer
+from jobfeed.ports.seniority_gate import SeniorityGate
+from jobfeed.ports.store import JobStore
+from jobfeed.ports.store_ext import StageBThresholdSync
+from jobfeed.ports.store_ops import StoreOpsMixin
+from jobfeed.ports.store_status import StoreStatusMixin
+
+
+@dataclass(frozen=True, kw_only=True)
+class EvaluateDependencies:
+    """Ports used by EvaluateService."""
+
+    store: JobStore
+    store_ops: StoreOpsMixin
+    store_status: StoreStatusMixin
+    prompt_renderer: PromptRenderer
+    llm_stage_a: LLMClient
+    llm_stage_b: LLMClient
+    llm_stage_b_sweep: LLMClient | None = None
+    ml_gate: MLGate | None = None
+    seniority_gate: SeniorityGate | None = None
+    hard_filters: HardFilters | None = None
+    personal_ml: PersonalMLLearningService | None = None
+    stage_b_threshold_sync: StageBThresholdSync | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
+class EvaluateLLMConfig:
+    """LLM runtime settings consumed by EvaluateService."""
+
+    stage_a: str
+    stage_b: str
+    max_concurrent: int
+    max_daily_score_calls: int
+    max_daily_cost_usd: float
+
+
+@dataclass(frozen=True, kw_only=True)
+class EvaluateRuntimeConfig:
+    """Runtime knobs used by EvaluateService."""
+
+    llm: EvaluateLLMConfig
+    stage_a_threshold: int
+    resume_text: str
+    default_eval_limit: int = 150
+    ml_gate_enabled: bool = False
+    ml_gate_max_candidates: int = 5000
+    seniority_gate_mode: Literal["off", "shadow", "filter"] = "off"
+    stage_a_prompt_version: str = "v1"
+    stage_b_prompt_version: str = "v1"
+    resume_version: str = "v1"
+    ml_gate_model_version: str = "unspecified"
+    ml_gate_threshold_override: float | None = None
+    ml_gate_policy_version: str = "v1"
+    seniority_gate_model_version: str = "unspecified"
+    seniority_gate_threshold: float | None = None
+    seniority_gate_policy_version: str = "v1"
+    ghost_days: int = 30
+    archive_ignored_days: int = 14
+
+
+__all__ = ["EvaluateDependencies", "EvaluateLLMConfig", "EvaluateRuntimeConfig"]

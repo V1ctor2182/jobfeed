@@ -1,0 +1,275 @@
+"""Deterministic hard filters for source job postings."""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
+
+from jobfeed.domain.ai_data_work import ai_data_work_reason
+from jobfeed.domain.eligibility import _NON_US_MARKER
+from jobfeed.domain.intermediary import intermediary_posting
+from jobfeed.domain.job_age import effective_job_date
+from jobfeed.domain.models import JobPosting
+
+_UNITED_STATES_ALLOWLIST_VALUE = "united states"
+_US_NAME_MARKER = re.compile(
+    r"\b(?:united states(?: of america)?|u\.s\.a\.?|u\.s\.?|usa|us)\b",
+    re.IGNORECASE,
+)
+_US_STATE_NAME = re.compile(
+    r"\b(?:alabama|alaska|arizona|arkansas|california|colorado|connecticut|"
+    r"delaware|florida|georgia|hawaii|idaho|illinois|indiana|iowa|kansas|"
+    r"kentucky|louisiana|maine|maryland|massachusetts|michigan|minnesota|"
+    r"mississippi|missouri|montana|nebraska|nevada|new hampshire|new jersey|"
+    r"new mexico|new york|north carolina|north dakota|ohio|oklahoma|oregon|"
+    r"pennsylvania|rhode island|south carolina|south dakota|tennessee|texas|"
+    r"utah|vermont|virginia|washington|west virginia|wisconsin|wyoming|"
+    r"district of columbia)\b",
+    re.IGNORECASE,
+)
+_NEW_MEXICO = re.compile(r"\bnew mexico\b", re.IGNORECASE)
+_INDEED_MINIMUM_HOURS = 48
+_US_STATE_CODES = frozenset(
+    [
+        "AL",
+        "AK",
+        "AZ",
+        "AR",
+        "CA",
+        "CO",
+        "CT",
+        "DE",
+        "FL",
+        "GA",
+        "HI",
+        "ID",
+        "IL",
+        "IN",
+        "IA",
+        "KS",
+        "KY",
+        "LA",
+        "ME",
+        "MD",
+        "MA",
+        "MI",
+        "MN",
+        "MS",
+        "MO",
+        "MT",
+        "NE",
+        "NV",
+        "NH",
+        "NJ",
+        "NM",
+        "NY",
+        "NC",
+        "ND",
+        "OH",
+        "OK",
+        "OR",
+        "PA",
+        "RI",
+        "SC",
+        "SD",
+        "TN",
+        "TX",
+        "UT",
+        "VT",
+        "VA",
+        "WA",
+        "WV",
+        "WI",
+        "WY",
+        "DC",
+    ]
+)
+
+
+@dataclass(kw_only=True)
+class HardFilters:
+    """Hard filter configuration with company, location, and date rules.
+
+    title_blocklist is kept for back-compat deserialization only — it is
+    intentionally NOT applied by apply_hard_filters. Seniority/title filtering
+    moved to the ML gate.
+    """
+
+    title_blocklist: list[str] = field(default_factory=list)
+    company_blocklist: list[str] = field(default_factory=list)
+    location_allowlist: list[str] = field(default_factory=list)
+    location_blocklist: list[str] = field(default_factory=list)
+    posted_within_hours: int | None = None
+    posted_within_days: int | None = None
+    big_company_list: list[str] = field(default_factory=list)
+    big_company_days: int = 90
+
+
+def apply_hard_filters(
+    job: JobPosting,
+    filters: HardFilters,
+    *,
+    now: datetime | None = None,
+) -> str | None:
+    """Apply hard filters to one job posting.
+
+    Order: contributor-work exclusion → company → location → freshness.
+    title_blocklist is intentionally not checked here; it moved to the ML gate.
+
+    Args:
+        job: Job posting to inspect.
+        filters: Filter configuration.
+        now: Reference timestamp for freshness checks (injectable for tests;
+             defaults to UTC wall-clock when omitted).
+
+    Returns:
+        None when the job passes; otherwise a human-readable filter reason.
+    """
+    if intermediary_posting(job):
+        return "unresolved_intermediary"
+    if reason := ai_data_work_reason(job.title, job.company):
+        return reason
+    reason = _company_reason(job.company, filters.company_blocklist)
+    if reason is not None:
+        return reason
+
+    reason = _location_reason(
+        job.location, filters.location_allowlist, filters.location_blocklist
+    )
+    if reason is not None:
+        return reason
+
+    reason = _freshness_reason(job, filters, now)
+    if reason is not None:
+        return reason
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Stage helpers — each returns a reason string or None
+# ---------------------------------------------------------------------------
+
+
+def _company_reason(company: str, blocklist: list[str]) -> str | None:
+    match = _first_match(company, blocklist)
+    if match is not None:
+        return f'company contains "{match}"'
+    return None
+
+
+def _location_reason(
+    location: str | None,
+    allowlist: list[str],
+    blocklist: list[str],
+) -> str | None:
+    """Return a block reason for location, or None.
+
+    A US allowlist requires positive location evidence. Other allowlists retain
+    their legacy behavior for missing locations.
+    """
+    if not location:
+        if any(
+            value.casefold() == _UNITED_STATES_ALLOWLIST_VALUE for value in allowlist
+        ):
+            return "location not in allowlist"
+        return None
+
+    if allowlist and not _matches_location_allowlist(location, allowlist):
+        return "location not in allowlist"
+
+    match = _first_match(location, blocklist)
+    if match is not None:
+        return f'location contains "{match}"'
+
+    return None
+
+
+def _matches_location_allowlist(location: str, allowlist: list[str]) -> bool:
+    other_locations = [
+        value for value in allowlist
+        if value.casefold() != _UNITED_STATES_ALLOWLIST_VALUE
+    ]
+    if _any_match(location, other_locations):
+        return True
+    has_us_filter = any(
+        value.casefold() == _UNITED_STATES_ALLOWLIST_VALUE for value in allowlist
+    )
+    if not has_us_filter:
+        return False
+    if _NON_US_MARKER.search(_NEW_MEXICO.sub("", location)):
+        return False
+    if _US_NAME_MARKER.search(location) or _US_STATE_NAME.search(location):
+        return True
+    tokens = re.findall(r"\b[A-Z]{2}\b", location.replace(".", ""))
+    return any(token in _US_STATE_CODES for token in tokens)
+
+
+def _freshness_reason(
+    job: JobPosting,
+    filters: HardFilters,
+    now: datetime | None,
+) -> str | None:
+    """Return a staleness reason, or None.
+
+    Hour precision is a strict global cutoff. Legacy day precision retains the
+    big-company extension. Both prefer the source's posting time and fall back
+    to first discovery when the posting time is missing or in the future.
+    """
+    timestamp = effective_job_date(job, now=now)
+    if filters.posted_within_hours is not None:
+        hours_limit = filters.posted_within_hours
+        if job.platform.casefold() == "indeed":
+            hours_limit = max(hours_limit, _INDEED_MINIMUM_HOURS)
+        if _is_stale(timestamp, timedelta(hours=hours_limit), now):
+            return f"older than {hours_limit} hours"
+        return None
+
+    if filters.posted_within_days is None:
+        return None
+
+    is_big = bool(
+        filters.big_company_list and _any_match(job.company, filters.big_company_list)
+    )
+    days_limit = filters.big_company_days if is_big else filters.posted_within_days
+
+    if _is_stale(timestamp, timedelta(days=days_limit), now):
+        return f"older than {days_limit} days"
+
+    return None
+
+
+def _is_stale(
+    timestamp: datetime, maximum_age: timedelta, now: datetime | None
+) -> bool:
+    """Return whether a posting timestamp exceeds the configured age."""
+    reference = now or datetime.now(UTC)
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=UTC)
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=UTC)
+    return timestamp < reference - maximum_age
+
+
+# ---------------------------------------------------------------------------
+# Substring matching helpers
+# ---------------------------------------------------------------------------
+
+
+def _first_match(value: str, candidates: list[str]) -> str | None:
+    """Return the first candidate that appears as a substring of value (case-fold)."""
+    normalized = value.casefold()
+    for item in candidates:
+        if item and item.casefold() in normalized:
+            return item
+    return None
+
+
+def _any_match(value: str, candidates: list[str]) -> bool:
+    """Return True if any candidate appears as a substring of value (case-fold)."""
+    normalized = value.casefold()
+    return any(item and item.casefold() in normalized for item in candidates)
+
+
+__all__ = ["HardFilters", "apply_hard_filters"]

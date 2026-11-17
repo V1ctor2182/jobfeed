@@ -1,0 +1,206 @@
+"""Jobs-view store port: the bounded, filtered web read path."""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from datetime import datetime
+from typing import Protocol, runtime_checkable
+
+from jobfeed.domain.models import PipelineRun
+from jobfeed.domain.models_views import (
+    InsightsOverview,
+    JobsViewPage,
+    JobsViewQuery,
+    JobsViewRow,
+    RunNewJobsPage,
+    TwinStatusRow,
+)
+
+
+@runtime_checkable
+class StoreViewsMixin(Protocol):
+    """Read-only jobs view for the web API."""
+
+    async def load_display_bodies(self, job_ids: Sequence[str]) -> dict[str, str]:
+        """Load JD bodies for the bounded set of display match candidates.
+
+        Args:
+            job_ids: Source posting IDs whose description bodies are required.
+
+        Returns:
+            Available nonempty description bodies keyed by source posting ID.
+        """
+        ...
+
+    async def query_jobs_view(self, query: JobsViewQuery) -> JobsViewPage:
+        """Run the filtered, paginated jobs view query.
+
+        Args:
+            query: Tab, filters, sort, and pagination window.
+
+        Returns:
+            Bounded page: the active tab's rows ordered per ``query.sort``
+            (default newest discovered first), the active tab's full match
+            count, and per-tab counts under the same request filters.
+
+        Note:
+            ``limit``/``offset`` window the SQL prefilter, before any
+            in-memory hard filter or display fold. Callers that fold or
+            hard-filter post-query (triage tabs, plan D10) must request the
+            full corpus (large limit) and paginate post-fold, or the fold
+            corpus is silently truncated.
+        """
+        ...
+
+    async def list_twin_rows_by_status(
+        self,
+        keys: Sequence[tuple[str, str]],
+        *,
+        statuses: Sequence[str],
+        limit: int,
+        include_jd_text: bool = True,
+    ) -> list[JobsViewRow]:
+        """List view rows in the given statuses for the given twin keys.
+
+        Feeds the display fold (plan D9): a tab-filtered corpus never
+        contains out-of-tab siblings, so the fold pulls them in explicitly
+        (e.g. the in-flight ``applied`` twin of a queue row).
+
+        Args:
+            keys: Company/title or native-identity cluster keys. The internal
+                ``__display_title__`` key fetches same-title content candidates
+                across native IDs; callers must compare their full JD bodies.
+            statuses: Workflow statuses to keep.
+            limit: Maximum rows returned.
+            include_jd_text: Load bodies only for consumers that need them.
+
+        Returns:
+            Matching view rows, newest discovered first. Blank-norm rows
+            never match (mirroring ``list_twin_statuses``).
+        """
+        ...
+
+    async def list_twin_statuses(self, job_id: str) -> list[TwinStatusRow]:
+        """List a job's twins (same persisted company_norm + title_norm).
+
+        The job itself is excluded. A job whose ``company_norm`` OR
+        ``title_norm`` is blank/NULL has no twins (mirroring
+        ``expand_twin_ids``: blank-norm rows never cluster).
+
+        Args:
+            job_id: Store-assigned identity of the detail job.
+
+        Returns:
+            Twin rows (platform, url, current status), ordered by job id.
+        """
+        ...
+
+    async def list_pipeline_runs(
+        self,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        days: int | None = None,
+    ) -> tuple[list[PipelineRun], int]:
+        """List pipeline runs, newest first, with the matching total.
+
+        Ordered by ``started_at`` descending with ``run_id`` descending as a
+        deterministic tiebreak.
+
+        Args:
+            limit: Maximum runs returned.
+            offset: Runs to skip before the returned window.
+            days: Optional look-back window in days; None means all time.
+
+        Returns:
+            Tuple of (runs window, total count matching ``days`` ignoring
+            limit/offset).
+        """
+        ...
+
+    async def get_stage_b_run_progress(
+        self, run_id: str, started_at: datetime
+    ) -> tuple[int, int]:
+        """Return processed and total Stage B jobs for a live external run.
+
+        Args:
+            run_id: Active evaluation run identity.
+            started_at: Lower timestamp bound for claims owned by the run.
+
+        Returns:
+            Processed count and reconstructed total Stage B count.
+        """
+        ...
+
+    async def get_new_job_source_counts(self, run_id: str) -> dict[str, int]:
+        """Count first-time job inserts by configured source for one scan.
+
+        Args:
+            run_id: Historical or active pipeline run identity.
+
+        Returns:
+            Configured source name to exact first-insert count. Evaluation
+            runs and runs without attributable inserts return an empty map.
+        """
+        ...
+
+    async def get_new_jobs(self, run_id: str, *, limit: int) -> RunNewJobsPage:
+        """List the postings one scan inserted for the first time.
+
+        Uses the same attribution as ``get_new_job_source_counts``: first
+        ``new`` status-history rows written inside the run's time window,
+        bounded by now while the run is still active.
+
+        Args:
+            run_id: Historical or active pipeline run identity.
+            limit: Maximum postings returned; must be positive.
+
+        Returns:
+            Postings ordered by first-seen time ascending with insert order as
+            the tiebreak, plus the unbounded total. Evaluation runs and
+            unknown runs return an empty page.
+        """
+        ...
+
+    async def get_historical_run_verdict_counts(
+        self, run_id: str
+    ) -> dict[str, int] | None:
+        """Reconstruct an old run only when every detailed review is unchanged.
+
+        Args:
+            run_id: Run identifier used to bound historical completed reviews.
+
+        Returns:
+            Reconstructed verdict counts, or None when the run cannot be reconstructed
+                safely.
+        """
+        ...
+
+    async def list_retryable_run_error_job_ids(self, run_id: str) -> list[str]:
+        """List unresolved, retryable scoring errors written by one run.
+
+        Args:
+            run_id: Completed evaluation run identity.
+
+        Returns:
+            Job identities whose current Stage A or B error was written inside
+            that run's time window and remains below the retry cap.
+        """
+        ...
+
+    async def insights_overview(self, *, window_days: int | None) -> InsightsOverview:
+        """Aggregate the insights overview.
+
+        The window defines a discovery-date cohort for totals, distributions,
+        and the daily series. Daily events use UTC buckets over
+        ``[now - window_days, now]``, or all time through now when None,
+        emitting only days having data.
+
+        Args:
+            window_days: Daily-series window in days (caller-validated), or
+                None for all time.
+
+        Returns:
+            Insights overview aggregate.
+        """
+        ...
