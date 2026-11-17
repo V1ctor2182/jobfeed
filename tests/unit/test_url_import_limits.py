@@ -4,11 +4,11 @@ import httpx
 import pytest
 
 from jobfeed.adapters.url_import import (
+    MAX_BOARD_RESPONSE_BYTES,
+    MAX_RESPONSE_BYTES,
     ImportFetchError,
     ImportHTTPClient,
     JobUrlImportService,
-    MAX_BOARD_RESPONSE_BYTES,
-    MAX_RESPONSE_BYTES,
 )
 
 BOARD_URLS = [
@@ -18,7 +18,7 @@ BOARD_URLS = [
 ]
 
 
-async def public_fixture(url):
+async def public_fixture(_url):
     return True
 
 
@@ -29,7 +29,7 @@ async def test_official_whole_board_can_exceed_individual_page_limit(url, size):
     async with ImportHTTPClient(
         url_guard=public_fixture,
         transport=httpx.MockTransport(
-            lambda request: httpx.Response(200, content=payload)
+            lambda _request: httpx.Response(200, content=payload)
         ),
     ) as client:
         response = await client.get(url)
@@ -55,7 +55,9 @@ async def test_pages_individual_postings_and_nonexact_routes_keep_two_mb_limit(u
     async with ImportHTTPClient(
         url_guard=public_fixture,
         transport=httpx.MockTransport(
-            lambda request: httpx.Response(200, content=b"x" * (MAX_RESPONSE_BYTES + 1))
+            lambda _request: httpx.Response(
+                200, content=b"x" * (MAX_RESPONSE_BYTES + 1)
+            )
         ),
     ) as client:
         with pytest.raises(ImportFetchError, match="Posting response exceeds 2 MB"):
@@ -70,7 +72,7 @@ class LargeBoardStream(httpx.AsyncByteStream):
 
 async def test_board_allowance_still_enforces_sixteen_mb_stream_limit():
     transport = httpx.MockTransport(
-        lambda request: httpx.Response(200, stream=LargeBoardStream())
+        lambda _request: httpx.Response(200, stream=LargeBoardStream())
     )
     async with ImportHTTPClient(
         url_guard=public_fixture, transport=transport
@@ -119,7 +121,7 @@ async def test_large_whole_board_still_selects_only_exact_requested_posting(tmp_
     }
     async with ImportHTTPClient(
         url_guard=public_fixture,
-        transport=httpx.MockTransport(lambda request: httpx.Response(200, json=body)),
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200, json=body)),
     ) as client:
         result = await JobUrlImportService(tmp_path / "unused.sqlite")._fetch(
             f"https://jobs.ashbyhq.com/acme/{wanted}", client

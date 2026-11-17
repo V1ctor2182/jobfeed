@@ -2,13 +2,19 @@
 
 import json
 import subprocess
+from http import HTTPStatus
 from pathlib import Path
 
 import httpx
 import pytest
 from fastapi import FastAPI
 
-from jobfeed.account_password import AccountPasswordError, AccountPasswordService, AccountPasswordState, AccountPasswordUpdate
+from jobfeed.account_password import (
+    AccountPasswordError,
+    AccountPasswordService,
+    AccountPasswordState,
+    AccountPasswordUpdate,
+)
 from jobfeed.web.errors import install_error_handling
 from jobfeed.web.routes.account_password import router
 
@@ -36,7 +42,9 @@ def client(service):
     install_error_handling(application)
     application.state.account_password_service = service
     application.include_router(router, prefix="/api")
-    return httpx.AsyncClient(transport=httpx.ASGITransport(app=application), base_url=ORIGIN)
+    return httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=application), base_url=ORIGIN
+    )
 
 
 async def test_the_status_says_only_whether_a_password_is_set():
@@ -46,36 +54,68 @@ async def test_the_status_says_only_whether_a_password_is_set():
     assert result.headers["cache-control"] == "no-store"
 
 
-async def test_only_the_dashboards_own_origin_can_save_and_the_reply_never_carries_the_password():
+async def test_only_the_dashboards_own_origin_can_save_and_replies_omit_the_password():
     service = FakeService()
     async with client(service) as http:
-        for headers in ({}, {"Origin": "https://attacker.test"}, {"Origin": "http://localhost:8765"}):
-            assert (await http.put("/api/my-profile/account-password", json={"password": SECRET}, headers=headers)).status_code == 403
+        for headers in (
+            {},
+            {"Origin": "https://attacker.test"},
+            {"Origin": "http://localhost:8765"},
+        ):
+            assert (
+                await http.put(
+                    "/api/my-profile/account-password",
+                    json={"password": SECRET},
+                    headers=headers,
+                )
+            ).status_code == HTTPStatus.FORBIDDEN
         assert service.saved == []
-        saved = await http.put("/api/my-profile/account-password", json={"password": SECRET}, headers={"Origin": ORIGIN})
-    assert (saved.status_code, saved.json()) == (200, {"password_set": True, "accounts": 9})
+        saved = await http.put(
+            "/api/my-profile/account-password",
+            json={"password": SECRET},
+            headers={"Origin": ORIGIN},
+        )
+    assert (saved.status_code, saved.json()) == (
+        200,
+        {"password_set": True, "accounts": 9},
+    )
     assert SECRET not in saved.text
     assert service.saved == [SECRET]
 
 
 async def test_a_refused_password_reports_the_rule_and_not_the_password():
     service = FakeService()
-    service.failure = AccountPasswordError("invalid", "The password was not saved: it needs a digit.")
+    service.failure = AccountPasswordError(
+        "invalid", "The password was not saved: it needs a digit."
+    )
     async with client(service) as http:
-        result = await http.put("/api/my-profile/account-password", json={"password": "NoDigits!!"}, headers={"Origin": ORIGIN})
-    assert (result.status_code, result.json()["error"]["code"]) == (422, "account_password_invalid")
+        result = await http.put(
+            "/api/my-profile/account-password",
+            json={"password": "NoDigits!!"},
+            headers={"Origin": ORIGIN},
+        )
+    assert (result.status_code, result.json()["error"]["code"]) == (
+        422,
+        "account_password_invalid",
+    )
     assert "NoDigits" not in result.text
 
 
-def test_the_adapter_sends_the_password_on_standard_input_never_as_an_argument(monkeypatch, tmp_path: Path):
+def test_the_adapter_sends_the_password_on_standard_input_never_as_an_argument(
+    monkeypatch, tmp_path: Path
+):
     calls = []
 
     def run(args, **kwargs):
         calls.append((args, kwargs))
-        return subprocess.CompletedProcess(args, 0, json.dumps({"password_set": True, "accounts": [{}, {}]}), "")
+        return subprocess.CompletedProcess(
+            args, 0, json.dumps({"password_set": True, "accounts": [{}, {}]}), ""
+        )
 
     monkeypatch.setattr(subprocess, "run", run)
-    state = AccountPasswordService(tmp_path).save(AccountPasswordUpdate(password=SECRET))
+    state = AccountPasswordService(tmp_path).save(
+        AccountPasswordUpdate(password=SECRET)
+    )
     assert state == AccountPasswordState(password_set=True, accounts=2)
     save_args, save_kwargs = calls[0]
     assert save_args[-2:] == ["accounts", "save-password"]
@@ -83,11 +123,23 @@ def test_the_adapter_sends_the_password_on_standard_input_never_as_an_argument(m
     assert all(SECRET not in str(argument) for call in calls for argument in call[0])
 
 
-def test_a_refusal_from_the_pipeline_is_an_invalid_password(monkeypatch, tmp_path: Path):
-    def run(args, **kwargs):
-        return subprocess.CompletedProcess(args, 2, "", json.dumps({"error": "The password was not saved: it needs a digit."}))
+def test_a_refusal_from_the_pipeline_is_an_invalid_password(
+    monkeypatch, tmp_path: Path
+):
+    def run(args, **_kwargs):
+        return subprocess.CompletedProcess(
+            args,
+            2,
+            "",
+            json.dumps({"error": "The password was not saved: it needs a digit."}),
+        )
 
     monkeypatch.setattr(subprocess, "run", run)
     with pytest.raises(AccountPasswordError) as caught:
-        AccountPasswordService(tmp_path).save(AccountPasswordUpdate(password="NoDigits!!"))
-    assert (caught.value.code, str(caught.value)) == ("invalid", "The password was not saved: it needs a digit.")
+        AccountPasswordService(tmp_path).save(
+            AccountPasswordUpdate(password="NoDigits!!")
+        )
+    assert (caught.value.code, str(caught.value)) == (
+        "invalid",
+        "The password was not saved: it needs a digit.",
+    )

@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, UploadFile, Request
+from fastapi import APIRouter, Depends, File, Request, UploadFile
 
 from jobfeed.onboarding_resume import ResumeOnboardingService
 from jobfeed.onboarding_resume_types import JobProfile
 from jobfeed.web.deps import get_onboarding_resume_service
 from jobfeed.web.errors import ApiError
+from jobfeed.web.routes.my_profile import _mutation
 from jobfeed.web.schemas.onboarding import ApiErrorResponse
 from jobfeed.web.schemas.onboarding_resume import (
     ResumeStateResponse,
@@ -54,12 +55,13 @@ async def upload_resume(
     Raises:
         ApiError: If the upload cannot be validated or extracted.
     """
-    from jobfeed.web.routes.my_profile import _mutation
     _mutation(request)
     try:
-        profile = getattr(request.app.state,'my_profile_service',None)
+        profile = getattr(request.app.state, "my_profile_service", None)
         metadata = profile.upload_metadata() if profile is not None else None
-        state = service.upload(file.filename or "resume", await file.read(), library_metadata=metadata)
+        state = service.upload(
+            file.filename or "resume", await file.read(), library_metadata=metadata
+        )
         if profile is not None:
             profile.state()
     except ValueError as exc:

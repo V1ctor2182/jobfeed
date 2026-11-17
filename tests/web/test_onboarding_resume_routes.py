@@ -41,12 +41,14 @@ class FakeAnalyzer:
 async def _open_client(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
     # These scoring-route tests replace the onboarding service alone. Avoid
     # migrating the independently configured application profile from that app.
-    if hasattr(app.state,'my_profile_service'):
+    if hasattr(app.state, "my_profile_service"):
         del app.state.my_profile_service
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(
-            transport=transport, base_url="http://127.0.0.1:8765", headers={"Origin":"http://127.0.0.1:8765"}
+            transport=transport,
+            base_url="http://127.0.0.1:8765",
+            headers={"Origin": "http://127.0.0.1:8765"},
         ) as client:
             yield client
 

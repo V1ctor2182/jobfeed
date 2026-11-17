@@ -753,7 +753,7 @@ class ApplyHealthReader:
         except (EvidenceError, ValueError, OSError, RuntimeError):
             return set()
 
-    def _completed_closeout(
+    def _completed_closeout(  # noqa: C901 - mirrors the Applier closeout rules in one place
         self, budget: ReadBudget, db_path: Path, job: ObservedJob
     ) -> tuple[bool, str | None]:
         """Validate exact completion records, including the native tab inventory."""
@@ -789,7 +789,8 @@ class ApplyHealthReader:
                 )
                 row = (
                     db.execute(
-                        f"SELECT application_folder_relpath,{owner_column} FROM application_queue WHERE job_id=?",
+                        f"SELECT application_folder_relpath,{owner_column} "
+                        "FROM application_queue WHERE job_id=?",
                         (job.job_id,),
                     ).fetchone()
                     if "application_folder_relpath" in columns
@@ -855,7 +856,7 @@ class ApplyHealthReader:
         ):
             return False, None
 
-    def _confirm_submissions(
+    def _confirm_submissions(  # noqa: C901 - one read budget across both application stores
         self,
         db_path: Path,
         batches: list[BatchHealth],
@@ -886,7 +887,7 @@ class ApplyHealthReader:
                 for job in batch.jobs
             )
         )
-        applied = set()
+        applied: set[int] = set()
         with (
             suppress(sqlite3.Error, OSError, ValueError),
             closing(
@@ -900,7 +901,8 @@ class ApplyHealthReader:
                 tables = {
                     row[0]
                     for row in db.execute(
-                        "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('applied','real_job_applications')"
+                        "SELECT name FROM sqlite_master WHERE type='table' "
+                        "AND name IN ('applied','real_job_applications')"
                     )
                 }
                 predicates = []
@@ -910,12 +912,18 @@ class ApplyHealthReader:
                     )
                 if "real_job_applications" in tables:
                     predicates.append(
-                        "EXISTS (SELECT 1 FROM real_job_applications a WHERE a.source_job_id=j.id OR a.source_applied_job_id=j.id)"
+                        "EXISTS (SELECT 1 FROM real_job_applications a "
+                        "WHERE a.source_job_id=j.id OR a.source_applied_job_id=j.id)"
                     )
-                for offset in range(0, len(identifiers) if predicates else 0, _JOB_LIMIT):
+                for offset in range(
+                    0, len(identifiers) if predicates else 0, _JOB_LIMIT
+                ):
                     selected = identifiers[offset : offset + _JOB_LIMIT]
                     placeholders = ",".join("?" for _ in selected)
-                    query = f"SELECT j.id FROM jobs j WHERE j.id IN ({placeholders}) AND ({' OR '.join(predicates)})"
+                    query = (
+                        f"SELECT j.id FROM jobs j WHERE j.id IN ({placeholders}) "
+                        f"AND ({' OR '.join(predicates)})"
+                    )
                     applied.update(row[0] for row in db.execute(query, selected))
         confirmations: dict[int, bool] = {}
         for batch in batches:
@@ -948,7 +956,7 @@ class ApplyHealthReader:
                     job.queue_state = "Submitted"
                     job.paused = False
                     job.blocked = None
-                    job.next_step = "完成，禁止重投"
+                    job.next_step = "完成，禁止重投"  # noqa: RUF001 - user-facing Chinese text
                     job.errors = [
                         error
                         for error in job.errors

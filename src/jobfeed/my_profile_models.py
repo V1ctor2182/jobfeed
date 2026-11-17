@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from typing import Any
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -125,7 +126,7 @@ class UploadedResume(BaseModel):
     role: str = ""
     google_doc_url: str = ""
     page_count: int | None = None
-    pdf_export: dict | None = None
+    pdf_export: dict[str, Any] | None = None
     download_url: str = ""
 
 

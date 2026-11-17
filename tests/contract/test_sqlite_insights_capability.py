@@ -233,11 +233,13 @@ async def test_insights_applied_matches_the_triage_applied_group(
         await lifecycle.close()
 
 
-async def _apply_through(lifecycle, real_job_id: int, source_job_id: int, at: str) -> None:
+async def _apply_through(
+    lifecycle, real_job_id: int, source_job_id: int, at: str
+) -> None:
     async with lifecycle.connection() as connection:
         await connection.execute(
-            """INSERT INTO real_job_applications (real_job_id, source_job_id, applied_at)
-               VALUES (?, ?, ?)""",
+            "INSERT INTO real_job_applications (real_job_id, source_job_id, applied_at)"
+            "\n               VALUES (?, ?, ?)",
             (real_job_id, source_job_id, at),
         )
 
@@ -264,8 +266,12 @@ async def test_insights_counts_applied_jobs_by_the_source_of_their_latest_applic
     lifecycle, store = await open_views_performance(tmp_path / "applied-sources.db")
     try:
         today = utc_text(NOW)
-        ashby = await insert_real_job(lifecycle, "ashby", discovered_at=today, status="applied")
-        await _apply_through(lifecycle, ashby, await _source_of(lifecycle, ashby, "ashby"), today)
+        ashby = await insert_real_job(
+            lifecycle, "ashby", discovered_at=today, status="applied"
+        )
+        await _apply_through(
+            lifecycle, ashby, await _source_of(lifecycle, ashby, "ashby"), today
+        )
         moved = await insert_real_job(
             lifecycle, "moved", discovered_at=today, status="interviewing"
         )
@@ -273,13 +279,21 @@ async def test_insights_counts_applied_jobs_by_the_source_of_their_latest_applic
         greenhouse = await insert_job(
             lifecycle, "moved-greenhouse", discovered_at=today, platform="greenhouse"
         )
-        await _apply_through(lifecycle, moved, indeed, utc_text(NOW - timedelta(days=2)))
-        await _apply_through(lifecycle, moved, greenhouse, utc_text(NOW - timedelta(days=1)))
-        await insert_real_job(lifecycle, "marked", discovered_at=today, status="applied")
+        await _apply_through(
+            lifecycle, moved, indeed, utc_text(NOW - timedelta(days=2))
+        )
+        await _apply_through(
+            lifecycle, moved, greenhouse, utc_text(NOW - timedelta(days=1))
+        )
+        await insert_real_job(
+            lifecycle, "marked", discovered_at=today, status="applied"
+        )
         waiting = await insert_real_job(
             lifecycle, "waiting", discovered_at=today, status="shortlisted"
         )
-        await _apply_through(lifecycle, waiting, await _source_of(lifecycle, waiting, "ashby"), today)
+        await _apply_through(
+            lifecycle, waiting, await _source_of(lifecycle, waiting, "ashby"), today
+        )
 
         result = await store.insights_overview(window_days=None)
 

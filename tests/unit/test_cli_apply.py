@@ -14,9 +14,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from click.testing import CliRunner
+from pypdf import PdfWriter
 
 from jobfeed.apply_health import ApplyHealthReader
-from jobfeed.cli.apply import apply_cmd, apply_history
+from jobfeed.cli.apply import _read_file, apply_cmd, apply_history
 from jobfeed.config import Settings
 from jobfeed.domain.models import ApplicationRecord
 from jobfeed.submission_evidence import read_confirmation
@@ -245,9 +246,6 @@ class TestApplyHistoryResume:
 
 
 def test_apply_reads_configured_pdf_resume_as_pdf(tmp_path: Path) -> None:
-    from pypdf import PdfWriter
-    from jobfeed.cli.apply import _read_file
-
     resume = tmp_path / "resume.pdf"
     writer = PdfWriter()
     writer.add_blank_page(width=612, height=792)

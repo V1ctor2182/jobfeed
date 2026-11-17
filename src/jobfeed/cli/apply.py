@@ -47,7 +47,7 @@ def _read_file(path: Path) -> str:
     """
     try:
         if path.suffix.lower() == ".pdf":
-            from jobfeed.onboarding_resume_files import _extract_text
+            from jobfeed.onboarding_resume_files import _extract_text  # noqa: PLC0415
 
             return _extract_text(".pdf", path.read_bytes())
         return path.read_text(encoding="utf-8")

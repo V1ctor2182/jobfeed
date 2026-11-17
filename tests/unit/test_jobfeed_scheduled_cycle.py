@@ -91,7 +91,11 @@ def test_a_scan_with_one_failed_source_still_evaluates_what_the_others_stored():
 
     def wait(run_id):
         if run_id == "scan-1":
-            return {"status": "failed", "failed_stage": "source", "failed_source": "speedyapply"}
+            return {
+                "status": "failed",
+                "failed_stage": "source",
+                "failed_source": "speedyapply",
+            }
         return api.wait(run_id)
 
     assert run_cycle(api.request, wait) == "evaluated_after_source_failure"

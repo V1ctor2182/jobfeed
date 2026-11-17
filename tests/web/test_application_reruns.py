@@ -9,8 +9,8 @@ import sqlite3
 import sys
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from threading import Thread
 from pathlib import Path
+from threading import Thread
 from uuid import uuid4
 
 import pytest
@@ -24,7 +24,8 @@ from jobfeed.web.routes.application_reruns import router
 
 PIPELINE = Path(__file__).resolve().parents[3] / "resume-application-pipeline"
 pytestmark = pytest.mark.skipif(
-    not PIPELINE.is_dir(), reason="needs resume-application-pipeline as a sibling checkout"
+    not PIPELINE.is_dir(),
+    reason="needs resume-application-pipeline as a sibling checkout",
 )
 ORIGIN = "https://jobfeed.localhost:1355"
 
@@ -84,8 +85,13 @@ subprocess.run = external_queue
     class ExtensionState(BaseHTTPRequestHandler):
         def do_GET(self):
             assert self.path == "/api/application-tabs"
-            payload = json.dumps({"profile_probe_available": bridge.connected and "application-tab-pair-v1" in bridge.supported_sources,
-                                  "profile_probe_reason": "Reload the Jobfeed extension."}).encode()
+            payload = json.dumps(
+                {
+                    "profile_probe_available": bridge.connected
+                    and "application-tab-pair-v1" in bridge.supported_sources,
+                    "profile_probe_reason": "Reload the Jobfeed extension.",
+                }
+            ).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
@@ -104,6 +110,7 @@ subprocess.run = external_queue
     async def bound_server(request, call_next):
         request.scope["server"] = dashboard.server_address
         return await call_next(request)
+
     app.state.application_reruns = ApplicationRerunService(fixture.root, fixture.db)
     app.include_router(router, prefix="/api")
     install_error_handling(app)
@@ -256,12 +263,24 @@ def test_unsupported_extension_disables_rerun_before_queue(rerun_app):
     app, _, _, calls = rerun_app
     app.state.context["jobright_bridge"].supported_sources = frozenset({"jobright"})
     with TestClient(app, base_url=ORIGIN) as client:
-        state = client.get("/api/application-reruns", params={"batch_id": "test", "job_id": 1})
-        assert state.status_code == 200
+        state = client.get(
+            "/api/application-reruns", params={"batch_id": "test", "job_id": 1}
+        )
+        assert state.status_code == HTTPStatus.OK
         assert state.json()["eligible"] is False
         assert "Reload" in state.json()["reason"]
-        response = client.post("/api/application-reruns", headers={"Origin": ORIGIN,
-            "x-application-reruns-csrf": state.json()["csrf_token"]}, json={"batch_id": "test", "job_id": 1,
-            "request_id": str(uuid4()), "expected_owner": "owner"})
-        assert response.status_code == 503
+        response = client.post(
+            "/api/application-reruns",
+            headers={
+                "Origin": ORIGIN,
+                "x-application-reruns-csrf": state.json()["csrf_token"],
+            },
+            json={
+                "batch_id": "test",
+                "job_id": 1,
+                "request_id": str(uuid4()),
+                "expected_owner": "owner",
+            },
+        )
+        assert response.status_code == HTTPStatus.SERVICE_UNAVAILABLE
         assert not calls.exists()

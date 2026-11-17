@@ -6,11 +6,21 @@ import json
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+
 from pypdf import PdfReader
 
 from jobfeed.my_profile_document import PersonalProfileStore
-from jobfeed.my_profile_models import ApplicationResume, MyProfileState, PersonalDetails, UploadedResume
-from jobfeed.onboarding_resume_files import ResumeFileStore, _write_private_bytes, private_file_lock
+from jobfeed.my_profile_models import (
+    ApplicationResume,
+    MyProfileState,
+    PersonalDetails,
+    UploadedResume,
+)
+from jobfeed.onboarding_resume_files import (
+    ResumeFileStore,
+    _write_private_bytes,
+    private_file_lock,
+)
 from jobfeed.onboarding_resume_types import ResumeDraftState
 from jobfeed.resume_library_types import ResumeUploadMetadata, variant_export_matches
 
@@ -79,18 +89,23 @@ class MyProfileService:
         names = {}
         if uploaded.stored_name and uploaded.original_name:
             names[uploaded.stored_name] = uploaded.original_name
-        for entry in catalog['resumes']:
-            label = entry.get('original_filename', entry.get('label', ''))
-            if entry.get('profile_upload') and Path(label).suffix.lower() in {'.pdf','.docx','.md','.txt'}:
-                names.setdefault(entry['profile_upload'], label)
+        for entry in catalog["resumes"]:
+            label = entry.get("original_filename", entry.get("label", ""))
+            if entry.get("profile_upload") and Path(label).suffix.lower() in {
+                ".pdf",
+                ".docx",
+                ".md",
+                ".txt",
+            }:
+                names.setdefault(entry["profile_upload"], label)
         return names
 
-    def _filename(self, entry: dict, names: dict[str,str]) -> str:
-        if entry.get('profile_upload') in names:
-            return names[entry['profile_upload']]
-        return Path(str(entry.get('pdf',''))).name
+    def _filename(self, entry: dict[str, Any], names: dict[str, str]) -> str:
+        if entry.get("profile_upload") in names:
+            return names[entry["profile_upload"]]
+        return Path(str(entry.get("pdf", ""))).name
 
-    def upload_metadata(self) -> tuple[dict[str,str],dict[str,bool]]:
+    def upload_metadata(self) -> tuple[dict[str, str], dict[str, bool]]:
         """Read existing filename and active choices without migrating files.
 
         Returns:
@@ -99,13 +114,13 @@ class MyProfileService:
         """
         catalog = self._catalog()
         names = self._known_names(catalog)
-        active = {}
-        for entry in catalog['resumes']:
-            key = self._filename(entry,names).casefold()
-            active[key] = active.get(key,True) and entry.get('available') is True
-        return names,active
+        active: dict[str, bool] = {}
+        for entry in catalog["resumes"]:
+            key = self._filename(entry, names).casefold()
+            active[key] = active.get(key, True) and entry.get("available") is True
+        return names, active
 
-    def _sync_resumes(self) -> tuple[list[dict], dict]:
+    def _sync_resumes(self) -> tuple[list[dict[str, Any]], dict[str, Any]]:  # noqa: C901 - one reconcile pass over catalog and library
         """Reconcile the catalog with the upload library and publish any changes.
 
         Catalog entries backed by an uploaded PDF take that upload's path, metadata
@@ -118,54 +133,81 @@ class MyProfileService:
         Returns:
             The upload library entries and the published catalog.
         """
-        with private_file_lock(self.catalog_path.with_suffix('.lock')):
+        with private_file_lock(self.catalog_path.with_suffix(".lock")):
             catalog = self._catalog()
             names = self._known_names(catalog)
-            files = ResumeFileStore(self.root / 'data/resumes')
-            _,active = self.upload_metadata()
-            uploaded = files.library(names,active)
-            by_name = {row['original_name'].casefold():row for row in uploaded}
-            by_id = {row['id']:row for row in uploaded}
+            files = ResumeFileStore(self.root / "data/resumes")
+            _, active = self.upload_metadata()
+            uploaded = files.library(names, active)
+            by_name = {row["original_name"].casefold(): row for row in uploaded}
+            by_id = {row["id"]: row for row in uploaded}
             retained = []
             seen = set()
-            for entry in catalog['resumes']:
-                filename = self._filename(entry,names)
+            for entry in catalog["resumes"]:
+                filename = self._filename(entry, names)
                 key = filename.casefold()
                 if key in seen:
                     continue
                 seen.add(key)
-                upload = by_id.get(entry['id']) or by_name.get(key)
+                upload = by_id.get(entry["id"]) or by_name.get(key)
                 if upload:
-                    seen.add(upload['original_name'].casefold())
-                if upload and upload.get('kind') == 'master':
+                    seen.add(upload["original_name"].casefold())
+                if upload and upload.get("kind") == "master":
                     continue
-                if upload and Path(upload['original_name']).suffix.lower() == '.pdf':
-                    source = self.root / 'data/resumes' / upload['stored_name']
+                if upload and Path(upload["original_name"]).suffix.lower() == ".pdf":
+                    source = self.root / "data/resumes" / upload["stored_name"]
                     readable = _readable_pdf(source)
                     if readable:
                         source.chmod(0o600)
-                    previous_source = Path(str(entry.get('pdf','')))
-                    previous_source = previous_source if previous_source.is_absolute() else self.pipeline_root / previous_source
+                    previous_source = Path(str(entry.get("pdf", "")))
+                    previous_source = (
+                        previous_source
+                        if previous_source.is_absolute()
+                        else self.pipeline_root / previous_source
+                    )
                     metadata = dict(entry)
                     if previous_source.resolve() != source.resolve():
-                        for field in ('autofill','text','description'):
-                            metadata.pop(field,None)
-                    retained.append({**metadata,'id':upload['id'],'label':upload['original_name'],
-                        'pdf':str(source.resolve()),'profile_upload':upload['stored_name'],
-                        **_catalog_metadata(upload), 'available':upload['active'] and readable and _eligible(upload, source)})
+                        for field in ("autofill", "text", "description"):
+                            metadata.pop(field, None)
+                    retained.append(
+                        {
+                            **metadata,
+                            "id": upload["id"],
+                            "label": upload["original_name"],
+                            "pdf": str(source.resolve()),
+                            "profile_upload": upload["stored_name"],
+                            **_catalog_metadata(upload),
+                            "available": upload["active"]
+                            and readable
+                            and _eligible(upload, source),
+                        }
+                    )
                 else:
                     retained.append(entry)
             for upload in uploaded:
-                if upload['original_name'].casefold() in seen or Path(upload['original_name']).suffix.lower() != '.pdf' or upload.get('kind') == 'master':
+                if (
+                    upload["original_name"].casefold() in seen
+                    or Path(upload["original_name"]).suffix.lower() != ".pdf"
+                    or upload.get("kind") == "master"
+                ):
                     continue
-                source = self.root / 'data/resumes' / upload['stored_name']
+                source = self.root / "data/resumes" / upload["stored_name"]
                 readable = _readable_pdf(source)
                 if readable:
                     source.chmod(0o600)
-                retained.append({'id':upload['id'],'label':upload['original_name'],'pdf':str(source.resolve()),
-                    'profile_upload':upload['stored_name'], **_catalog_metadata(upload),
-                    'available':upload['active'] and readable and _eligible(upload, source)})
-            updated = {**catalog,'resumes':retained}
+                retained.append(
+                    {
+                        "id": upload["id"],
+                        "label": upload["original_name"],
+                        "pdf": str(source.resolve()),
+                        "profile_upload": upload["stored_name"],
+                        **_catalog_metadata(upload),
+                        "available": upload["active"]
+                        and readable
+                        and _eligible(upload, source),
+                    }
+                )
+            updated = {**catalog, "resumes": retained}
             if updated != catalog:
                 self._publish_catalog(updated)
             return uploaded, updated
@@ -181,39 +223,98 @@ class MyProfileService:
         entries = []
         resumes = []
         names = self._known_names(catalog)
-        upload_ids = {row['id'] for row in uploaded}
+        upload_ids = {row["id"] for row in uploaded}
         for row in uploaded:
-            source = self.root / 'data/resumes' / row['stored_name']
-            supported = Path(row['original_name']).suffix.lower() == '.pdf'
-            missing = not (_readable_pdf(source) if supported else source.is_file() and not source.is_symlink())
-            kind = row.get('kind', 'legacy')
+            source = self.root / "data/resumes" / row["stored_name"]
+            supported = Path(row["original_name"]).suffix.lower() == ".pdf"
+            missing = not (
+                _readable_pdf(source)
+                if supported
+                else source.is_file() and not source.is_symlink()
+            )
+            kind = row.get("kind", "legacy")
             eligible = supported and not missing and _eligible(row, source)
-            status = 'File unavailable; upload again' if missing else (('Available for applications' if row['active'] else 'Inactive for future applications') if supported else 'Scoring only; applications require PDF')
-            if kind == 'master' and not missing:
-                status = 'Complete source material; never used as an application PDF'
-            elif kind == 'variant' and not eligible and not missing:
-                status = 'Upload a one-page PDF exported from this Google Doc to make it available'
-            export = row.get('pdf_export')
-            public_export = {key:value for key,value in export.items() if key != 'stored_name'} if export else None
-            resumes.append(UploadedResume(id=row['id'],filename=row['original_name'],active=row['active'],
-                format=Path(row['original_name']).suffix.lower().lstrip('.'), application_supported=eligible,
-                status=status, kind=kind, label=row.get('label', row['original_name']),
-                role=row.get('role', ''), google_doc_url=row.get('google_doc_url', ''),
-                page_count=row.get('page_count'), pdf_export=public_export,
-                download_url=f'/api/my-profile/resumes/{row["id"]}/download' if not missing else ''))
-        for entry in catalog['resumes']:
-            filename = self._filename(entry,names)
-            entries.append(ApplicationResume(id=entry['id'],label=str(entry.get('label',filename)),
-                filename=filename,available=entry.get('available') is True))
-            if entry['id'] not in upload_ids:
-                source = Path(str(entry.get('pdf','')))
+            status = (
+                "File unavailable; upload again"
+                if missing
+                else (
+                    (
+                        "Available for applications"
+                        if row["active"]
+                        else "Inactive for future applications"
+                    )
+                    if supported
+                    else "Scoring only; applications require PDF"
+                )
+            )
+            if kind == "master" and not missing:
+                status = "Complete source material; never used as an application PDF"
+            elif kind == "variant" and not eligible and not missing:
+                status = (
+                    "Upload a one-page PDF exported from this Google Doc "
+                    "to make it available"
+                )
+            export = row.get("pdf_export")
+            public_export = (
+                {key: value for key, value in export.items() if key != "stored_name"}
+                if export
+                else None
+            )
+            resumes.append(
+                UploadedResume(
+                    id=row["id"],
+                    filename=row["original_name"],
+                    active=row["active"],
+                    format=Path(row["original_name"]).suffix.lower().lstrip("."),
+                    application_supported=eligible,
+                    status=status,
+                    kind=kind,
+                    label=row.get("label", row["original_name"]),
+                    role=row.get("role", ""),
+                    google_doc_url=row.get("google_doc_url", ""),
+                    page_count=row.get("page_count"),
+                    pdf_export=public_export,
+                    download_url=f"/api/my-profile/resumes/{row['id']}/download"
+                    if not missing
+                    else "",
+                )
+            )
+        for entry in catalog["resumes"]:
+            filename = self._filename(entry, names)
+            entries.append(
+                ApplicationResume(
+                    id=entry["id"],
+                    label=str(entry.get("label", filename)),
+                    filename=filename,
+                    available=entry.get("available") is True,
+                )
+            )
+            if entry["id"] not in upload_ids:
+                source = Path(str(entry.get("pdf", "")))
                 source = source if source.is_absolute() else self.pipeline_root / source
                 exists = source.is_file() and not source.is_symlink()
-                resumes.append(UploadedResume(id=entry['id'],filename=filename,active=entry.get('available') is True,
-                    format=source.suffix.lower().lstrip('.'),application_supported=exists,
-                    download_url=f'/api/my-profile/resumes/{entry["id"]}/download' if exists else '',
-                    status=('Available for applications' if entry.get('available') is True else 'Inactive for future applications') if exists else 'File unavailable; upload again'))
-        return MyProfileState(**personal.model_dump(),application_resumes=entries,resumes=resumes)
+                resumes.append(
+                    UploadedResume(
+                        id=entry["id"],
+                        filename=filename,
+                        active=entry.get("available") is True,
+                        format=source.suffix.lower().lstrip("."),
+                        application_supported=exists,
+                        download_url=f"/api/my-profile/resumes/{entry['id']}/download"
+                        if exists
+                        else "",
+                        status=(
+                            "Available for applications"
+                            if entry.get("available") is True
+                            else "Inactive for future applications"
+                        )
+                        if exists
+                        else "File unavailable; upload again",
+                    )
+                )
+        return MyProfileState(
+            **personal.model_dump(), application_resumes=entries, resumes=resumes
+        )
 
     def save_personal(self, details: PersonalDetails, revision: str) -> MyProfileState:
         """Publish personal facts without changing any application authority.
@@ -245,11 +346,16 @@ class MyProfileService:
             ValueError: If there is no current upload or it is not a PDF.
         """
         uploaded = self.resume_state()
-        if not uploaded.stored_name or Path(uploaded.stored_name).name != uploaded.stored_name:
-            raise ValueError('Upload a PDF résumé first.')
-        source = self.root / 'data/resumes' / uploaded.stored_name
-        if source.suffix.lower() != '.pdf':
-            raise ValueError('Applications require an existing PDF. Upload a PDF résumé first.')
+        if (
+            not uploaded.stored_name
+            or Path(uploaded.stored_name).name != uploaded.stored_name
+        ):
+            raise ValueError("Upload a PDF résumé first.")
+        source = self.root / "data/resumes" / uploaded.stored_name
+        if source.suffix.lower() != ".pdf":
+            raise ValueError(
+                "Applications require an existing PDF. Upload a PDF résumé first."
+            )
         _pdf_bytes(source)
         return self.state()
 
@@ -268,25 +374,33 @@ class MyProfileService:
                 Google Docs export, or the identifier is unknown.
         """
         uploaded, catalog = self._sync_resumes()
-        row = next((row for row in uploaded if row['id'] == identifier), None)
+        row = next((row for row in uploaded if row["id"] == identifier), None)
         if row is not None:
-            stored = self.root / 'data/resumes' / row['stored_name']
-            pdf = active and Path(row['original_name']).suffix.lower() == '.pdf'
+            stored = self.root / "data/resumes" / row["stored_name"]
+            pdf = active and Path(row["original_name"]).suffix.lower() == ".pdf"
             if pdf:
                 _pdf_bytes(stored)
             if pdf and not _eligible(row, stored):
-                raise ValueError('This resume needs a valid one-page Google Docs export')
-            ResumeFileStore(self.root / 'data/resumes').set_active(identifier,active,self._known_names(catalog))
+                raise ValueError(
+                    "This resume needs a valid one-page Google Docs export"
+                )
+            ResumeFileStore(self.root / "data/resumes").set_active(
+                identifier, active, self._known_names(catalog)
+            )
             return self.state()
-        with private_file_lock(self.catalog_path.with_suffix('.lock')):
+        with private_file_lock(self.catalog_path.with_suffix(".lock")):
             catalog = self._catalog()
-            entry = next((row for row in catalog['resumes'] if row['id'] == identifier),None)
+            entry = next(
+                (row for row in catalog["resumes"] if row["id"] == identifier), None
+            )
             if entry is None:
-                raise ValueError('This resume no longer exists. Reload My Profile.')
+                raise ValueError("This resume no longer exists. Reload My Profile.")
             if active:
-                source = Path(str(entry.get('pdf','')))
-                _pdf_bytes(source if source.is_absolute() else self.pipeline_root / source)
-            entry['available'] = active
+                source = Path(str(entry.get("pdf", "")))
+                _pdf_bytes(
+                    source if source.is_absolute() else self.pipeline_root / source
+                )
+            entry["available"] = active
             self._publish_catalog(catalog)
         return self.state()
 
@@ -300,9 +414,11 @@ class MyProfileService:
         Returns:
             The updated My Profile state.
         """
-        return self.set_active(identifier,available)
+        return self.set_active(identifier, available)
 
-    def update_resume(self, identifier: str, metadata: ResumeUploadMetadata) -> MyProfileState:
+    def update_resume(
+        self, identifier: str, metadata: ResumeUploadMetadata
+    ) -> MyProfileState:
         """Update one uploaded résumé's metadata.
 
         Args:
@@ -312,7 +428,9 @@ class MyProfileService:
         Returns:
             The updated My Profile state.
         """
-        ResumeFileStore(self.root / 'data/resumes').update_metadata(identifier, metadata)
+        ResumeFileStore(self.root / "data/resumes").update_metadata(
+            identifier, metadata
+        )
         return self.state()
 
     def download_resume(self, identifier: str) -> tuple[Path, str]:
@@ -329,38 +447,58 @@ class MyProfileService:
                 symbolic link.
         """
         uploaded, catalog = self._sync_resumes()
-        row = next((row for row in uploaded if row['id'] == identifier), None)
+        row = next((row for row in uploaded if row["id"] == identifier), None)
         if row:
-            source = self.root / 'data/resumes' / row['stored_name']
-            filename = row['original_name']
+            source = self.root / "data/resumes" / row["stored_name"]
+            filename = row["original_name"]
         else:
-            entry = next((entry for entry in catalog['resumes'] if entry['id'] == identifier), None)
+            entry = next(
+                (entry for entry in catalog["resumes"] if entry["id"] == identifier),
+                None,
+            )
             if entry is None:
-                raise ValueError('This resume no longer exists')
-            source = Path(str(entry['pdf']))
+                raise ValueError("This resume no longer exists")
+            source = Path(str(entry["pdf"]))
             source = source if source.is_absolute() else self.pipeline_root / source
             filename = self._filename(entry, self._known_names(catalog))
         if source.is_symlink() or not source.is_file():
-            raise ValueError('The resume file is unavailable')
+            raise ValueError("The resume file is unavailable")
         return source, filename
 
 
-def _catalog_metadata(row: dict) -> dict:
-    if row.get('kind', 'legacy') == 'legacy':
+def _catalog_metadata(row: dict[str, Any]) -> dict[str, Any]:
+    if row.get("kind", "legacy") == "legacy":
         return {}
-    return {'original_filename':row['original_name'], **{key:row.get(key) for key in ('kind', 'label', 'role', 'google_doc_url', 'page_count', 'pdf_export')}}
+    return {
+        "original_filename": row["original_name"],
+        **{
+            key: row.get(key)
+            for key in (
+                "kind",
+                "label",
+                "role",
+                "google_doc_url",
+                "page_count",
+                "pdf_export",
+            )
+        },
+    }
 
 
-def _eligible(row: dict, source: Path) -> bool:
-    if row.get('kind') == 'master':
+def _eligible(row: dict[str, Any], source: Path) -> bool:
+    if row.get("kind") == "master":
         return False
-    if row.get('kind', 'legacy') == 'legacy':
+    if row.get("kind", "legacy") == "legacy":
         return True
     if not variant_export_matches(row):
         return False
     try:
         reader = PdfReader(source)
-        return not reader.is_encrypted and len(reader.pages) == 1 and bool((reader.pages[0].extract_text() or '').strip())
+        return (
+            not reader.is_encrypted
+            and len(reader.pages) == 1
+            and bool((reader.pages[0].extract_text() or "").strip())
+        )
     except Exception:
         return False
 
@@ -369,7 +507,7 @@ def _readable_pdf(path: Path) -> bool:
     try:
         _pdf_bytes(path)
         return True
-    except (ValueError,OSError):
+    except (ValueError, OSError):
         return False
 
 

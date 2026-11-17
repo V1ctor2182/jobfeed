@@ -284,7 +284,11 @@ class CompanyIntelligenceSync:
         self, client: httpx.AsyncClient, source: str
     ) -> list[CompanySourceRecord]:
         headers = (
-            {"User-Agent": os.environ.get("JOBFEED_SEC_USER_AGENT", "Jobfeed job search")}
+            {
+                "User-Agent": os.environ.get(
+                    "JOBFEED_SEC_USER_AGENT", "Jobfeed job search"
+                )
+            }
             if source == "sec"
             else None
         )

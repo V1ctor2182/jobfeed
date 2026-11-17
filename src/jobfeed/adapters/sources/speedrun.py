@@ -140,7 +140,9 @@ class SpeedrunSource:
     async def _walk_pages(
         self, search_url: str, rows: dict[str, dict[str, Any]]
     ) -> None:
-        """Add one search's list rows to rows, page by page, until max_jobs or the last page.
+        """Add one search's list rows to rows, page by page.
+
+        Stops at max_jobs or the last page.
 
         Time complexity: O(P * J) for fetched pages P and rows per page J.
         """

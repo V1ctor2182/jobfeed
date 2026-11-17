@@ -2,7 +2,7 @@
 
 import re
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
@@ -33,7 +33,7 @@ class ResumeUploadMetadata(BaseModel):
         Raises:
             ValueError: If the value contains a control character.
         """
-        if any(ord(character) < 32 for character in value):
+        if any(character < " " for character in value):
             raise ValueError("Resume labels and roles must be single lines")
         return value.strip()
 
@@ -63,7 +63,7 @@ class ResumeUploadMetadata(BaseModel):
         return f"https://docs.google.com/document/d/{match[1]}/edit"
 
     @model_validator(mode="after")
-    def consistent_export(self):
+    def consistent_export(self) -> Self:
         """Check that the kind, role, Google Docs URL and export fields agree.
 
         Returns:
@@ -84,7 +84,7 @@ class ResumeUploadMetadata(BaseModel):
         return self
 
 
-def variant_export_matches(row: dict) -> bool:
+def variant_export_matches(row: dict[str, Any]) -> bool:
     """Check that a library row is a one-page variant with a matching export.
 
     Args:
@@ -105,6 +105,5 @@ def variant_export_matches(row: dict) -> bool:
         and export.get("stored_name") == row.get("stored_name")
         and export.get("source_google_doc_url") == row.get("google_doc_url")
         and export.get("page_count") == 1
-        and export.get("provenance")
-        in {"user_declared", "observed_google_docs_export"}
+        and export.get("provenance") in {"user_declared", "observed_google_docs_export"}
     )

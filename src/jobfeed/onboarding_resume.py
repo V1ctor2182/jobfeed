@@ -158,7 +158,15 @@ class ResumeOnboardingService:
         """
         return self._drafts.load()
 
-    def upload(self, filename: str, content: bytes, *, library_metadata: tuple[dict[str,str],dict[str,bool]] | None = None, resume_metadata: ResumeUploadMetadata | None = None, identifier: str | None = None) -> ResumeDraftState:
+    def upload(
+        self,
+        filename: str,
+        content: bytes,
+        *,
+        library_metadata: tuple[dict[str, str], dict[str, bool]] | None = None,
+        resume_metadata: ResumeUploadMetadata | None = None,
+        identifier: str | None = None,
+    ) -> ResumeDraftState:
         """Validate a replacement résumé and persist its extracted preview.
 
         Args:
@@ -168,16 +176,26 @@ class ResumeOnboardingService:
         Returns:
             Updated draft with extracted text.
         """
-        with private_file_lock(self._drafts._path.with_suffix('.upload.lock')):
+        with private_file_lock(self._drafts._path.with_suffix(".upload.lock")):
             previous = self._drafts.load()
-            known_names = {previous.stored_name:previous.original_name} if previous.stored_name and previous.original_name else {}
-            known_active = {}
+            known_names = (
+                {previous.stored_name: previous.original_name}
+                if previous.stored_name and previous.original_name
+                else {}
+            )
+            known_active: dict[str, bool] = {}
             if library_metadata:
-                names,known_active = library_metadata
+                names, known_active = library_metadata
                 known_names = names | known_names
-            uploaded = self._files.save(filename, content, known_names=known_names,known_active=known_active,
-                                        resume_metadata=resume_metadata, identifier=identifier)
-            if resume_metadata and resume_metadata.kind == 'variant':
+            uploaded = self._files.save(
+                filename,
+                content,
+                known_names=known_names,
+                known_active=known_active,
+                resume_metadata=resume_metadata,
+                identifier=identifier,
+            )
+            if resume_metadata and resume_metadata.kind == "variant":
                 return previous
             return self._drafts.save_upload(uploaded)
 

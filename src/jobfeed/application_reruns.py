@@ -82,7 +82,9 @@ class ApplicationRerunService:
         """
         return self._command("status", {"batch_id": batch_id, "job_id": job_id})
 
-    def request(self, body: ApplicationRerunRequest, dashboard_url: str) -> ApplicationRerunState:
+    def request(
+        self, body: ApplicationRerunRequest, dashboard_url: str
+    ) -> ApplicationRerunState:
         """Ask the pipeline to rerun a job's application.
 
         Args:
@@ -92,4 +94,7 @@ class ApplicationRerunService:
         Returns:
             The rerun state after the request.
         """
-        return self._command("dashboard-request", {**body.model_dump(mode="json"), "dashboard_url": dashboard_url})
+        return self._command(
+            "dashboard-request",
+            {**body.model_dump(mode="json"), "dashboard_url": dashboard_url},
+        )

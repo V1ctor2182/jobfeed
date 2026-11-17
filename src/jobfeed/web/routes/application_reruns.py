@@ -12,9 +12,14 @@ from jobfeed.services.application_rerun_models import (
     ApplicationRerunState,
 )
 from jobfeed.web.errors import ApiError
-from jobfeed.web.routes.application_tabs import BoundedTabRoute, _allowed_origin, profile_availability
+from jobfeed.web.routes.application_tabs import (
+    BoundedTabRoute,
+    _allowed_origin,
+    profile_availability,
+)
 
 router = APIRouter(route_class=BoundedTabRoute)
+_MAX_PORT = 65535
 
 
 def _service(request: Request) -> ApplicationRerunService:
@@ -111,10 +116,19 @@ def rerun(
     try:
         available, reason = profile_availability(request)
         if not available:
-            raise ApplicationRerunError("unavailable", reason or "Reload the Jobfeed extension before restarting.")
+            raise ApplicationRerunError(
+                "unavailable",
+                reason or "Reload the Jobfeed extension before restarting.",
+            )
         server = request.scope.get("server")
-        if not server or server[0] not in {"127.0.0.1", "localhost", "::1", "0.0.0.0", "::"} or not 0 < server[1] < 65536:
-            raise ApplicationRerunError("unavailable", "The local dashboard address could not be verified.")
+        if (
+            not server
+            or server[0] not in {"127.0.0.1", "localhost", "::1", "0.0.0.0", "::"}
+            or not 0 < server[1] <= _MAX_PORT
+        ):
+            raise ApplicationRerunError(
+                "unavailable", "The local dashboard address could not be verified."
+            )
         host = "[::1]" if server[0] in {"::1", "::"} else "127.0.0.1"
         return _service(request).request(body, f"http://{host}:{server[1]}")
     except ApplicationRerunError as exc:

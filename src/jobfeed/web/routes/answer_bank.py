@@ -1,4 +1,7 @@
-"""Local dashboard saving and approval of application answers. Saving an answer here approves it."""
+"""Local dashboard saving and approval of application answers.
+
+Saving an answer here approves it.
+"""
 
 from typing import cast
 

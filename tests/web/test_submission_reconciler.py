@@ -76,7 +76,7 @@ async def test_reconciliation_sends_only_empty_payload_to_existing_pipeline(
     target = service(tmp_path)
     processes, calls, _ = script_process(
         monkeypatch,
-        'import json,sys; assert json.load(sys.stdin)=={}; '
+        "import json,sys; assert json.load(sys.stdin)=={}; "
         'print(json.dumps({"checked":1,"results":[],"deferred":False}))',
     )
     await target.reconcile_pending()
@@ -140,9 +140,9 @@ async def test_timeout_kills_children_even_after_cli_has_exited(tmp_path, monkey
     target = service(tmp_path)
     processes, _, _ = script_process(
         monkeypatch,
-        'import subprocess,sys; '
+        "import subprocess,sys; "
         'subprocess.Popen([sys.executable,"-c","import time; time.sleep(60)"]); '
-        'sys.exit(0)',
+        "sys.exit(0)",
     )
     killed = []
     kill = os.killpg

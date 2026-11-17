@@ -1901,7 +1901,10 @@ _RUN_FIRST_INSERTS = """
 
 
 class PostgresStore(
-    PostgresJobStars, PostgresRealJobEvaluation, PostgresRealJobWorkflow, PostgresRealJobViews
+    PostgresJobStars,
+    PostgresRealJobEvaluation,
+    PostgresRealJobWorkflow,
+    PostgresRealJobViews,
 ):
     """PostgreSQL-backed JobStore implementation using asyncpg connection pool.
 

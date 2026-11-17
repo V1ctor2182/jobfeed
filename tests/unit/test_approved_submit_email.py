@@ -126,10 +126,15 @@ def test_an_email_with_only_an_html_body_is_read_as_its_visible_text(
     runtime(tmp_path)
     body = (
         "<html><head><style>p {color: red}</style></head><body><p>Dear Alex,</p>"
-        "<p>We received your application for the Engineer position at Acme &amp; appreciate your interest.</p></body></html>"
+        "<p>We received your application for the Engineer position at Acme &amp; "
+        "appreciate your interest.</p></body></html>"
     )
-    evidence = read_confirmation(receipt(tmp_path, body=body, content_type="text/html"), 1, URL, company="acme")
-    assert evidence.confirmation_text.startswith("Dear Alex, We received your application")
+    evidence = read_confirmation(
+        receipt(tmp_path, body=body, content_type="text/html"), 1, URL, company="acme"
+    )
+    assert evidence.confirmation_text.startswith(
+        "Dear Alex, We received your application"
+    )
 
 
 def test_an_html_email_saying_it_was_not_submitted_is_refused(tmp_path: Path) -> None:
@@ -139,19 +144,32 @@ def test_an_html_email_saying_it_was_not_submitted_is_refused(tmp_path: Path) ->
     assert rejection(folder) == "application_acknowledgement_missing"
 
 
-def test_a_sender_domain_that_adds_a_word_to_the_employer_name_is_accepted(tmp_path: Path) -> None:
+def test_a_sender_domain_that_adds_a_word_to_the_employer_name_is_accepted(
+    tmp_path: Path,
+) -> None:
     runtime(tmp_path)
-    folder = receipt(tmp_path, sender="Recruiting <recruiting-no-reply@makeacmeco.com>", body="Thank you for applying to Acmeco.\n",
-                     subject="Thank you for your application to Acmeco")
+    folder = receipt(
+        tmp_path,
+        sender="Recruiting <recruiting-no-reply@makeacmeco.com>",
+        body="Thank you for applying to Acmeco.\n",
+        subject="Thank you for your application to Acmeco",
+    )
     assert read_confirmation(folder, 1, URL, company="Acmeco").email is not None
 
 
-def test_a_short_employer_name_inside_another_domain_is_rejected(tmp_path: Path) -> None:
+def test_a_short_employer_name_inside_another_domain_is_rejected(
+    tmp_path: Path,
+) -> None:
     runtime(tmp_path)
-    assert rejection(receipt(tmp_path, sender="jobs@dropacme.com")) == "email_sender_not_employer"
+    assert (
+        rejection(receipt(tmp_path, sender="jobs@dropacme.com"))
+        == "email_sender_not_employer"
+    )
 
 
-def test_a_workday_tenant_mailbox_named_for_the_employer_is_accepted(tmp_path: Path) -> None:
+def test_a_workday_tenant_mailbox_named_for_the_employer_is_accepted(
+    tmp_path: Path,
+) -> None:
     runtime(tmp_path)
     folder = receipt(tmp_path, sender="acme@myworkday.com")
     assert read_confirmation(folder, 1, URL, company="Acme").email is not None
@@ -159,7 +177,10 @@ def test_a_workday_tenant_mailbox_named_for_the_employer_is_accepted(tmp_path: P
 
 def test_a_workday_mailbox_of_another_tenant_is_rejected(tmp_path: Path) -> None:
     runtime(tmp_path)
-    assert rejection(receipt(tmp_path, sender="globex@myworkday.com")) == "email_sender_not_employer"
+    assert (
+        rejection(receipt(tmp_path, sender="globex@myworkday.com"))
+        == "email_sender_not_employer"
+    )
 
 
 def test_an_employer_domain_sender_is_accepted(tmp_path: Path) -> None:

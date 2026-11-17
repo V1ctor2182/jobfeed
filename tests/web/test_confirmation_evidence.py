@@ -14,10 +14,10 @@ from jobfeed.web.app import build_web_app
 from tests.web.test_app_skeleton import fake_context, open_client
 from tests.web.test_apply_health import (
     NOW,
+    controller_manifest,
     make_database,
     make_monitor,
     tree,
-    controller_manifest,
 )
 
 PNG = base64.b64decode(

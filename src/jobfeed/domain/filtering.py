@@ -188,7 +188,8 @@ def _location_reason(
 
 def _matches_location_allowlist(location: str, allowlist: list[str]) -> bool:
     other_locations = [
-        value for value in allowlist
+        value
+        for value in allowlist
         if value.casefold() != _UNITED_STATES_ALLOWLIST_VALUE
     ]
     if _any_match(location, other_locations):

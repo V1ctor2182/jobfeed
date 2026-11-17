@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""One scan of every enabled source, then unrated evaluation, through the running dashboard's API."""
+"""One scan of every enabled source, then unrated evaluation, \
+through the running dashboard's API."""
 
 import argparse
 import fcntl
@@ -89,9 +90,11 @@ def run_cycle(request=request_json, wait=wait_run, *, jobright=False):
             result = wait(run_id)
             LOG.info("Finished resumed scan run=%s status=%s", run_id, result["status"])
         if _source_failure(phase, result):
-            # The other sources' jobs are stored, and one source's outage must not leave them unrated.
+            # The other sources' jobs are stored, and one source's outage must not
+            # leave them unrated.
             LOG.warning(
-                "Scan run=%s failed in source %s; evaluating what the other sources stored",
+                "Scan run=%s failed in source %s; "
+                "evaluating what the other sources stored",
                 run_id,
                 result.get("failed_source"),
             )

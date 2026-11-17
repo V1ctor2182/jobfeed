@@ -16,6 +16,7 @@ from email.parser import BytesParser
 from email.utils import parseaddr, parsedate_to_datetime
 from io import BytesIO
 from pathlib import Path
+from typing import Any, Literal, cast
 from urllib.parse import urlsplit
 
 from PIL import Image, UnidentifiedImageError
@@ -43,11 +44,16 @@ class SubmitApproval:
     state: str
 
 
+ConfirmationKind = Literal[
+    "website_screenshot", "confirmation_email", "approved_submit_email"
+]
+
+
 @dataclass(frozen=True)
 class ConfirmationEvidence:
     """Validated proof of a submitted application and its capture provenance."""
 
-    kind: str
+    kind: ConfirmationKind
     artifact_path: Path
     artifact_bytes: bytes
     media_type: str
@@ -84,8 +90,10 @@ _ATS_MAIL = {
     "myworkdayjobs.com": frozenset({"myworkday.com", "myworkdayjobs.com"}),
 }
 
-# Workday mails each employer's applicants as <tenant>@myworkday.com, whatever board listed the job.
+# Workday mails each employer's applicants as <tenant>@myworkday.com,
+# whatever board listed the job.
 _TENANT_MAIL = frozenset({"myworkday.com"})
+_MIN_EMBEDDED_NAME = 5
 
 _ACK = re.compile(
     r"(?:application\s+(?:(?:has\s+been|was|is)\s+)?(?:successfully\s+)?(?:submitted|received|sent)|"
@@ -171,7 +179,7 @@ def _read(folder: Path, relative: object, limit: int) -> tuple[Path, bytes]:
         raise EvidenceValidationError("artifact_missing_or_unreadable") from exc
 
 
-def _object(folder: Path, name: object) -> dict:
+def _object(folder: Path, name: object) -> dict[str, Any]:
     _, content = _read(folder, name, 256 * 1024)
     try:
         value = json.loads(content)
@@ -345,12 +353,14 @@ def _answers_approval(
 
 
 def _employer_domain(label: str, employer: str) -> bool:
-    """Whether a sender domain's name is the employer's, alone or with a word added, as makenotion is Notion's.
+    """Whether a sender domain's name is the employer's, alone or with a word added.
 
-    A short name could sit inside an unrelated domain, so only names of five or more letters may have a word added.
+    For example, makenotion is Notion's. A short name could sit inside an
+    unrelated domain, so only names of five or more letters may have a word added.
     """
     return label == employer or (
-        len(employer) >= 5 and (label.startswith(employer) or label.endswith(employer))
+        len(employer) >= _MIN_EMBEDDED_NAME
+        and (label.startswith(employer) or label.endswith(employer))
     )
 
 
@@ -369,7 +379,9 @@ def _capture_time(value: object) -> tuple[str, datetime]:
     return captured_at, captured
 
 
-def _browser_text(folder: Path, confirmation: dict, expected: dict) -> str:
+def _browser_text(
+    folder: Path, confirmation: dict[str, Any], expected: dict[str, Any]
+) -> str:
     observation = _object(folder, confirmation.get("observation"))
     if any(observation.get(key) != value for key, value in expected.items()):
         raise EvidenceValidationError("browser_observation_mismatch")
@@ -454,7 +466,7 @@ def read_confirmation(
     if not _ACK.search(text) or _NEGATIVE.search(text):
         raise EvidenceValidationError("application_acknowledgement_missing")
     return ConfirmationEvidence(
-        kind,
+        cast(ConfirmationKind, kind),
         path,
         raw,
         media_type,

@@ -10,7 +10,12 @@ import pytest
 from fastapi import FastAPI
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
-from jobfeed.answer_bank import AnswerBankError, AnswerBankService, AnswerBankState
+from jobfeed.answer_bank import (
+    AnswerBankError,
+    AnswerBankMutation,
+    AnswerBankService,
+    AnswerBankState,
+)
 from jobfeed.web.errors import install_error_handling
 from jobfeed.web.routes.answer_bank import router
 
@@ -43,44 +48,83 @@ def app(bank):
 
 async def test_origin_and_provenance_boundary():
     bank = FakeBank()
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app(bank)), base_url=ORIGIN) as client:
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app(bank)), base_url=ORIGIN
+    ) as client:
         state = await client.get("/api/answer-bank")
         assert state.json() == {**EMPTY, "common_questions": []}
         assert state.headers["cache-control"] == "no-store"
-        payload = {"action": "approve", "entry_id": "one", "expected_revision": 0, "expected_version": 1}
-        for headers in ({}, {"Origin": "https://attacker.test"}, {"Origin": "http://localhost:8765"}):
-            result = await client.post("/api/answer-bank", json=payload, headers=headers)
-            assert result.status_code == 403
-        forged = await client.post("/api/answer-bank", json={**payload, "source": {"kind": "user"}}, headers={"Origin": ORIGIN})
-        assert forged.status_code == 422
+        payload = {
+            "action": "approve",
+            "entry_id": "one",
+            "expected_revision": 0,
+            "expected_version": 1,
+        }
+        for headers in (
+            {},
+            {"Origin": "https://attacker.test"},
+            {"Origin": "http://localhost:8765"},
+        ):
+            result = await client.post(
+                "/api/answer-bank", json=payload, headers=headers
+            )
+            assert result.status_code == HTTPStatus.FORBIDDEN
+        forged = await client.post(
+            "/api/answer-bank",
+            json={**payload, "source": {"kind": "user"}},
+            headers={"Origin": ORIGIN},
+        )
+        assert forged.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
         assert bank.writes == []
-        saved = await client.post("/api/answer-bank", json=payload, headers={"Origin": ORIGIN})
-        assert saved.status_code == 200
+        saved = await client.post(
+            "/api/answer-bank", json=payload, headers={"Origin": ORIGIN}
+        )
+        assert saved.status_code == HTTPStatus.OK
         assert saved.headers["cache-control"] == "no-store"
         assert len(bank.writes) == 1
 
 
-@pytest.mark.parametrize("code,status", [("conflict", 409), ("invalid", 422), ("unavailable", 503)])
+@pytest.mark.parametrize(
+    "code,status", [("conflict", 409), ("invalid", 422), ("unavailable", 503)]
+)
 async def test_failure_mapping(code, status):
     bank = FakeBank()
     bank.failure = AnswerBankError(code, "Review the current version.")
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app(bank)), base_url=ORIGIN) as client:
-        result = await client.post("/api/answer-bank", json={"action": "approve", "expected_revision": 1}, headers={"Origin": ORIGIN})
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app(bank)), base_url=ORIGIN
+    ) as client:
+        result = await client.post(
+            "/api/answer-bank",
+            json={"action": "approve", "expected_revision": 1},
+            headers={"Origin": ORIGIN},
+        )
         assert result.status_code == status
         assert result.json()["error"]["code"] == f"answer_bank_{code}"
 
 
 def test_fixed_cli_adapter(monkeypatch, tmp_path: Path):
     calls = []
+
     def run(args, **kwargs):
         calls.append((args, kwargs))
         return subprocess.CompletedProcess(args, 0, json.dumps(EMPTY), "")
+
     monkeypatch.setattr(subprocess, "run", run)
     service = AnswerBankService(tmp_path)
     assert service.state().revision == 0
-    from jobfeed.answer_bank import AnswerBankMutation
-    service.mutate(AnswerBankMutation(action="approve", expected_revision=0, entry_id="one", expected_version=1))
-    assert calls[1][0] == [str(tmp_path / ".venv/bin/python"), "-m", "pipeline.answer_bank", "--root", str(tmp_path), "dashboard-mutate"]
+    service.mutate(
+        AnswerBankMutation(
+            action="approve", expected_revision=0, entry_id="one", expected_version=1
+        )
+    )
+    assert calls[1][0] == [
+        str(tmp_path / ".venv/bin/python"),
+        "-m",
+        "pipeline.answer_bank",
+        "--root",
+        str(tmp_path),
+        "dashboard-mutate",
+    ]
     assert "source" not in json.loads(calls[1][1]["input"])
     assert calls[1][1]["cwd"] == tmp_path
 
@@ -108,33 +152,61 @@ async def test_real_cli_roundtrip_keeps_edited_answer_pending(tmp_path: Path, po
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=application), base_url=ORIGIN
     ) as client:
-        create = {"action": "create", "expected_revision": 0, "draft": {"question": "Describe your project?", "answer": "I built a synthetic test project.", "aliases": ["What did you build?"], "scope": {"kind": "global"}, "valid_until": None}}
+        create = {
+            "action": "create",
+            "expected_revision": 0,
+            "draft": {
+                "question": "Describe your project?",
+                "answer": "I built a synthetic test project.",
+                "aliases": ["What did you build?"],
+                "scope": {"kind": "global"},
+                "valid_until": None,
+            },
+        }
         created = await client.post("/api/answer-bank", json=create, headers=headers)
-        assert created.status_code == 200, created.text
+        assert created.status_code == HTTPStatus.OK, created.text
         bank = created.json()
         entry = bank["entries"][0]
         assert entry["versions"][0]["state"] == "pending_review"
-        approved = await client.post("/api/answer-bank", json={"action": "approve", "entry_id": entry["id"], "expected_version": 1, "expected_revision": bank["revision"]}, headers=headers)
-        assert approved.status_code == 200, approved.text
+        approved = await client.post(
+            "/api/answer-bank",
+            json={
+                "action": "approve",
+                "entry_id": entry["id"],
+                "expected_version": 1,
+                "expected_revision": bank["revision"],
+            },
+            headers=headers,
+        )
+        assert approved.status_code == HTTPStatus.OK, approved.text
         bank = approved.json()
         version = bank["entries"][0]["versions"][0]
         assert version["state"] == "approved"
         assert version["approval"] is not None
-        changed = {**create, "action": "edit", "entry_id": entry["id"], "expected_version": 1, "expected_revision": bank["revision"], "draft": {**create["draft"], "answer": "A revised synthetic answer."}}
+        changed = {
+            **create,
+            "action": "edit",
+            "entry_id": entry["id"],
+            "expected_version": 1,
+            "expected_revision": bank["revision"],
+            "draft": {**create["draft"], "answer": "A revised synthetic answer."},
+        }
         edited = await client.post("/api/answer-bank", json=changed, headers=headers)
-        assert edited.status_code == 200, edited.text
+        assert edited.status_code == HTTPStatus.OK, edited.text
         versions = edited.json()["entries"][0]["versions"]
         assert versions[-1]["state"] == "pending_review"
         assert versions[-1]["approval"] is None
         repeated = await client.post("/api/answer-bank", json=changed, headers=headers)
-        assert repeated.status_code == 200
+        assert repeated.status_code == HTTPStatus.OK
         assert repeated.json()["revision"] == edited.json()["revision"]
         changed["draft"]["answer"] = "A conflicting stale answer."
         stale = await client.post("/api/answer-bank", json=changed, headers=headers)
-        assert stale.status_code == 409
+        assert stale.status_code == HTTPStatus.CONFLICT
 
 
-async def test_real_cli_save_approves_the_answer_and_lists_common_questions(tmp_path: Path):
+async def test_real_cli_save_approves_the_answer_and_lists_common_questions(
+    tmp_path: Path,
+):
     source = Path(__file__).resolve().parents[3] / "resume-application-pipeline"
     if not (source / ".venv/bin/python").exists():
         pytest.skip("Sibling pipeline runtime is not installed")
@@ -142,20 +214,41 @@ async def test_real_cli_save_approves_the_answer_and_lists_common_questions(tmp_
     (tmp_path / "pipeline").symlink_to(source / "pipeline", target_is_directory=True)
     headers = {"Origin": ORIGIN}
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app(AnswerBankService(tmp_path))), base_url=ORIGIN
+        transport=httpx.ASGITransport(app=app(AnswerBankService(tmp_path))),
+        base_url=ORIGIN,
     ) as client:
         listed = (await client.get("/api/answer-bank")).json()
-        gender = next(item for item in listed["common_questions"] if item["key"] == "gender")
+        gender = next(
+            item for item in listed["common_questions"] if item["key"] == "gender"
+        )
         assert (gender["group"], gender["entry_id"]) == ("demographic", None)
         assert "Decline to self-identify" in gender["options"]
-        save = {"action": "save", "expected_revision": 0, "entry_id": "gender", "draft": {"question": gender["question"], "answer": "Female", "scope": {"kind": "global"}}}
+        save = {
+            "action": "save",
+            "expected_revision": 0,
+            "entry_id": "gender",
+            "draft": {
+                "question": gender["question"],
+                "answer": "Female",
+                "scope": {"kind": "global"},
+            },
+        }
         saved = await client.post("/api/answer-bank", json=save, headers=headers)
-        assert saved.status_code == 200, saved.text
+        assert saved.status_code == HTTPStatus.OK, saved.text
         body = saved.json()
         assert body["entries"][0]["versions"][0]["state"] == "approved"
-        assert next(item for item in body["common_questions"] if item["key"] == "gender")["entry_id"] == "gender"
-        stale = await client.post("/api/answer-bank", json={**save, "draft": {**save["draft"], "answer": "Male"}}, headers=headers)
-        assert stale.status_code == 409
+        assert (
+            next(item for item in body["common_questions"] if item["key"] == "gender")[
+                "entry_id"
+            ]
+            == "gender"
+        )
+        stale = await client.post(
+            "/api/answer-bank",
+            json={**save, "draft": {**save["draft"], "answer": "Male"}},
+            headers=headers,
+        )
+        assert stale.status_code == HTTPStatus.CONFLICT
 
 
 @pytest.mark.parametrize("host", ["jobfeed.localhost:1355", "127.0.0.1:4654"])

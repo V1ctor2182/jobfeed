@@ -102,8 +102,12 @@ class AnswerBankService:
         try:
             result = subprocess.run(
                 [
-                    str(self.root / ".venv/bin/python"), "-m",
-                    "pipeline.answer_bank", "--root", str(self.root), command,
+                    str(self.root / ".venv/bin/python"),
+                    "-m",
+                    "pipeline.answer_bank",
+                    "--root",
+                    str(self.root),
+                    command,
                 ],
                 input=json.dumps(payload),
                 cwd=self.root,
@@ -123,7 +127,13 @@ class AnswerBankService:
                     code, body.get("error", "Answer bank is unavailable.")
                 )
             return AnswerBankState.model_validate(body)
-        except (OSError, subprocess.TimeoutExpired, ValueError, TypeError, ValidationError):
+        except (
+            OSError,
+            subprocess.TimeoutExpired,
+            ValueError,
+            TypeError,
+            ValidationError,
+        ):
             raise AnswerBankError(
                 "unavailable",
                 "The application answer bank could not be read. "
@@ -147,6 +157,4 @@ class AnswerBankService:
         Returns:
             The answer bank state after the change.
         """
-        return self._command(
-            "dashboard-mutate", mutation.model_dump(exclude_none=True)
-        )
+        return self._command("dashboard-mutate", mutation.model_dump(exclude_none=True))

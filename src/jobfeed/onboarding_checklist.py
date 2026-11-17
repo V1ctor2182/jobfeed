@@ -281,11 +281,12 @@ def application_checks(run: ReadinessRun | None) -> list[ChecklistCheck]:
                     f"Last result: {evidence.reason} Run the safe check again."
                 )
             else:
-                status = {
+                readiness: dict[str, Literal["ready", "needs_action", "not_tested"]] = {
                     "ready": "ready",
                     "blocked": "needs_action",
                     "not_tested": "not_tested",
-                }[evidence.status]
+                }
+                status = readiness[evidence.status]
                 detail = evidence.reason
         checks.append(
             ChecklistCheck(

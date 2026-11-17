@@ -314,18 +314,42 @@ def test_blank_field_can_be_filled_again_without_changing_document_structure(
     assert PRESERVED in service.personal.profile.read_text()
 
 
-@pytest.mark.parametrize("dashboard", ["http://jobfeed.localhost:1355", "https://jobfeed.localhost:1355"])
-async def test_application_resume_can_save_from_local_proxy(tmp_path: Path, dashboard: str) -> None:
+@pytest.mark.parametrize(
+    "dashboard", ["http://jobfeed.localhost:1355", "https://jobfeed.localhost:1355"]
+)
+async def test_application_resume_can_save_from_local_proxy(
+    tmp_path: Path, dashboard: str
+) -> None:
     service = _service(tmp_path)
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=_app(service)), base_url=dashboard) as client:
-        response = await client.post("/api/my-profile/application-resume", headers={"Origin": dashboard}, json={})
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(service)), base_url=dashboard
+    ) as client:
+        response = await client.post(
+            "/api/my-profile/application-resume", headers={"Origin": dashboard}, json={}
+        )
     assert response.status_code == HTTP_OK, response.text
 
 
-@pytest.mark.parametrize("origin", ["https://example.test", "http://127.0.0.1:8765", "https://jobfeed.localhost:1356", "null", ""])
-async def test_proxy_resume_save_rejects_foreign_origins(tmp_path: Path, origin: str) -> None:
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "https://example.test",
+        "http://127.0.0.1:8765",
+        "https://jobfeed.localhost:1356",
+        "null",
+        "",
+    ],
+)
+async def test_proxy_resume_save_rejects_foreign_origins(
+    tmp_path: Path, origin: str
+) -> None:
     service = _service(tmp_path)
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=_app(service)), base_url="https://jobfeed.localhost:1355") as client:
-        response = await client.post("/api/my-profile/application-resume", headers={"Origin": origin}, json={})
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(service)),
+        base_url="https://jobfeed.localhost:1355",
+    ) as client:
+        response = await client.post(
+            "/api/my-profile/application-resume", headers={"Origin": origin}, json={}
+        )
     assert response.status_code == HTTP_FORBIDDEN
     assert not (service.pipeline_root / "resume-catalog.json").exists()

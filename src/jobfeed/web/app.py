@@ -18,7 +18,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from jobfeed.account_password import AccountPasswordService
 from jobfeed.answer_bank import AnswerBankService
-from jobfeed.application_queue import ApplicationQueueService
+from jobfeed.application_queue import ApplicationQueueService, QueueStore
 from jobfeed.application_reruns import ApplicationRerunService
 from jobfeed.application_submissions import ApplicationSubmissionService
 from jobfeed.application_tabs import ApplicationTabs
@@ -190,7 +190,7 @@ def build_web_app(context: AppContext, static_dir: Path | None = None) -> FastAP
     app.state.application_queue = ApplicationQueueService(
         app.state.apply_health_reader.root,
         context["settings"].db.path,
-        context["store"],
+        cast(QueueStore, context["store"]),
     )
     app.state.application_submissions = ApplicationSubmissionService(
         app.state.apply_health_reader.root, context["settings"].db.path

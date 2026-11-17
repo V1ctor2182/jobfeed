@@ -17,17 +17,20 @@ class ApplicationRerun(BaseModel):
     reason: str | None = None
     created_at: str
     turn_id: str | None = None
-    phase: Literal[
-        "relay_pending",
-        "cleanup",
-        "create_unknown",
-        "candidate_received",
-        "adopting",
-        "adopted",
-        "filling",
-        "completed",
-        "blocked",
-    ] | None = None
+    phase: (
+        Literal[
+            "relay_pending",
+            "cleanup",
+            "create_unknown",
+            "candidate_received",
+            "adopting",
+            "adopted",
+            "filling",
+            "completed",
+            "blocked",
+        ]
+        | None
+    ) = None
     replacement_thread_id: str | None = None
 
 

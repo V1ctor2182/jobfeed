@@ -475,7 +475,7 @@ class ApplicationTabs:
             )
         if target not in self._targets(job_id, owner):
             raise ApplicationTabError("tab_binding_changed")
-        binding = await self.auto_connect(
+        reconnected = await self.auto_connect(
             job_id,
             ApplicationTabAutoConnectRequest(
                 owner_thread_id=owner,
@@ -486,7 +486,7 @@ class ApplicationTabs:
             bridge,
             base_url,
         )
-        return await self.focus(job_id, owner, binding.binding_id)
+        return await self.focus(job_id, owner, reconnected.binding_id)
 
     def _assert_current_owner(self, job_id: int, owner: str) -> None:
         with closing(

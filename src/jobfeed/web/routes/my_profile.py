@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from ipaddress import ip_address
-from typing import cast
+from typing import Annotated, cast
 from urllib.parse import urlsplit
 
-from fastapi import APIRouter, Request, Response, UploadFile, File, Form
+from fastapi import APIRouter, File, Form, Request, Response, UploadFile
 from fastapi.responses import FileResponse
 
 from jobfeed.my_profile import MyProfileService
@@ -18,9 +18,9 @@ from jobfeed.my_profile_models import (
     ResumeActiveUpdate,
     ResumeAvailabilityUpdate,
 )
+from jobfeed.resume_library_types import ResumeUploadMetadata
 from jobfeed.web.errors import ApiError
 from jobfeed.web.routes.application_tabs import _allowed_origin
-from jobfeed.resume_library_types import ResumeUploadMetadata
 
 router = APIRouter()
 
@@ -30,10 +30,14 @@ def _service(request: Request) -> MyProfileService:
 
 
 def _local_dashboard_proxy(request: Request, origin: str) -> bool:
-    if origin not in {
-        "http://jobfeed.localhost:1355",
-        "https://jobfeed.localhost:1355",
-    } or request.client is None:
+    if (
+        origin
+        not in {
+            "http://jobfeed.localhost:1355",
+            "https://jobfeed.localhost:1355",
+        }
+        or request.client is None
+    ):
         return False
     if any(
         len(request.headers.getlist(header)) != 1
@@ -206,8 +210,10 @@ def set_application_resume(
         ) from None
 
 
-@router.put('/my-profile/resumes/{identifier}', response_model=MyProfileState)
-def set_resume_active(identifier: str, body: ResumeActiveUpdate, request: Request, response: Response) -> MyProfileState:
+@router.put("/my-profile/resumes/{identifier}", response_model=MyProfileState)
+def set_resume_active(
+    identifier: str, body: ResumeActiveUpdate, request: Request, response: Response
+) -> MyProfileState:
     """Change one uploaded filename's active status.
 
     Args:
@@ -225,15 +231,23 @@ def set_resume_active(identifier: str, body: ResumeActiveUpdate, request: Reques
     _mutation(request)
     _state_headers(response)
     try:
-        return _service(request).set_active(identifier,body.active)
-    except (OSError,ValueError,TypeError):
-        raise ApiError(422,'resume_update_failed','This resume could not be updated. Reload My Profile and try again.') from None
+        return _service(request).set_active(identifier, body.active)
+    except (OSError, ValueError, TypeError):
+        raise ApiError(
+            422,
+            "resume_update_failed",
+            "This resume could not be updated. Reload My Profile and try again.",
+        ) from None
 
 
-@router.post('/my-profile/resumes/upload', response_model=MyProfileState)
-async def upload_library_resume(request: Request, response: Response,
-                                file: UploadFile = File(...), metadata: str = Form(...),
-                                identifier: str | None = Form(None)) -> MyProfileState:
+@router.post("/my-profile/resumes/upload", response_model=MyProfileState)
+async def upload_library_resume(
+    request: Request,
+    response: Response,
+    file: Annotated[UploadFile, File()],
+    metadata: str = Form(...),
+    identifier: str | None = Form(None),
+) -> MyProfileState:
     """Store an uploaded résumé in the library with its declared metadata.
 
     Args:
@@ -255,22 +269,34 @@ async def upload_library_resume(request: Request, response: Response,
     _state_headers(response)
     try:
         details = ResumeUploadMetadata.model_validate_json(metadata)
-        if details.provenance == 'observed_google_docs_export':
-            raise ValueError('Browser uploads can declare an export; observed exports must be registered by the local agent')
+        if details.provenance == "observed_google_docs_export":
+            raise ValueError(
+                "Browser uploads can declare an export; observed exports must be "
+                "registered by the local agent"
+            )
         profile = _service(request)
         request.app.state.onboarding_resume_service.upload(
-            file.filename or 'resume', await file.read(),
-            library_metadata=profile.upload_metadata(), resume_metadata=details,
+            file.filename or "resume",
+            await file.read(),
+            library_metadata=profile.upload_metadata(),
+            resume_metadata=details,
             identifier=identifier,
         )
         return profile.state()
     except (OSError, ValueError, TypeError) as exc:
-        raise ApiError(422, 'resume_upload_failed', str(exc) if isinstance(exc, ValueError) else 'The resume could not be saved') from None
+        raise ApiError(
+            422,
+            "resume_upload_failed",
+            str(exc)
+            if isinstance(exc, ValueError)
+            else "The resume could not be saved",
+        ) from None
 
 
-@router.put('/my-profile/resumes/{identifier}/details', response_model=MyProfileState)
-def update_resume_details(identifier: str, body: ResumeUploadMetadata,
-                          request: Request, response: Response) -> MyProfileState:
+@router.put("/my-profile/resumes/{identifier}/details", response_model=MyProfileState)
+def update_resume_details(
+    identifier: str, body: ResumeUploadMetadata, request: Request, response: Response
+) -> MyProfileState:
     """Replace the stored metadata of one library résumé.
 
     Args:
@@ -290,10 +316,16 @@ def update_resume_details(identifier: str, body: ResumeUploadMetadata,
     try:
         return _service(request).update_resume(identifier, body)
     except (OSError, ValueError, TypeError) as exc:
-        raise ApiError(422, 'resume_update_failed', str(exc) if isinstance(exc, ValueError) else 'The resume could not be saved') from None
+        raise ApiError(
+            422,
+            "resume_update_failed",
+            str(exc)
+            if isinstance(exc, ValueError)
+            else "The resume could not be saved",
+        ) from None
 
 
-@router.get('/my-profile/resumes/{identifier}/download')
+@router.get("/my-profile/resumes/{identifier}/download")
 def download_resume(identifier: str, request: Request) -> FileResponse:
     """Serve one library résumé file without caching.
 
@@ -309,6 +341,10 @@ def download_resume(identifier: str, request: Request) -> FileResponse:
     """
     try:
         path, filename = _service(request).download_resume(identifier)
-        return FileResponse(path, filename=filename, headers={'Cache-Control': 'no-store'})
+        return FileResponse(
+            path, filename=filename, headers={"Cache-Control": "no-store"}
+        )
     except (OSError, ValueError, TypeError):
-        raise ApiError(404, 'resume_unavailable', 'The resume file is unavailable') from None
+        raise ApiError(
+            404, "resume_unavailable", "The resume file is unavailable"
+        ) from None

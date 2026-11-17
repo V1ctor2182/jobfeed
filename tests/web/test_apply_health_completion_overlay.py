@@ -93,7 +93,7 @@ def test_stale_false_snapshot_upgrades_from_native_completion_read_only(tmp_path
     assert job.owner_thread_id == "current-owner"
     assert job.queue_state == "Submitted"
     assert job.blocked is None and not job.paused
-    assert job.next_step == "完成，禁止重投"
+    assert job.next_step == "完成，禁止重投"  # noqa: RUF001 - must match the Chinese status text in apply_health
     assert (batch.counts.submitted, batch.counts.synced, batch.counts.closed) == (
         1,
         1,
@@ -187,7 +187,13 @@ def test_claimed_job_outside_current_manifest_cannot_become_complete(tmp_path):
 def test_jobs_past_one_query_of_ids_are_still_verified(tmp_path, monkeypatch):
     database, root, _, _, _ = completed(tmp_path)
     newer = make_monitor(root, "batch-two")
-    controller_manifest(newer, ordered_candidates=[{"id": 2, "company": "Beta"}, {"id": 3, "company": "Gamma"}])
+    controller_manifest(
+        newer,
+        ordered_candidates=[
+            {"id": 2, "company": "Beta"},
+            {"id": 3, "company": "Gamma"},
+        ],
+    )
     monitor = newer / "monitor.json"
     data = json.loads(monitor.read_text())
     first = data["snapshot"]["jobs"][0]
@@ -210,7 +216,8 @@ def test_canonical_application_readback_upgrades_without_legacy_applied_row(
     database, root, _, _, _ = completed(tmp_path, applied=False)
     with sqlite3.connect(database) as db:
         db.execute(
-            "CREATE TABLE real_job_applications(source_job_id INTEGER,source_applied_job_id INTEGER)"
+            "CREATE TABLE real_job_applications"
+            "(source_job_id INTEGER,source_applied_job_id INTEGER)"
         )
         db.execute(f"INSERT INTO real_job_applications({column}) VALUES(1)")
     before = tree(tmp_path)

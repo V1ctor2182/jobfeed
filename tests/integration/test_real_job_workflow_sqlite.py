@@ -53,22 +53,39 @@ async def test_us_results_and_selection_require_positive_location_evidence(
     store = SQLiteStore(tmp_path / "us-locations.db")
     await store.connect()
     locations = [
-        "California", "New York", "New Mexico", "San Francisco, CA", "Remote - US",
-        "", "Remote", "Remote in India", "Berlin, DE, Germany",
-        "United States / Canada", "London or Paris",
+        "California",
+        "New York",
+        "New Mexico",
+        "San Francisco, CA",
+        "Remote - US",
+        "",
+        "Remote",
+        "Remote in India",
+        "Berlin, DE, Germany",
+        "United States / Canada",
+        "London or Paris",
     ]
     expected_locations = {
-        "California", "New York", "New Mexico", "San Francisco, CA", "Remote - US",
+        "California",
+        "New York",
+        "New Mexico",
+        "San Francisco, CA",
+        "Remote - US",
     }
     expected_ids = set()
     try:
         for index, location in enumerate(locations):
-            saved = await store.save_job(JobPosting(
-                platform="linkedin", canonical_id=f"us-location-{index}",
-                url=f"https://example.test/us-location-{index}",
-                title="Software Engineer", company=f"Example Company {index}",
-                location=location, discovered_at=datetime.now(UTC),
-            ))
+            saved = await store.save_job(
+                JobPosting(
+                    platform="linkedin",
+                    canonical_id=f"us-location-{index}",
+                    url=f"https://example.test/us-location-{index}",
+                    title="Software Engineer",
+                    company=f"Example Company {index}",
+                    location=location,
+                    discovered_at=datetime.now(UTC),
+                )
+            )
             if location in expected_locations:
                 expected_ids.add(await store.resolve_real_job_id(saved.job_id))
         filters = HardFilters(location_allowlist=["United States"])

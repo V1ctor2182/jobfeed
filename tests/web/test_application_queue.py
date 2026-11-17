@@ -400,7 +400,9 @@ async def test_handoff_passes_claude_and_the_pipeline_refuses_codex(tmp_path):
     app, queue, _ = app_fixture(tmp_path)
     headers = {"Origin": ORIGIN, "x-application-queue-csrf": queue.csrf_token}
     claude = handoff_selection(401)
-    codex = {key: value for key, value in handoff_selection(401).items() if key != "runtime"}
+    codex = {
+        key: value for key, value in handoff_selection(401).items() if key != "runtime"
+    }
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url=ORIGIN
     ) as client:
@@ -430,7 +432,10 @@ async def test_handoff_passes_claude_and_the_pipeline_refuses_codex(tmp_path):
             json=handoff_selection(401) | {"runtime": "gemini"},
         )
         assert rejected.status_code == INVALID
-        assert len([c for c in queue.calls if c[0] == "handoff"]) == 2
+        assert [c[1]["runtime"] for c in queue.calls if c[0] == "handoff"] == [
+            "codex",
+            "claude",
+        ]
 
 
 async def test_queue_replay_ignores_the_handoff_runtime(tmp_path):

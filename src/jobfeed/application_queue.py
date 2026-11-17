@@ -216,7 +216,7 @@ class ApplicationQueueService:
             "received_at": datetime.now(UTC).isoformat(),
         }
 
-    async def _admit(
+    async def _admit(  # noqa: C901 - one admission transaction; splitting it hides the order of checks
         self,
         command: str,
         request_id: str,
