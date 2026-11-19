@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "resumes": [
+    {
+      "id": "approved-general",
+      "label": "General resume",
+      "description": "An existing operator-listed resume. Availability does not certify its claims.",
+      "available": true,
+      "pdf": "/absolute/path/to/your/existing-resume.pdf"
+    }
+  ]
+}

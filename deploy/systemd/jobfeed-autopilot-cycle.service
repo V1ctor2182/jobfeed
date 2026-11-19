@@ -1,0 +1,15 @@
+[Unit]
+Description=Jobfeed autopilot scan of every enabled source, then evaluation of new jobs
+After=jobfeed-dashboard.service
+Wants=jobfeed-dashboard.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/jobfeed/resume-application-pipeline
+Environment=PATH=%h/jobfeed/.venv/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=JOBFEED_API_URL=http://127.0.0.1:8765
+# Skipped while autopilot is off.
+ExecCondition=%h/jobfeed/resume-application-pipeline/.venv/bin/python -m pipeline.autopilot enabled
+ExecStart=%h/jobfeed/.venv/bin/python %h/jobfeed/jobfeed/scripts/jobfeed_scheduled_cycle.py
+# The cycle watches each run for up to two hours.
+TimeoutStartSec=5h

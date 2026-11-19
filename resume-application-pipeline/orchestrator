@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+cd "$script_dir"
+# SSH shells on macOS do not always load the Homebrew tool paths.
+PATH="$script_dir/.venv/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+export PATH
+if [ -x "$script_dir/.venv/bin/python" ]; then
+    exec "$script_dir/.venv/bin/python" -m pipeline.cli watch "$@"
+fi
+exec python3 -m pipeline.cli watch "$@"

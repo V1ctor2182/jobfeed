@@ -22,7 +22,16 @@ def test_default_lane_is_sqlite_and_legacy_postgres_lane_is_explicit() -> None:
 
 def test_ci_excludes_postgres_and_docker_jobs() -> None:
     """Daily CI must not provision PostgreSQL or build Docker images."""
-    workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+    # The workflow sits beside Jobfeed alone, or at the root of the combined repo.
+    workflow_path = next(
+        path
+        for path in (
+            ROOT / ".github/workflows/ci.yml",
+            ROOT.parent / ".github/workflows/ci.yml",
+        )
+        if path.exists()
+    )
+    workflow = workflow_path.read_text()
     assert "dorny/paths-filter@v3" in workflow
     assert "needs.changes.outputs.backend == 'true'" in workflow
     assert "needs.changes.outputs.browser == 'true'" in workflow

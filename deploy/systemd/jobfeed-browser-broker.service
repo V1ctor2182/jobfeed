@@ -1,0 +1,15 @@
+[Unit]
+Description=Jobfeed Workday account program (drives the applying browser over DevTools)
+After=jobfeed-dashboard.service jobfeed-apply-chromium.service
+Wants=jobfeed-apply-chromium.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/jobfeed/resume-application-pipeline
+Environment=PATH=%h/jobfeed/.venv/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin:/snap/bin
+ExecStart=%h/jobfeed/resume-application-pipeline/.venv/bin/python -m pipeline.browser_broker serve --root .
+Restart=on-failure
+RestartSec=60
+
+[Install]
+WantedBy=default.target

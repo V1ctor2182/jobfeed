@@ -1,0 +1,32 @@
+{
+  "format": 1,
+  "copied_source_files": 218,
+  "included": [
+    "tailor-resume skill",
+    "application-execution skill",
+    "start-pipeline skill",
+    "autofill and bridge",
+    "pipeline",
+    "tools",
+    "tests",
+    "native dispatcher",
+    "synthetic category CONTENT",
+    "application-question BQ skill, reference map, bridge and tests"
+  ],
+  "excluded": [
+    "Git history",
+    "personal profiles",
+    "original resumes and base content",
+    "applications",
+    "runtime databases",
+    "batch manifests",
+    "monitor logs",
+    "screenshots",
+    "private BQ stories",
+    "local settings",
+    "caches",
+    "backups",
+    "source documents"
+  ],
+  "notice": "Sanitized snapshot. Synthetic fixtures are not real applicant facts."
+}

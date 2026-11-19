@@ -1,0 +1,25 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Searchable dropdown</title><style>
+body{font-family:sans-serif;max-width:640px;margin:24px auto}
+label,fieldset{display:block;margin:14px 0}
+.combo{position:relative}
+.combo ul{position:absolute;left:0;right:0;margin:0;padding:0;list-style:none;border:1px solid #888;background:#fff;z-index:2}
+.combo li{padding:4px 8px;cursor:pointer}
+.combo li:hover{background:#def}
+</style></head><body>
+<div class="combo"><label for="country-search">Country of residence</label>
+    <input id="country-search" role="combobox" aria-controls="country-list" aria-expanded="false" autocomplete="off" placeholder="Start typing">
+    <input type="hidden" id="country" name="country">
+    <ul id="country-list" role="listbox" hidden></ul></div>
+<script>
+const countries=['Canada','Cameroon','Cambodia','Chile','China','Colombia','United States','United Kingdom'];
+const search=document.getElementById('country-search'), list=document.getElementById('country-list'), hidden=document.getElementById('country');
+function show(){const q=search.value.trim().toLowerCase(); hidden.value=''; list.innerHTML='';
+  const hits=countries.filter(c=>q&&c.toLowerCase().startsWith(q));
+  for(const c of hits){const li=document.createElement('li');li.role='option';li.textContent=c;
+    li.addEventListener('mousedown',e=>{e.preventDefault();search.value=c;hidden.value=c;list.hidden=true;search.setAttribute('aria-expanded','false');});list.appendChild(li);}
+  list.hidden=!hits.length; search.setAttribute('aria-expanded',String(!!hits.length));}
+search.addEventListener('input',show);
+search.addEventListener('blur',()=>setTimeout(()=>{list.hidden=true;if(!countries.includes(hidden.value)){hidden.value='';}},100));
+window.readState=()=>({country_text:search.value,country:hidden.value});
+</script>
+</body></html>

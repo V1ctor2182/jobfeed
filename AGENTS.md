@@ -1,8 +1,9 @@
-# 项目约定
+# Combined application workspace
 
-## 禁止添加 hash
+This repository contains two sibling projects. Follow each project's AGENTS.md before editing its files.
 
-- 未经用户明确要求，不得新增任何 hash 字段、计算、校验或依赖。
-- 不得在任何测试、fallback、重试或恢复逻辑中新增 hash 相关内容或验证。
-- 不得以数据完整性、样本一致性、去重或可复现性为理由自行添加 hash。
-- 必要验证应直接检查任务需要的内容、已有 ID 或字段，不引入 hash。
+Keep `jobfeed/` and `resume-application-pipeline/` side by side. Pipeline discovery and the formal Jobfeed CLI use this layout.
+
+Do not commit personal resumes, profiles, credentials, local configuration, application records, runtime databases, or logs. The tracked Jobfeed legacy database fixture is synthetic test data.
+
+Setup and tests do not authorize real applications. Preserve the existing application authorization boundaries. Copying this repository does not migrate or start local services, workers, browser sessions, or Claude MCP registrations.

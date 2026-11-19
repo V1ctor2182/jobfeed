@@ -1,0 +1,62 @@
+{
+  "helpers": [
+    {
+      "name": "searchable-dropdown-pick",
+      "sites": [
+        "*"
+      ],
+      "widget": "searchable dropdown that saves a value only when an option is clicked",
+      "description": "Types the start of the option, waits for the list, and clicks the exact option. Returns the visible value.",
+      "args": {
+        "input": "CSS selector of the search box",
+        "option": "exact option text"
+      },
+      "fixture": "fixtures/searchable-dropdown.html",
+      "test": {
+        "args": {
+          "input": "#country-search",
+          "option": "Canada"
+        },
+        "expect": {
+          "country": "Canada",
+          "country_text": "Canada"
+        }
+      }
+    },
+    {
+      "name": "chip-entry-add",
+      "sites": [
+        "*"
+      ],
+      "widget": "chip or tag field that adds an entry only on an Enter keydown and clears its box on blur",
+      "description": "For each value, sets the entry box, fires input, then fires Enter keydown/keypress/keyup without blurring. Skips values already saved. Returns the saved list read from the state field.",
+      "args": {
+        "input": "CSS selector of the entry box",
+        "values": "array of exact entries to add",
+        "state": "optional CSS selector of the field holding the saved JSON array, used for readback"
+      },
+      "fixture": "fixtures/chip-entry.html",
+      "test": {
+        "args": {
+          "input": "#skill-entry",
+          "values": [
+            "Python",
+            "SQL"
+          ],
+          "state": "#skills"
+        },
+        "expect": {
+          "skills": [
+            "Python",
+            "SQL"
+          ],
+          "chips": [
+            "Python",
+            "SQL"
+          ],
+          "entry": ""
+        }
+      }
+    }
+  ]
+}

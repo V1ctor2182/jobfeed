@@ -1,0 +1,28 @@
+[Unit]
+Description=Jobfeed autopilot application worker
+After=jobfeed-dashboard.service
+Wants=jobfeed-dashboard.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/jobfeed/resume-application-pipeline
+Environment=PATH=%h/jobfeed/.venv/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin:/snap/bin
+Environment=JOBFEED_API_URL=http://127.0.0.1:8765
+Environment=DISPLAY=:1
+Environment=XAUTHORITY=%h/.Xauthority
+# Started by the worker when no eligible job is left to apply to, at most once every three hours.
+Environment=JOBFEED_AUTOPILOT_SCAN_UNIT=jobfeed-autopilot-cycle.service
+# Checks Gmail for the employer's confirmation when an Applier cannot tell whether Submit went through.
+Environment=JOBFEED_CONFIRMATION_MAIL=1
+# Idles while autopilot is off or another worker runs.
+ExecStart=%h/jobfeed/resume-application-pipeline/.venv/bin/python -m pipeline.autopilot serve
+# Stop sends the worker one SIGINT and waits while it drains. Its Claude Appliers keep running.
+KillMode=process
+TimeoutStopSec=15min
+Restart=on-failure
+RestartSec=60
+# Exit 3: the worker failed three times in a row. Read worker.log, then start the service again.
+RestartPreventExitStatus=3
+
+[Install]
+WantedBy=default.target

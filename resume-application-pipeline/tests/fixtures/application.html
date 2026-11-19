@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Resume Pipeline Fixture</title>
+  </head>
+  <body>
+    <main>
+      <section id="details">
+        <h1>Fixture Application: Details</h1>
+        <label>Full name <input id="name" autocomplete="off" /></label>
+        <label>Email <input id="email" type="email" autocomplete="off" /></label>
+        <button id="next" type="button">Next</button>
+      </section>
+      <section id="review" hidden>
+        <h1>Fixture Application: Review</h1>
+        <p id="summary"></p>
+        <button id="submit" type="button">Submit fixture</button>
+      </section>
+    </main>
+    <script>
+      document.querySelector("#next").addEventListener("click", () => {
+        const name = document.querySelector("#name").value;
+        const email = document.querySelector("#email").value;
+        document.querySelector("#summary").textContent = `${name} | ${email}`;
+        document.querySelector("#details").hidden = true;
+        document.querySelector("#review").hidden = false;
+      });
+      document.querySelector("#submit").addEventListener("click", () => {
+        document.body.dataset.submitted = "true";
+      });
+    </script>
+  </body>
+</html>

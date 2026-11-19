@@ -1,0 +1,17 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Chip entry</title><style>
+body{font-family:sans-serif;max-width:640px;margin:24px auto}
+.chips span{display:inline-block;margin:2px;padding:2px 8px;border-radius:10px;background:#def}
+</style></head><body>
+<div><label for="skill-entry">Skills (press Enter after each skill)</label><div class="chips" id="chips"></div>
+<input id="skill-entry" placeholder="Type a skill, then press Enter"><input type="hidden" id="skills" name="skills" value="[]"></div>
+<script>
+const entry=document.getElementById('skill-entry'), chips=document.getElementById('chips'), hidden=document.getElementById('skills');
+entry.addEventListener('keydown',e=>{if(e.key!=='Enter')return;e.preventDefault();
+  const v=entry.value.trim(); const list=JSON.parse(hidden.value);
+  if(v&&!list.includes(v)){list.push(v);hidden.value=JSON.stringify(list);
+    const chip=document.createElement('span');chip.textContent=v;chips.appendChild(chip);}
+  entry.value='';});
+entry.addEventListener('blur',()=>{entry.value='';});
+window.readState=()=>({skills:JSON.parse(hidden.value),chips:[...chips.children].map(c=>c.textContent),entry:entry.value});
+</script>
+</body></html>

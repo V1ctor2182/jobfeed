@@ -1,0 +1,13 @@
+[Unit]
+Description=Jobfeed applying browser (a Chromium profile of its own with a fixed DevTools port)
+After=graphical-session.target
+
+[Service]
+Type=simple
+# A profile other than the default one, so Chromium honors the port flag and never asks to Allow a connection.
+ExecStart=/snap/bin/chromium --user-data-dir=%h/snap/chromium/common/chromium-apply --remote-debugging-port=9333 --password-store=basic --no-first-run --no-default-browser-check
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

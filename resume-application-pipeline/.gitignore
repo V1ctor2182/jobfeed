@@ -1,0 +1,44 @@
+# Personal data and runtime state
+/application-profile.md
+/profile.md
+/master.md
+/linkedin.md
+/applications/
+/.pipeline/
+/.profile-backups/
+/monitor-output/
+/outputs/
+/source/
+*.autofill.json
+*.pdf
+*.docx
+*.png
+*.jpg
+!/tests/fixtures/**/*.jpg
+*.sqlite*
+*.db
+*.log
+.env
+.env.*
+!.env.example
+*credentials*
+*secret*
+.claude/settings.local.json
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+node_modules/
+.DS_Store
+*.zip
+/docs/application-bq-answer-library.local.md
+/docs/application-bq-answer-library.md
+
+# BQ research cache and personal drafts
+**/.application-bridge/
+**/.bq-research/
+/.agents/skills/application-question/tmp/
+
+# Local existing-resume choices contain private paths.
+/resume-catalog.json
