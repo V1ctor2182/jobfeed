@@ -35,7 +35,7 @@ from jobfeed.domain.models import JobPosting
             "workday:acme:R123",
         ),
         ("https://jobright.ai/jobs/info/abc123", "jobright:abc123"),
-        ("https://umich.joinhandshake.com/jobs/123", "handshake:123"),
+        ("https://example.joinhandshake.com/jobs/123", "handshake:123"),
         ("https://example.com/jobs/123", None),
         ("https://greenhouse.io.evil.test/jobs/123", None),
         ("https://example.com/?token=123", None),
