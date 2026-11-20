@@ -35,7 +35,9 @@ find_or_install_uv() {
     installer="$(mktemp "${TMPDIR:-/tmp}/jobfeed-uv-installer.XXXXXX")"
     trap 'rm -f -- "${installer:-}"' RETURN
     curl -LsSf https://astral.sh/uv/install.sh -o "$installer"
-    env UV_NO_MODIFY_PATH=1 sh "$installer"
+    # The caller captures stdout as the uv path, so the installer's chatter
+    # must go to stderr.
+    env UV_NO_MODIFY_PATH=1 sh "$installer" >&2
     rm -f -- "$installer"
     trap - RETURN
     for candidate in "$HOME/.local/bin/uv" "$HOME/.cargo/bin/uv"; do

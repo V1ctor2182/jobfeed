@@ -66,6 +66,28 @@ and opens a guided setup: connect a model, upload your résumé, pick searches
 and company boards. Nothing scans until you start it. See the
 [Jobfeed guide](jobfeed/README.md) for every step.
 
+### On your own server, with a coding agent
+
+To run Jobfeed on an always-on machine (a VPS, cloud instance or Mac mini),
+paste this into any coding agent that can run commands on it: Claude Code or
+Codex on the machine itself, or an agent that reaches it over SSH or a
+remote-machine tool.
+
+```text
+Set up Jobfeed on my server as a background service.
+Read https://raw.githubusercontent.com/V1ctor2182/jobfeed/main/docs/server-install.md
+and follow it step by step. If you aren't running on that server, ask me how
+to reach it. Tell me your plan before changing anything, ask me before using
+sudo, and don't start any scan. Ask me everything you need here in this chat.
+When you're done, give me the summary that page asks for.
+```
+
+The agent installs the dashboard as a service, optionally schedules a daily
+scan, walks you through setup (model sign-in, résumé, job profile, searches)
+in the chat, and tells you how to open the dashboard. The steps are in
+[`docs/server-install.md`](docs/server-install.md) if you prefer to run them
+yourself.
+
 ## Add the Applier
 
 The Applier needs a few more things on the same machine:
