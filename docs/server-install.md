@@ -63,7 +63,61 @@ server (install it if missing): `tmux new -d -s jf '<command>'`, read the output
 with `tmux capture-pane -p -t jf`, and type into it with
 `tmux send-keys -t jf '<text>' Enter`.
 
-Requirements: Linux with systemd, or macOS; Git; `curl`; about 2 GB free disk.
+### Check that the server can run Jobfeed
+
+Do this before you change anything. Jobfeed needs:
+
+| | Minimum | Recommended |
+|---|---|---|
+| System | Linux with systemd, or macOS | |
+| Processor | 64-bit (`x86_64`, `aarch64` or `arm64`) | |
+| Memory (total) | 1 GB, with swap | 2 GB or more |
+| Free disk in the home folder | 4 GB | 6 GB |
+| Internet | can reach github.com, astral.sh and pypi.org | |
+
+The disk goes to Jobfeed's Python environment (about 1.5 GB), a private
+Python, download caches, a small scoring model and the Claude Code or Codex CLI.
+Model calls run at the provider, not on the server.
+
+```sh
+uname -sm
+if [ "$(uname -s)" = Darwin ]; then
+    echo "mem_mb=$(( $(sysctl -n hw.memsize) / 1048576 ))"
+else
+    echo "mem_mb=$(free -m | awk '/^Mem:/ {print $2}') available_mb=$(free -m | awk '/^Mem:/ {print $7}') swap_mb=$(free -m | awk '/^Swap:/ {print $2}')"
+    command -v systemctl >/dev/null && echo systemd-ok
+fi
+echo "disk_free_mb=$(df -Pm "$HOME" | awk 'NR==2 {print $4}')"
+for url in https://github.com https://astral.sh https://pypi.org/simple/; do
+    curl -fsSI -m 10 "$url" >/dev/null && echo "reach-ok $url" || echo "reach-FAIL $url"
+done
+```
+
+Then tell the user the result in one or two plain sentences:
+
+- **Everything meets the recommended column:** say the server is big enough and
+  go on.
+- **32-bit processor, no systemd on Linux, under 1 GB of memory, or under 4 GB
+  of free disk:** stop. Say what is short, by how much, and what would fix it,
+  for example: "Your server has 512 MB of memory; Jobfeed needs at least 1 GB,
+  and 2 GB is better. Most cloud providers offer a 2 GB plan for a few dollars a
+  month." Do not install.
+- **1–2 GB of memory and less than 1 GB of swap (Linux):** explain that the
+  server is small and that you can let it borrow 2 GB of disk as extra memory.
+  With their OK:
+
+  ```sh
+  sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
+  grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+  ```
+
+  If `swapon` fails (some containers forbid it), say Jobfeed may be slow or stop
+  during big scans, and continue only if they accept that.
+- **Plenty of total memory but under 700 MB available:** other programs are
+  using it. Mention that scans may be slow and continue.
+- **A site is unreachable:** say the server cannot reach the internet sites
+  Jobfeed downloads from, and ask whether it is behind a firewall or proxy.
+
 If Git, `curl` or `tmux` is missing, install it with the system's package
 manager after asking (`sudo apt-get install -y git curl tmux` on Debian and
 Ubuntu; `brew install git tmux` on macOS). Python is not required up front:
