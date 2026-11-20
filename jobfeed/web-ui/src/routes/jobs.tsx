@@ -1,5 +1,6 @@
 import { useState } from "react";
 
+import { isApplicationsNotInstalled } from "@/api/client";
 import { useApplierRuns } from "@/api/queries";
 import { useTracker, type TrackerApplication } from "@/api/tracker";
 import { useApplyHealth } from "@/api/workspace";
@@ -24,7 +25,7 @@ export default function JobsPage() {
   const columns = JOB_COLUMNS.map((column) => column.id === "queued" && !search.trim() && queuedTotal !== undefined
     ? { ...column, count: Math.max(queuedTotal, shown.filter((card) => card.column === "queued").length) } : column);
   const loading = apply.isPending || runs.isPending || tracker.isPending;
-  const failed = [apply.isError && "the queue", runs.isError && "Applier runs", tracker.isError && "applied jobs"].filter(Boolean);
+  const failed = [apply.isError && "the queue", runs.isError && "Applier runs", tracker.isError && !isApplicationsNotInstalled(tracker.error) && "applied jobs"].filter(Boolean);
   const placeholder = (jobId: number, company: string, title: string): TrackerApplication => ({
     job_id: jobId, company, title, source: "jobfeed", stage: "applied", confirmed_by_email: false, email_count: 0,
   });

@@ -9,6 +9,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, ValidationError
 
+from jobfeed.applications_runtime import ApplicationsNotInstalled
+
 MailStatus = Literal["applied", "action", "update", "interviewing", "rejected", "offer"]
 Stage = Literal["applied", "ghosted", "interviewing", "rejected", "offer"]
 
@@ -92,6 +94,12 @@ class TrackerService:
         self.root, self.jobfeed_db = root.resolve(), jobfeed_db.resolve()
 
     def _run(self, *command: str, timeout: int) -> subprocess.CompletedProcess[str]:
+        try:
+            return self._spawn(*command, timeout=timeout)
+        except FileNotFoundError:
+            raise ApplicationsNotInstalled from None
+
+    def _spawn(self, *command: str, timeout: int) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [
                 str(self.root / ".venv/bin/python"),

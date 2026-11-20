@@ -9,6 +9,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from jobfeed.applications_runtime import ApplicationsNotInstalled
+
 
 class ReviewItem(BaseModel):
     """One question or blocker an Applier is waiting on the user for."""
@@ -115,6 +117,8 @@ class ReviewService:
             body = json.loads(result.stdout)
             if not isinstance(body, dict):
                 raise ValueError("Invalid review response")
+        except FileNotFoundError:
+            raise ApplicationsNotInstalled from None
         except (OSError, subprocess.TimeoutExpired, ValueError, TypeError):
             raise ReviewError(
                 "unavailable",

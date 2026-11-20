@@ -9,6 +9,8 @@ export interface Zone {
   also?: string[];
   /** Which sidebar count this zone shows, if any. */
   count: "review" | "answers" | "spam" | null;
+  /** The zone needs the application pipeline, and is hidden when Jobfeed runs without it. */
+  applications?: true;
 }
 
 export type ZoneIconName =
@@ -17,17 +19,17 @@ export type ZoneIconName =
 
 export const ZONES: Zone[] = [
   { path: "/dashboard", label: "Dashboard", group: "primary", icon: "dashboard", count: null },
-  { path: "/review", label: "Review", group: "primary", icon: "review", count: "review" },
+  { path: "/review", label: "Review", group: "primary", icon: "review", count: "review", applications: true },
   { path: "/jobs", label: "Jobs", group: "primary", icon: "jobs", count: null, also: ["/library", "/runs", "/application-queue"] },
-  { path: "/tracker", label: "Tracker", group: "primary", icon: "tracker", count: null },
-  { path: "/profile?section=answers", label: "Answer Bank", group: "primary", icon: "answers", count: "answers" },
+  { path: "/tracker", label: "Tracker", group: "primary", icon: "tracker", count: null, applications: true },
+  { path: "/profile?section=answers", label: "Answer Bank", group: "primary", icon: "answers", count: "answers", applications: true },
   { path: "/profile", label: "Profile", group: "primary", icon: "profile", count: null },
   { path: "/sources", label: "Sources", group: "primary", icon: "sources", count: null },
-  { path: "/applier-trace", label: "Applier trace", group: "tools", icon: "trace", count: null },
+  { path: "/applier-trace", label: "Applier trace", group: "tools", icon: "trace", count: null, applications: true },
   { path: "/spam-review", label: "Spam review", group: "tools", icon: "spam", count: "spam" },
   { path: "/insights", label: "Insights", group: "tools", icon: "insights", count: null },
   { path: "/scanner-runs", label: "Scanner runs", group: "tools", icon: "scan", count: null },
-  { path: "/apply-health", label: "Apply health", group: "tools", icon: "health", count: null },
+  { path: "/apply-health", label: "Apply health", group: "tools", icon: "health", count: null, applications: true },
   { path: "/performance", label: "Performance", group: "tools", icon: "performance", count: null },
   { path: "/setup", label: "Settings", group: "tools", icon: "settings", count: null },
 ];

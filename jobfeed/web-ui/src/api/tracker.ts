@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { apiFetch } from "@/api/client";
+import { apiFetch, isApplicationsNotInstalled } from "@/api/client";
 import type { components } from "@/api/types.gen";
 
 export type TrackerState = components["schemas"]["TrackerState"];
@@ -10,7 +10,8 @@ export type Stage = TrackerApplication["stage"];
 export type MailStatus = TrackerMessage["status"];
 
 export function useTracker() {
-  return useQuery({ queryKey: ["tracker"] as const, queryFn: () => apiFetch<TrackerState>("/api/tracker"), refetchInterval: 5 * 60_000, retry: false });
+  return useQuery({ queryKey: ["tracker"] as const, queryFn: () => apiFetch<TrackerState>("/api/tracker"),
+    refetchInterval: (query) => (isApplicationsNotInstalled(query.state.error) ? false : 5 * 60_000), retry: false });
 }
 
 /** One email with its body. The first read fetches it from Gmail and can take several seconds; it never changes after. */

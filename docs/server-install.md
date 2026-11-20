@@ -653,7 +653,10 @@ running in the background; whether it looks for jobs every day and at what time
 (in their time zone); which job sites it reads, including whether Handshake,
 signed-in LinkedIn and Jobright are on and which Chrome must stay open for
 them; how to open the dashboard, and, with a private link, that the code is
-needed once per browser; and that they can come back to
+needed once per browser; that this install finds and ranks jobs, but does not
+apply to them or read application email, so the dashboard has no Review,
+Tracker or Answer Bank pages (applying is the separate Claude Applier setup in
+the main README); and that they can come back to
 any coding agent and say "update Jobfeed" or "change my Jobfeed searches". Then,
 under a "For later" heading, list the checkout path, the service names, and
 these commands:

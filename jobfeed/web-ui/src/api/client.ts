@@ -69,6 +69,11 @@ async function toApiError(response: Response): Promise<ApiError> {
   return new ApiError(response.status, "http_error", `HTTP ${response.status}`);
 }
 
+/** The error a Jobfeed without the application pipeline returns from Review, Answer Bank and Tracker. */
+export function isApplicationsNotInstalled(error: unknown): boolean {
+  return error instanceof ApiError && error.code === "applications_not_installed";
+}
+
 /** JSON POST: encodes the body and sets the content type. */
 export async function apiPost<T>(path: string, body: unknown): Promise<T> {
   return apiFetch<T>(path, {

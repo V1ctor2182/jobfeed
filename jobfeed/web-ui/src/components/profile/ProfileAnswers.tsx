@@ -14,12 +14,15 @@ import Select from "@cloudscape-design/components/select";
 import { type AnswerBank, type AnswerEntry, type CommonQuestion, type ScopeFilter, type SourceFilter, answerSource, currentAnswer,
   deleteRequest, matchesSearch, mergeRequest, profileAnswers, sameScope, saveRequest, scopeLabel, useAnswerBank,
   useMutateAnswer } from "@/api/answer-bank";
+import { isApplicationsNotInstalled } from "@/api/client";
+import { ApplicationsNotSetUp } from "@/components/shell/ApplicationsNotSetUp";
 import { AnswerRow } from "./AnswerRow";
 
 const SAVE_NOTE = "Saving an answer approves it. Appliers fill it in when an application asks the same question.";
 
 function BankStatus({ query }: { query: ReturnType<typeof useAnswerBank> }) {
   if (query.isPending) return <Box><div role="status">Loading your answers.</div></Box>;
+  if (isApplicationsNotInstalled(query.error)) return <Box><ApplicationsNotSetUp /></Box>;
   if (query.isError) return <Alert type="error" header="Answers could not be loaded" action={<Button onClick={() => { void query.refetch(); }}>Retry answers</Button>}>{query.error.message}</Alert>;
   return null;
 }

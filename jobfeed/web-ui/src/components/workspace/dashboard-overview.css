@@ -20,6 +20,7 @@
 .jf-spark i.hi { background: var(--jf-accent); }
 
 .jf-dash-grid { display: grid; grid-template-columns: minmax(0, 1.72fr) minmax(0, 1fr); gap: 16px; margin-bottom: 16px; }
+.jf-dash-grid.jf-dash-single { grid-template-columns: minmax(0, 1fr); }
 .jf-card { background: var(--jf-color-surface); border: 1px solid var(--jf-line); border-radius: 20px; box-shadow: 0 1px 2px rgb(0 0 0 / 2.5%); }
 .jf-pad { padding: 20px 22px; }
 .jf-card-head { display: flex; align-items: center; gap: 10px; padding: 18px 20px 12px; }

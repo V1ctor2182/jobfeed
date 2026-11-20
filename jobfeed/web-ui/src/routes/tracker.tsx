@@ -1,10 +1,12 @@
 import { useRef, useState } from "react";
 import { useSearchParams } from "react-router";
 
+import { isApplicationsNotInstalled } from "@/api/client";
 import { useTracker, useTrackerMessage, type MailStatus, type TrackerApplication, type TrackerMessage } from "@/api/tracker";
 import { Board, STAGES } from "@/components/jobs/ApplicationBoard";
 import { ApplicationPanel } from "@/components/jobs/ApplicationPanel";
 import { mailFor, matches, progressCards } from "@/components/jobs/boards";
+import { ApplicationsNotSetUp } from "@/components/shell/ApplicationsNotSetUp";
 import { formatLocalDateTime, formatRelativeAge } from "@/lib/dates";
 import "@/routes/jobs.css";
 import "@/routes/tracker.css";
@@ -23,6 +25,7 @@ export default function TrackerPage() {
   const [search, setSearch] = useState("");
   const sync = tracker.data?.last_sync;
   const label = tab === "inbox" ? "Search messages" : "Search companies";
+  if (isApplicationsNotInstalled(tracker.error)) return <div className="jf-tracker"><ApplicationsNotSetUp className="jf-tracker-empty" /></div>;
 
   return (
     <div className="jf-tracker">

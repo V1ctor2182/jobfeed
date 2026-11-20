@@ -2,6 +2,7 @@ import type { CSSProperties, ReactNode } from "react";
 import { Link } from "react-router";
 
 import { profileAnswers, useAnswerBank } from "@/api/answer-bank";
+import { isApplicationsNotInstalled } from "@/api/client";
 import { usePerformanceOverview, useRuns, type RunSummary } from "@/api/queries";
 import { actionCount, useReview } from "@/api/review";
 import { useApplyHealth, useDiscoverySummary } from "@/api/workspace";
@@ -38,6 +39,8 @@ export function DashboardOverview() {
   const first = series[0];
   const latest = series.at(-1);
 
+  // Without the application pipeline this Jobfeed only finds and ranks jobs, so application cards stay hidden.
+  const applications = !isApplicationsNotInstalled(review.error);
   const discoveryLoading = discovery.isPending;
   const waitingLoading = review.isPending || answers.isPending;
 
@@ -50,7 +53,7 @@ export function DashboardOverview() {
         <Kpi label={`Model cost, ${COST_WINDOW_DAYS} days`} loading={cost.isPending || runs.isPending} value={cost.data ? money(cost.data.total_llm_cost_usd) : "–"} foot={runs.data && <><b>{money(costs.at(-2)?.cost ?? 0)}</b> yesterday</>} spark={costs.map((entry) => entry.cost)} />
       </div>
 
-      <div className="jf-dash-grid">
+      {applications && <div className="jf-dash-grid">
         <section className="jf-card" aria-labelledby="jf-queue-title">
           <div className="jf-card-head">
             <h2 id="jf-queue-title">Application queue</h2>
@@ -99,15 +102,15 @@ export function DashboardOverview() {
             <Link className="jf-btn" to="/jobs">Open jobs</Link>
           </div>
         </section>
-      </div>
+      </div>}
 
-      <div className="jf-dash-grid">
-        <section className="jf-card" aria-labelledby="jf-applied-title">
+      <div className={applications ? "jf-dash-grid" : "jf-dash-grid jf-dash-single"}>
+        {applications && <section className="jf-card" aria-labelledby="jf-applied-title">
           <div className="jf-card-head"><h2 id="jf-applied-title">Applied over time</h2><span className="jf-meta jf-mono">cumulative</span></div>
           {discoveryLoading
             ? <div className="jf-chart-skel" role="status" aria-label="Loading applied over time"><Skel width="100%" height="100%" /></div>
             : latest && series.length > 1 ? <AppliedChart series={series} last={latest} /> : <p className="jf-note">No applications recorded yet.</p>}
-        </section>
+        </section>}
         <section className="jf-card" aria-labelledby="jf-runs-title">
           <div className="jf-card-head"><h2 id="jf-runs-title">Recent runs</h2><Link className="jf-chip" to="/scanner-runs">All ↗</Link></div>
           <div className="jf-runs">

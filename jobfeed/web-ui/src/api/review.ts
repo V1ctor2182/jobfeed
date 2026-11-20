@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { apiFetch, apiPost } from "@/api/client";
+import { apiFetch, apiPost, isApplicationsNotInstalled } from "@/api/client";
 import type { components } from "@/api/types.gen";
 
 export type ReviewState = components["schemas"]["ReviewState"];
@@ -17,7 +17,8 @@ export function isQuestion(item: ReviewItem): boolean {
 }
 
 export function useReview() {
-  return useQuery({ queryKey: reviewKey, queryFn: () => apiFetch<ReviewState>("/api/review"), refetchInterval: 30_000, retry: false });
+  return useQuery({ queryKey: reviewKey, queryFn: () => apiFetch<ReviewState>("/api/review"),
+    refetchInterval: (query) => (isApplicationsNotInstalled(query.state.error) ? false : 30_000), retry: false });
 }
 
 /** One click sends one reply. The click ID lets the server treat a repeated request as the same click. */

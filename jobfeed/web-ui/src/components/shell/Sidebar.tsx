@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Link, useLocation } from "react-router";
 
 import { profileAnswers, useAnswerBank } from "@/api/answer-bank";
-import { apiFetch } from "@/api/client";
+import { apiFetch, isApplicationsNotInstalled } from "@/api/client";
 import { actionCount, useReview } from "@/api/review";
 import { ZoneIcon } from "@/components/shell/ZoneIcon";
 import { ZONES, isMonitoringPath, zoneForPath, type Zone } from "@/components/shell/zones";
@@ -26,7 +26,9 @@ export function Sidebar() {
     spam: spam.data?.total ?? 0,
     answers: answers.data ? profileAnswers(answers.data).waiting.length : 0,
   };
-  const links = (group: Zone["group"]) => ZONES.filter((zone) => zone.group === group).map((zone) => {
+  // A Jobfeed installed without the application pipeline only finds and ranks jobs.
+  const applications = !isApplicationsNotInstalled(review.error);
+  const links = (group: Zone["group"]) => ZONES.filter((zone) => zone.group === group && (applications || !zone.applications)).map((zone) => {
     const count = zone.count ? counts[zone.count] : 0;
     return (
       <Link key={zone.path} to={zone.path} title={zone.label} aria-current={zone === current ? "page" : undefined}>

@@ -9,6 +9,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from jobfeed.applications_runtime import ApplicationsNotInstalled
+
 
 class AnswerScope(BaseModel):
     """Where an answer applies: everywhere, one company, or one job."""
@@ -131,6 +133,8 @@ class AnswerBankService:
                     code, body.get("error", "Answer bank is unavailable.")
                 )
             return AnswerBankState.model_validate(body)
+        except FileNotFoundError:
+            raise ApplicationsNotInstalled from None
         except (
             OSError,
             subprocess.TimeoutExpired,

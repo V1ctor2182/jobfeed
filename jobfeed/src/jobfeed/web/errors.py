@@ -18,11 +18,13 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import RequestResponseEndpoint
 
+from jobfeed.applications_runtime import NOT_INSTALLED_CODE, ApplicationsNotInstalled
 from jobfeed.domain.errors import LLMRuntimeUnavailable
 from jobfeed.observability import get_logger
 
 _HTTP_VALIDATION_ERROR = 422
 _PERSONAL_FIELD_LOCATION_LENGTH = 3
+_HTTP_NOT_FOUND = 404
 _HTTP_INTERNAL_ERROR = 500
 _HTTP_SERVICE_UNAVAILABLE = 503
 _CODES_BY_STATUS = {404: "not_found", 422: "validation_error"}
@@ -60,6 +62,7 @@ def install_error_handling(app: FastAPI) -> None:
     app.add_exception_handler(RequestValidationError, _handle_validation_error)
     app.add_exception_handler(ApiError, _handle_api_error)
     app.add_exception_handler(LLMRuntimeUnavailable, _handle_llm_unavailable)
+    app.add_exception_handler(ApplicationsNotInstalled, _handle_not_installed)
 
 
 async def _assign_request_id(
@@ -141,6 +144,26 @@ async def _handle_api_error(request: Request, exc: Exception) -> JSONResponse:
         raise exc
     return _error_response(
         exc.status_code, exc.code, exc.message, _request_id_of(request)
+    )
+
+
+async def _handle_not_installed(request: Request, exc: Exception) -> JSONResponse:
+    """Tell the dashboard that applying is not part of this install.
+
+    Args:
+        request: Request carrying the middleware-assigned request id.
+        exc: Always an ApplicationsNotInstalled per handler registration.
+
+    Returns:
+        JSON 404 response the dashboard shows as a plain "not set up" state.
+
+    Raises:
+        Exception: Re-raises any unexpected exception type defensively.
+    """
+    if not isinstance(exc, ApplicationsNotInstalled):
+        raise exc
+    return _error_response(
+        _HTTP_NOT_FOUND, NOT_INSTALLED_CODE, str(exc), _request_id_of(request)
     )
 
 

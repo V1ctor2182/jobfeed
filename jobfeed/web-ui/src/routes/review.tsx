@@ -2,7 +2,9 @@ import { useState } from "react";
 import { Link } from "react-router";
 
 import { profileAnswers, useAnswerBank } from "@/api/answer-bank";
+import { isApplicationsNotInstalled } from "@/api/client";
 import { isQuestion, useResumeSite, useReview, useReviewIgnore, useReviewReply, type ReviewAction, type ReviewItem, type ReviewSite } from "@/api/review";
+import { ApplicationsNotSetUp } from "@/components/shell/ApplicationsNotSetUp";
 import { formatRelativeAge } from "@/lib/dates";
 import "@/routes/review.css";
 
@@ -21,6 +23,7 @@ export default function ReviewPage() {
   const shown = items.filter((item) => isQuestion(item) === (filter === "question"));
   const count = (id: Filter) => items.filter((item) => isQuestion(item) === (id === "question")).length + (id === "question" ? sites.length : 0);
   const drafted = answers.data ? profileAnswers(answers.data).waiting.length : 0;
+  if (isApplicationsNotInstalled(review.error)) return <div className="jf-review"><ApplicationsNotSetUp className="jf-review-empty" /></div>;
 
   return (
     <div className="jf-review">
