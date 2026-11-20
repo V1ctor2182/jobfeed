@@ -117,12 +117,16 @@ TOOLS = [
              'Without a match, it lists related approved answers to questions worded differently. When one of them asks the same thing about the user, fill it without asking, '
              'unless the question is about this employer or role, needs a written answer, or the answer would have to change to fit.',
              {'question': _TEXT, 'common_question': _COMMON_KEY}, ['question']),
-    contract('record_answer', 'Only while the user\'s auto submit mode is on: save an answer you decided yourself and filled, so later Appliers reuse it without asking. '
+    contract('record_answer', 'Save an answer you filled, so later Appliers reuse it without asking. '
              'Pass question with the label copied exactly from the form and the exact answer you filled. '
+             'After you fill a related answer from lookup_answer exactly, pass same_as with its entry_id, in any mode: the label is saved as another way to ask '
+             'that answer, which never changes. It is refused when the answer you pass differs from the saved one. '
+             'Without same_as, only while the user\'s auto submit mode is on, it saves an answer you decided yourself. '
              'applies_to is every_company for any fact about the user and this_company for a question about this employer or role, as for ask_user. '
              'For a common question in My Profile, pass common_question instead of applies_to. It never replaces an answer the user gave: '
              'when the user already answered the question, it returns their answer, and you fill that instead. Never use it for a contact or identity fact.',
-             {'question': _TEXT, 'answer': _TEXT, 'applies_to': {'type': 'string', 'enum': sorted(ANSWER_SCOPES)}, 'common_question': _COMMON_KEY},
+             {'question': _TEXT, 'answer': _TEXT, 'applies_to': {'type': 'string', 'enum': sorted(ANSWER_SCOPES)}, 'common_question': _COMMON_KEY,
+              'same_as': _TEXT},
              ['question', 'answer']),
     contract('get_draft_feedback', 'Read the user\'s feedback on earlier drafts, newest first. Call it once per job before your first draft, '
              'and follow the general preferences it shows, such as tone, length or words to avoid. Ignore feedback about one other question only.',
@@ -273,8 +277,13 @@ class ApplierTools:
             scope['company'] = self.company
         return scope
 
-    def record_answer(self, question, answer, applies_to='this_company', common_question=None):
-        """Save an answer the Applier decided itself, under the auto submit mode the user turned on, as approved for reuse."""
+    def record_answer(self, question, answer, applies_to='this_company', common_question=None, same_as=None):
+        """Save an answer the Applier decided itself, under the auto submit mode the user turned on, as approved for reuse.
+
+        With same_as, save question as another wording of that approved answer instead, in any mode.
+        """
+        if same_as is not None:
+            return self._add_wording(same_as, question, answer)
         if not self.store.auto_submit()['enabled']:
             raise ValueError('Auto submit mode is off, so the user approves every answer. Call ask_user instead, with a draft for a short answer.')
         if not self.company:
@@ -290,6 +299,16 @@ class ApplierTools:
                 raise
             return {'saved': False, 'reason': str(exc)}
         return {'saved': True, 'entry_id': entry['id'], 'applies_to': applies_to}
+
+    def _add_wording(self, entry_id, question, answer):
+        if not self.company:
+            return {'saved': False, 'reason': 'company not configured for this Applier'}
+        from pipeline.answer_bank import AnswerBank, BankError
+        try:
+            entry = AnswerBank(self.materials_root).add_alias(entry_id, question, answer, {'company': self.company, 'job_id': str(self.job_id)}, owner=self.owner)
+        except (BankError, OSError) as exc:
+            return {'saved': False, 'reason': str(exc)}
+        return {'saved': True, 'entry_id': entry['id']}
 
     def report_blocker(self, blocker_type, summary, field=None, attempts=(), error=None, page_structure=None, page_url=None, stop=None):
         if self.store.skip(self.job_id) is not None:

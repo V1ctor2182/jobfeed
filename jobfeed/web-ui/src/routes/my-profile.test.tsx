@@ -50,6 +50,11 @@ function answerBankResponse(body: Record<string, unknown> | undefined) {
     else { entry = { id: String(body.entry_id), current_version: 1, versions: [version] }; bank.entries.push(entry); }
     const item = bank.common_questions!.find(candidate => candidate.question === draft.question);
     if (item) item.entry_id = entry.id;
+  } else if (body.action === "merge" && entry) {
+    const others = bank.entries.filter(candidate => (body.merge_entry_ids as string[]).includes(candidate.id));
+    const kept = entry.versions.at(-1)!;
+    kept.aliases = [...(kept.aliases ?? []), ...others.map(other => other.versions.at(-1)!.question)];
+    for (const other of others) other.versions.at(-1)!.state = "revoked";
   } else if (body.action === "revoke" && entry) {
     entry.versions.at(-1)!.state = "revoked";
     for (const item of bank.common_questions!) if (item.entry_id === entry.id) item.entry_id = null;
@@ -567,4 +572,62 @@ it("approves an Applier draft as written when saved without changes", async () =
   fireEvent.click(within(draft).getByRole("button", { name: "Save" }));
   await waitFor(() => expect(answerRequests()).toHaveLength(1));
   expect(answerRequests()[0]).toMatchObject({ action: "save", entry_id: "draft", expected_version: 1, draft: { answer: "Drafted synthetic reason." } });
+});
+
+function savedAnswer(id: string, question: string, answer: string, extra: Partial<AnswerBank["entries"][number]["versions"][number]> = {}) {
+  return { id, current_version: 1, versions: [{ version: 1, question, answer, aliases: [], scope: { kind: "global" as const }, valid_until: null,
+    state: "approved" as const, created_at: "2026-01-01T00:00:00Z", approval: APPROVAL, ...extra }] };
+}
+
+it("searches saved answers by question, other wordings and answer, and filters by scope and source", async () => {
+  bank.entries.push(
+    savedAnswer("employer", "Current employer", "Example Corp", { aliases: ["Name of your company"] }),
+    savedAnswer("why", "Why join Example Co?", "Synthetic mission", { scope: { kind: "company", company: "Example Co" },
+      approval: { ...APPROVAL, source: { kind: "applier_auto", job_id: "7" } } }));
+  mount("answers");
+  const search = await screen.findByRole("searchbox", { name: "Search saved answers" });
+  const shown = () => ["What is your notice period?", "Current employer", "Why join Example Co?"].filter(name => screen.queryByRole("group", { name }));
+  expect(shown()).toEqual(["What is your notice period?", "Current employer", "Why join Example Co?"]);
+  fireEvent.change(search, { target: { value: "COMPANY" } });
+  expect(shown()).toEqual(["Current employer"]);
+  fireEvent.change(search, { target: { value: "two weeks" } });
+  expect(shown()).toEqual(["What is your notice period?"]);
+  fireEvent.change(search, { target: { value: "" } });
+  fireEvent.mouseDown(screen.getByRole("button", { name: /Scope/ }));
+  fireEvent.mouseUp(await screen.findByRole("option", { name: "One company" }));
+  expect(shown()).toEqual(["Why join Example Co?"]);
+  fireEvent.mouseDown(screen.getByRole("button", { name: /Scope/ }));
+  fireEvent.mouseUp(await screen.findByRole("option", { name: "Any scope" }));
+  fireEvent.mouseDown(screen.getByRole("button", { name: /Source/ }));
+  fireEvent.mouseUp(await screen.findByRole("option", { name: "Saved here" }));
+  expect(shown()).toEqual(["What is your notice period?", "Current employer"]);
+});
+
+it("merges selected answers into the one the user keeps", async () => {
+  bank.entries.push(savedAnswer("notice-2", "How much notice do you need to give?", "Two weeks"));
+  mount("answers");
+  fireEvent.click(await screen.findByRole("checkbox", { name: "Select What is your notice period?" }));
+  const merge = group("Merge answers");
+  expect(merge.getByRole("button", { name: "Merge" })).toBeDisabled();
+  expect(merge.getByText("Select at least two answers to merge.")).toBeVisible();
+  fireEvent.click(screen.getByRole("checkbox", { name: "Select How much notice do you need to give?" }));
+  expect(merge.getByRole("button", { name: "Merge" })).toBeDisabled();
+  fireEvent.click(merge.getByRole("radio", { name: /What is your notice period\?/ }));
+  fireEvent.click(merge.getByRole("button", { name: "Merge" }));
+  await waitFor(() => expect(screen.queryByRole("group", { name: "How much notice do you need to give?" })).toBeNull());
+  expect(answerRequests()).toEqual([{ action: "merge", expected_revision: 3, entry_id: "notice", merge_entry_ids: ["notice-2"] }]);
+  expect(screen.queryByRole("group", { name: "Merge answers" })).toBeNull();
+  expect(screen.getByRole("group", { name: "What is your notice period?" })).toBeVisible();
+});
+
+it("does not merge answers that apply to different companies", async () => {
+  bank.entries.push(savedAnswer("acme-notice", "Notice period for Acme", "Two weeks", { scope: { kind: "company", company: "Acme" } }));
+  mount("answers");
+  fireEvent.click(await screen.findByRole("checkbox", { name: "Select What is your notice period?" }));
+  fireEvent.click(screen.getByRole("checkbox", { name: "Select Notice period for Acme" }));
+  const merge = group("Merge answers");
+  fireEvent.click(merge.getByRole("radio", { name: /What is your notice period\?/ }));
+  expect(merge.getByRole("button", { name: "Merge" })).toBeDisabled();
+  expect(merge.getByText(/apply to different companies or jobs/)).toBeVisible();
+  expect(answerRequests()).toEqual([]);
 });

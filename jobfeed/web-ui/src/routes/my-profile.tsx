@@ -53,7 +53,7 @@ export default function MyProfilePage() {
     description="Everything Appliers fill in for you. Save each section when you finish reviewing it. Saving does not start job searches or applications."
     actions={<Button onClick={() => navigate("/setup")}>Back to setup checklist</Button>}>My Profile</Header>}>
     <Grid gridDefinition={[{ colspan: { default: 12, s: 4 } }, { colspan: { default: 12, s: 8 } }]}>
-      <Container>
+      <div className="profile-aside"><Container>
         <SpaceBetween size="m">
           <div>
             <Box variant="h2" tagOverride="p">{name}</Box>
@@ -71,7 +71,7 @@ export default function MyProfilePage() {
             </ul>
           </nav>
         </SpaceBetween>
-      </Container>
+      </Container></div>
       <SpaceBetween size="l">
         {personal.isPending && <Box><div role="status">Loading your personal details.</div></Box>}
         {personal.isError && <Alert type="error" header="Personal details could not be loaded" action={<Button onClick={() => { void personal.refetch(); }}>Retry personal details</Button>}>{personal.error.message}</Alert>}

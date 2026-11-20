@@ -82,6 +82,17 @@ def sync_claude_application(pipeline, job_id):
     return {'job_id': job_id, 'status': 'claude_applier_observed', 'state': record['state']}
 
 
+def _reconciled(launcher, owner):
+    """The owner's reconciled launch, or None when a requeue on the worker's own thread retired it after the caller
+    listed the launches (2026-11-18: 63 refill passes failed on 'unknown launch' this way)."""
+    try:
+        return launcher.reconcile(owner)
+    except ValueError as exc:
+        if str(exc) != 'unknown launch':
+            raise
+        return None
+
+
 def active_claude_owners(pipeline, owners):
     """Claude owners whose session is running.
 
@@ -93,7 +104,7 @@ def active_claude_owners(pipeline, owners):
 
     def holds_slot(record):
         return record['state'] in {'running', 'unknown', 'requested', 'launched'} and not never_started(record)
-    return {owner for owner in owners if owner in known and holds_slot(launcher.reconcile(owner))}
+    return {owner for owner in owners if owner in known and (record := _reconciled(launcher, owner)) is not None and holds_slot(record)}
 
 
 def waiting_claude_owners(pipeline, owners):
@@ -116,8 +127,8 @@ def waiting_claude_owners(pipeline, owners):
     def waits(owner):
         if owner not in known:
             return False
-        record = launcher.reconcile(owner)
-        if record.get('cli_state') != 'blocked':
+        record = _reconciled(launcher, owner)
+        if record is None or record.get('cli_state') != 'blocked':
             return False
         if jobs.get(owner) in asking:
             return True
@@ -184,6 +195,7 @@ class ClaudeServices:
         # The same unit switch keeps tests away from the applying browser.
         self.tabs_every = TABS_EVERY if os.environ.get(MAIL_ENV) else None
         self._tabs, self._next_tabs = None, 0.0
+        self._reload, self._next_reload = None, 0.0
         if os.environ.get(MAIL_ENV):
             from pipeline.apply_browser import ExtensionGate
             pipeline.browser_gate = ExtensionGate()
@@ -199,6 +211,9 @@ class ClaudeServices:
             events += park(self.pipeline, launcher_for(self.pipeline), in_flight)
             events += site_holds.park(self.pipeline, launcher_for(self.pipeline).store)
             events += supervise(launcher_for(self.pipeline), sync=jobfeed_sync(self.pipeline), skip=jobfeed_skip(self.pipeline), closed=jobfeed_closed(self.pipeline))
+            if (gate := getattr(self.pipeline, 'browser_gate', None)) is not None:
+                from pipeline.apply_browser import answer_outages
+                events += answer_outages(launcher_for(self.pipeline).store, gate)
         if now >= self._next_bridge and self.env_path.exists():
             self._next_bridge = now + self.bridge_every
             if self._bridge is None:
@@ -214,12 +229,30 @@ class ClaudeServices:
             self._next_tabs = now + self.tabs_every
             self._tabs = threading.Thread(target=self._close_done_tabs, daemon=True)
             self._tabs.start()
+        gate = getattr(self.pipeline, 'browser_gate', None)
+        # A reload takes a few seconds, so it also runs beside the worker loop.
+        if (gate is not None and not gate.ready() and now >= self._next_reload
+                and (self._reload is None or not self._reload.is_alive())):
+            from pipeline.apply_browser import RELOAD_EVERY
+            self._next_reload = now + RELOAD_EVERY
+            self._reload = threading.Thread(target=self._reload_extension, daemon=True)
+            self._reload.start()
         while not self._mail_events.empty():
             events.append(self._mail_events.get())
-        gate = getattr(self.pipeline, 'browser_gate', None)
         if gate is not None:
             events += gate.drain()
         return events
+
+    def _reload_extension(self):
+        from pipeline.apply_browser import reload_extension
+        from pipeline.browser_broker import Chromium
+        chromium = Chromium()
+        try:
+            self._mail_events.put({'event': 'apply_browser_extension_reloaded', 'result': reload_extension(chromium.session())[:200]})
+        except Exception as exc:  # noqa: BLE001 - a failed reload must not stop the worker; the next one tries again
+            self._mail_events.put({'event': 'apply_browser_reload_error', 'error': f'{type(exc).__name__}: {exc}'[:300]})
+        finally:
+            chromium.drop()
 
     def _close_done_tabs(self):
         from pipeline.browser_broker import Chromium

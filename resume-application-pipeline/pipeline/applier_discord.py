@@ -116,15 +116,28 @@ def http_client(token):
                 return json.loads(raw) if raw else None
             except urllib.error.HTTPError as exc:
                 if exc.code != 429:
-                    raise RuntimeError(f'Discord {method} {path.split("?")[0]} failed with {exc.code}') from None
+                    raise DiscordHTTPError(f'Discord {method} {path.split("?")[0]} failed with {exc.code}', exc.code) from None
                 time.sleep(float(json.loads(exc.read() or b'{}').get('retry_after', 1)))
         raise RuntimeError('Discord kept rate limiting the bot')
     return call
 
 
+class DiscordHTTPError(RuntimeError):
+    """Discord refused a request. code is its HTTP status."""
+
+    def __init__(self, message, code):
+        super().__init__(message)
+        self.code = code
+
+
+# Discord refuses for good to edit a message in an archived thread, or one it no longer has.
+REFUSED_FOR_GOOD = frozenset({400, 403, 404})
+
+
 BLOCKER_GUIDANCE = {
     'tab_missing': 'The form tab is gone, so its draft is lost unless you still have it. Choose Reopen to start a fresh form, or Stop.',
     'browser_disconnected': 'Claude in Chrome lost its connection. Reconnect the extension, then press Done.',
+    'already_applied': 'A run that lost its tab after Submit was started again, and the site shows an earlier application. Check it, then skip the job or press Done to apply anyway.',
     'page_changed': 'The form tab now shows a different page. Check it, then press Done or tell me what happened.',
     'foreign_owner': 'Another session controls this tab. Nothing was taken over. Reply with what to do.',
     'submit_unknown': 'Submit was clicked once and the result is unclear. It will not be clicked again. Check the site or your email, then press Submitted or Not submitted.',
@@ -173,6 +186,8 @@ def _reply_status(reply):
     """What a settled question shows in place of its buttons."""
     if reply['intent'] == 'change_request':
         return _clip(f"Asked for changes: {reply['text'].rstrip('.')}. The Applier will send a new draft.")
+    if reply.get('source_kind') == 'apply_browser':
+        return 'Done automatically: the applying browser is connected again.'
     if reply.get('source_kind') == 'email':
         return 'Submitted: the employer\'s confirmation email arrived, so nobody needed to answer.'
     return _clip(f"Answered: {reply['text']}")
@@ -368,7 +383,13 @@ class DiscordBridge:
     def _settle(self, kind, ref, channel, message_id, status):
         """Replace a message's buttons with the status of what happened, once."""
         if self._posted(kind, ref) is None:
-            self.http('PATCH', f'/channels/{channel}/messages/{message_id}', {'content': _clip(status), 'components': []})
+            try:
+                self.http('PATCH', f'/channels/{channel}/messages/{message_id}', {'content': _clip(status), 'components': []})
+            except DiscordHTTPError as exc:
+                # The edit only shows the outcome in place of the buttons. A refused one is not tried on every pass (2026-11-18:
+                # a nine-day-old question in an archived thread failed with 400 on each pass and ended the rest of it).
+                if exc.code not in REFUSED_FOR_GOOD:
+                    raise
             self._mark(kind, ref, message_id)
 
     def thread_for(self, job_id):

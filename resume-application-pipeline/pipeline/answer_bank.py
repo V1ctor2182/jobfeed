@@ -93,6 +93,72 @@ def _approve_new_version(entry, draft, *, event_id, source):
     return entry
 
 
+# A merge or an added wording keeps who approved the answer, and notes only the latest such change.
+_WORDING_NOTES = ('merged_from', 'alias_added_by')
+
+
+def _rewording(version, aliases, **note):
+    """The same approved answer with these aliases, approved by the same source, noting what added them."""
+    source = {k: v for k, v in version['approval']['source'].items() if k not in _WORDING_NOTES}
+    return content(dict({k: version[k] for k in CONTENT}, aliases=aliases)), dict(source, **note)
+
+
+def _in_reach(version, context):
+    scope = version['scope']
+    if scope['kind'] != 'global' and scope['company'].strip().casefold() != str(context['company']).strip().casefold():
+        return False
+    return scope['kind'] != 'job' or str(scope['job_id']) == str(context['job_id'])
+
+
+def _expired(version):
+    return bool(version['valid_until']) and _date(version['valid_until']) <= datetime.now(timezone.utc)
+
+
+def _same_scope(a, b):
+    def key(scope):
+        return scope['kind'], (scope.get('company') or '').strip().casefold(), str(scope.get('job_id') or '')
+    return key(a) == key(b)
+
+
+def _merge(store, target, request):
+    """Fold the other entries' wordings into target and revoke them. Returns False when this exact merge already happened."""
+    ids = request.get('merge_entry_ids')
+    if not isinstance(ids, list) or not ids or not all(isinstance(x, str) and x for x in ids) or len(set(ids)) != len(ids):
+        raise BankError('Choose one or more other answers to merge.')
+    if not target or target['id'] in ids:
+        raise BankError('Choose the answer to keep and different answers to merge into it.')
+    by_id = {entry['id']: entry for entry in store['entries']}
+    if any(x not in by_id for x in ids):
+        raise BankError('An answer to merge no longer exists. Reload and try again.', 'conflict')
+    sources = [by_id[x] for x in ids]
+    kept = target['versions'][-1]
+    if (kept['state'] == 'approved' and kept['approval']['source'].get('merged_from') == ids
+            and all(e['versions'][-1].get('merged_into') == target['id'] for e in sources)):
+        return False
+    if type(request.get('expected_revision')) is not int or request['expected_revision'] != store['revision']:
+        raise BankError('The answer bank changed. Reload before saving.', 'conflict')
+    if any(e['versions'][-1]['state'] != 'approved' for e in [target, *sources]):
+        raise BankError('Only saved answers can be merged.')
+    if not all(_same_scope(kept['scope'], e['versions'][-1]['scope']) for e in sources):
+        raise BankError('Only answers that apply to the same companies or job can be merged.')
+    seen = {normalize_question(kept['question'])}
+    aliases = []
+    for wording in [*kept['aliases'], *(w for e in sources for w in _wordings(e['versions'][-1]))]:
+        if normalize_question(wording) not in seen:
+            seen.add(normalize_question(wording))
+            aliases.append(wording)
+    draft, source = _rewording(kept, aliases, merged_from=ids)
+    _approve_new_version(target, draft, event_id=str(uuid4()), source=source)
+    now = timestamp()
+    for entry in sources:
+        current = entry['versions'][-1]
+        current['superseded_state'], current['state'], current['superseded_at'] = current['state'], 'superseded', now
+        entry['current_version'] += 1
+        entry['versions'].append(dict({k: current[k] for k in CONTENT}, version=entry['current_version'], state='revoked', created_at=now,
+                                      approval=None, revoked_at=now, merged_into=target['id']))
+    return True
+
+
 def common_questions(store):
     """The catalog, each item with the approved global answer the Dashboard shows for it."""
     view = []
@@ -112,9 +178,45 @@ _STOPWORDS = frozenset('a an and any are at be can do does for have i in is it o
 _UNITED_STATES = re.compile(r'\bu\.s\.?(?:a\.?)?(?=\W|$)|\busa\b')
 
 
+# Words a form may use for the same thing, each folded to the group's first word, so related() finds a saved answer worded
+# differently (2026-11-18: a form asking "Nationality" missed the saved "In which country/region do you have citizenship?").
+# related() only suggests answers; the Applier still judges whether one asks the same thing.
+_SYNONYM_GROUPS = (
+    'citizenship citizen citizens nationality',
+    'salary compensation pay ctc remuneration wage wages',
+    'expected desired expectation expectations',
+    'authorized authorised authorization authorisation eligible eligibility',
+    'sponsorship sponsor sponsoring sponsored',
+    'relocate relocation relocating',
+    'available availability notice',
+    'school university college institution',
+    'phone mobile telephone cell',
+    'location reside residence located city',
+    'gender sex',
+    'ethnicity race ethnic racial',
+    'hispanic latino latina latinx',
+    'veteran military',
+    'disability disabled',
+    'onsite office inperson',
+    'referred referral referrer',
+    'surname lastname',
+    'firstname forename',
+)
+_SYNONYMS = {word: group.split()[0] for group in _SYNONYM_GROUPS for word in group.split()}
+
+
+def _fold(word):
+    word = _SYNONYMS.get(word, word)
+    # A plain plural reads as its singular: years/year, degrees/degree. Short words and -ss/-us/-is endings stay.
+    if len(word) > 4 and word.endswith('s') and not word.endswith(('ss', 'us', 'is')):
+        word = _SYNONYMS.get(word[:-1], word[:-1])
+    return word
+
+
 def _words(question):
     text = _UNITED_STATES.sub(' united states ', normalize_question(question))
-    return set(re.findall(r'[a-z0-9]+', text)) - _STOPWORDS
+    text = re.sub(r'\b(in)[ -](person)\b', r'\1\2', re.sub(r'\b(last|first)[ -](name)\b', r'\1\2', text))
+    return {_fold(word) for word in re.findall(r'[a-z0-9]+', text)} - _STOPWORDS
 
 
 def _date(value):
@@ -237,16 +339,23 @@ class AnswerBank:
                 os.unlink(name)
 
     def mutate(self, request, *, dashboard=False):
-        if not isinstance(request, dict) or set(request) - {'action', 'expected_revision', 'entry_id', 'expected_version', 'draft'}:
+        if not isinstance(request, dict) or set(request) - {'action', 'expected_revision', 'entry_id', 'expected_version', 'draft', 'merge_entry_ids'}:
             raise BankError('Unsupported command fields.')
         action = request.get('action')
-        if action not in {'create', 'edit', 'approve', 'revoke', 'save'}:
+        if action not in {'create', 'edit', 'approve', 'revoke', 'save', 'merge'}:
             raise BankError('Unknown answer bank action.')
-        if action in {'approve', 'save'} and not dashboard:
+        if action in {'approve', 'save', 'merge'} and not dashboard:
             raise BankError('Approve the exact version in the local dashboard.')
+        if 'merge_entry_ids' in request and action != 'merge':
+            raise BankError('Unsupported command fields.')
         with self.locked():
             store = self.read()
             entry = next((x for x in store['entries'] if x['id'] == request.get('entry_id')), None)
+            if action == 'merge':
+                if _merge(store, entry, request):
+                    store['revision'] += 1
+                    self._write(store)
+                return store
             version = entry['versions'][-1] if entry else None
             draft = content(request.get('draft')) if action in {'create', 'edit', 'save'} else None
             if action == 'save':
@@ -326,11 +435,7 @@ class AnswerBank:
             if not exact and not (item and any(_COMMON.get(w) is item for w in wordings)):
                 continue
             scope = current['scope']
-            if scope['kind'] != 'global' and scope['company'].strip().casefold() != str(context['company']).strip().casefold():
-                continue
-            if scope['kind'] == 'job' and str(scope['job_id']) != str(context['job_id']):
-                continue
-            if current['valid_until'] and _date(current['valid_until']) <= datetime.now(timezone.utc):
+            if not _in_reach(current, context) or _expired(current):
                 continue
             if answer is not None and answer != current['answer']:
                 continue
@@ -347,20 +452,19 @@ class AnswerBank:
     def related(self, question, context, limit=8):
         """Approved answers in reach of this job whose questions share the most words with this one, for the Applier to judge."""
         words = _words(question)
+        # A one-word form label, such as "Citizenship", needs only that word (2026-11-18: it could never match before).
+        needed = min(2, len(words))
         found = []
         for entry in self.read()['entries']:
             current = entry['versions'][-1]
             scope = current['scope']
-            if current['state'] != 'approved' or (current['valid_until'] and _date(current['valid_until']) <= datetime.now(timezone.utc)):
+            if current['state'] != 'approved' or _expired(current) or not _in_reach(current, context):
                 continue
-            if scope['kind'] != 'global' and scope['company'].strip().casefold() != str(context['company']).strip().casefold():
-                continue
-            if scope['kind'] == 'job' and str(scope['job_id']) != str(context['job_id']):
-                continue
-            shared = max(len(words & _words(q)) for q in [current['question'], *current['aliases']])
-            if shared >= 2:
-                found.append((shared, {'question': current['question'], 'answer': current['answer'], 'scope': scope['kind']}))
-        return [match for _, match in sorted(found, key=lambda pair: -pair[0])[:limit]]
+            shared, size = max((len(words & _words(q)), -len(_words(q))) for q in [current['question'], *current['aliases']])
+            if needed and shared >= needed:
+                found.append(((shared, size), {'entry_id': entry['id'], 'question': current['question'], 'answer': current['answer'], 'scope': scope['kind']}))
+        # Most words in common first, then the most focused saved question.
+        return [match for _, match in sorted(found, key=lambda pair: pair[0], reverse=True)[:limit]]
 
     def learn(self, question, answer, scope, *, request_id, reply_version, channel):
         """Save the user's reply to an Applier's question as an approved answer. The reply is the approval.
@@ -382,6 +486,32 @@ class AnswerBank:
             raise BankError(f"The user already answered this question. Fill their answer: {found['answer']}", 'user_answer')
         return self._save(question, answer, scope, event_id=str(uuid4()),
                           source={'kind': APPLIER_AUTO, 'job_id': str(context['job_id']), 'owner': owner})
+
+    def add_alias(self, entry_id, question, answer, context, *, owner):
+        """Save question as another wording of entry_id's approved answer, which the Applier for context's job filled exactly.
+
+        It never changes an answer, its scope or who approved it. It raises BankError with code 'refused' when the entry is not
+        an approved answer in reach of this job or its answer differs.
+        """
+        if not isinstance(question, str) or not question.strip():
+            raise BankError('The question must be nonempty text.', 'refused')
+        if normalize_question(question) in PROFILE_FIELDS:
+            raise BankError(f'{question} is a profile fact. It comes from the application profile and is never saved as an answer.', 'refused')
+        with self.locked():
+            store = self.read()
+            entry = next((e for e in store['entries'] if e['id'] == entry_id), None)
+            current = entry and entry['versions'][-1]
+            if not current or current['state'] != 'approved' or _expired(current) or not _in_reach(current, context):
+                raise BankError('That entry is not an approved answer for this job. Nothing was saved.', 'refused')
+            if current['answer'] != answer:
+                raise BankError('That entry has a different answer. Only an answer filled exactly as saved adds a wording. Nothing was saved.', 'refused')
+            if normalize_question(question) in {normalize_question(q) for q in _wordings(current)}:
+                return entry
+            draft, source = _rewording(current, [*current['aliases'], question], alias_added_by={'owner': owner, 'job_id': str(context['job_id'])})
+            _approve_new_version(entry, draft, event_id=str(uuid4()), source=source)
+            store['revision'] += 1
+            self._write(store)
+            return entry
 
     def _save(self, question, answer, scope, *, event_id, source):
         draft = content({'question': question, 'answer': answer, 'scope': scope})

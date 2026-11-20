@@ -7,6 +7,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 from pipeline.applier_mcp import ESCALATED_INSTRUCTION, SKIPPED_INSTRUCTION, ApplierTools
 from pipeline.applier_supervisor import tick
@@ -87,6 +88,28 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(tick(self.launcher, now=later), [])
         self.store.ask(1, record['launch_id'], 'question', 'Start date?')
         self.assertEqual(tick(self.launcher, now=later + timedelta(minutes=30)), [])
+
+    def test_the_stall_clock_starts_again_at_a_reply_or_a_resume(self):
+        # 2026-11-18: each of 160 Appliers resumed after a browser outage was reported stalled at once.
+        record, tools = self.launch()
+        tools.record_progress('filled name')
+        request = self.store.ask(1, record['launch_id'], 'question', 'Start date?')
+        hours = datetime.now(timezone.utc) + timedelta(hours=3)
+        self.assertEqual(tick(self.launcher, now=hours), [], 'a wait is not a stall')
+        with patch('pipeline.applier_runtime._now', return_value=hours.isoformat()):
+            self.answer(request)
+        stalled = lambda now: [e for e in tick(self.launcher, now=now) if e.get('kind') == 'stalled']
+        self.assertEqual(stalled(hours + timedelta(minutes=5)), [], 'progress hours old does not count once the reply came')
+        self.assertEqual(len(stalled(hours + timedelta(minutes=11))), 1, 'ten minutes after the reply with no progress is a stall')
+
+    def test_a_resumed_applier_is_not_stalled_by_its_old_progress(self):
+        record, tools = self.launch()
+        tools.record_progress('filled name')
+        with closing(sqlite3.connect(self.store.path)) as db, db:
+            db.execute('UPDATE applier_launches SET resumed_at=? WHERE launch_id=?',
+                       ((datetime.now(timezone.utc) + timedelta(hours=3)).isoformat(), record['launch_id']))
+        later = datetime.now(timezone.utc) + timedelta(hours=3, minutes=5)
+        self.assertNotIn('stalled', [e.get('kind') for e in tick(self.launcher, now=later)])
 
     def test_a_skipped_job_is_never_reported_stalled(self):
         record, tools = self.launch()
@@ -401,6 +424,21 @@ class SupervisorTests(unittest.TestCase):
         tick(self.launcher, now=now)
         tick(self.launcher, now=now + timedelta(minutes=16))
         self.assertEqual(self.stops(), [['stop', waiting['background_id']]])
+
+    def test_an_idle_job_with_a_submit_attempt_parks_after_an_hour_and_never_clicks_again(self):
+        # 2026-11-18: 16 such sessions held about 4 GB for up to four days.
+        record, tools = self.launch()
+        self.store.authorize_submit(1, source_kind='test', event_id='e1')
+        tools.request_submit()
+        request = self.store.ask(1, record['launch_id'], 'blocker', 'reCAPTCHA above Submit', blocker_type='captcha')
+        self.agent().update(state='blocked')
+        now = datetime.now(timezone.utc)
+        tick(self.launcher, now=now)
+        self.assertEqual(tick(self.launcher, now=now + timedelta(minutes=59)), [])
+        events = tick(self.launcher, now=now + timedelta(minutes=61))
+        self.assertEqual(events, [{'event': 'idle_session_parked', 'job_id': 1, 'awaiting': request}])
+        self.assertEqual(self.state(record), 'parked')
+        self.assertFalse(tools.request_submit()['authorized'], 'a restarted Applier can never click Submit again')
 
     def waiting_control(self, job_id):
         record, tools = self.launch(job_id)

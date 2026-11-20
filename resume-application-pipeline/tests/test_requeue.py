@@ -215,6 +215,18 @@ class RequeueTests(unittest.TestCase):
         self.assertEqual((self.row(1)['state'], self.store.request(question)['state']), ('Applying', 'open'))
         self.assertEqual(self.launcher.launch_for(1), owner)
 
+    def test_a_session_listed_without_a_process_since_before_this_boot_has_ended(self):
+        # 2026-11-18: six jobs could not be requeued while `claude agents` listed their dead sessions as blocked.
+        owner, _ = self.stranded_applier()
+        listed = {'id': 'x', 'sessionId': 'x-1', 'name': f'applier-1-{owner[:8]}', 'cwd': str(self.config.applications_root / 'existing-old-1/claude-applier'),
+                  'state': 'blocked'}
+        self.fake.agents.append(dict(listed, startedAt=AFTER_BOOT))
+        self.assertIn('still running', self.requeue(1)[0]['reason'], 'one started in this boot may just be starting')
+        self.fake.agents[:] = [dict(listed, startedAt=AFTER_BOOT, pid=4242)]
+        self.assertIn('still running', self.requeue(1)[0]['reason'], 'and one with a process runs')
+        self.fake.agents[:] = [dict(listed, startedAt=BEFORE_BOOT)]
+        self.assertEqual(self.requeue(1)[0]['status'], 'requeued')
+
     def test_a_job_applied_in_jobfeed_is_refused(self):
         self.insert(2, 'Resume Ready', folder='existing-old-2')
         with closing(sqlite3.connect(self.config.jobfeed_db)) as db, db:
@@ -334,6 +346,22 @@ class RequeueTests(unittest.TestCase):
         self.assertEqual((self.row(1)['state'], self.row(1)['submit_authorization'], self.submit_rows(1)), ('Queued', None, [0, 0]))
         self.assertEqual(self.requests(1), {event: 'not_submitted'})
         self.assertEqual(self.store.requeues(1)[0]['retired']['applier_submits'][0]['state'], 'unknown')
+
+    def test_under_the_retry_rule_only_a_receipt_without_an_acknowledgement_is_set_aside(self):
+        # 2026-11-18: Oracle's "Are You Still With Us?" dialog, saved as a receipt, kept job 6842 from ever moving.
+        from pipeline import receipts
+        owner, event = self.unknown_attempt()
+        (self.config.applications_root / 'existing-old-1/submission-receipt.json').write_text('{}')
+
+        def retried():
+            return requeue(self.config, [1], REASON, worker_busy=lambda root: False, inventory=self.launcher.agents, service_status=self.daemon,
+                           start_of=self.processes.get, booted_at=lambda: BOOT, retry_attempt=True)[0]
+        for judged in (receipts.ACCEPTED, None):
+            with self.subTest(judged), patch('pipeline.receipts.verdict', return_value=judged):
+                self.assertIn('submission-receipt.json', retried()['reason'])
+        with patch('pipeline.receipts.verdict', return_value=receipts.UNACKNOWLEDGED):
+            self.assertIn('submission-receipt.json', self.requeue(1)[0]['reason'], 'without the retry rule the file still counts')
+            self.assertEqual(retried()['status'], 'requeued')
 
     def test_the_users_statement_never_covers_a_submitted_or_open_attempt(self):
         for job, state in enumerate(('submitted', 'requested'), start=1):

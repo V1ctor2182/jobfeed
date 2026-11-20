@@ -49,6 +49,35 @@ class ClaudeApplierTests(unittest.TestCase):
         return self.launcher.launch(job_id, scope='batch', url='http://127.0.0.1:8790/job1.html',
                                     materials=[self.root / 'materials'], work_dir=self.root / f'work-{job_id}')
 
+    def listings(self):
+        return sum(call[1:3] == ['agents', '--json'] for call in self.fake.calls)
+
+    def test_one_listing_serves_every_reconcile_for_a_few_seconds_and_any_change_drops_it(self):
+        # 2026-11-19: one 0.4 s listing per launch made a pass over 648 launches take minutes, and no job started.
+        from pipeline import claude_applier
+        launcher = ClaudeApplierLauncher(self.root, run=self.fake.run, attach=self.fake.attach, inventory_ttl=60)
+        self.addCleanup(claude_applier._inventories.clear)
+        record = launcher.launch(1, scope='batch', url='http://127.0.0.1:8790/job1.html', materials=[self.root / 'materials'], work_dir=self.root / 'work-1')
+        claude_applier._inventories.clear()
+        before = self.listings()
+        for _ in range(5):
+            launcher.reconcile(record['launch_id'])
+        self.assertEqual(self.listings() - before, 1, 'five reconciles, one listing')
+        self.fake.agents[0]['state'] = 'done'
+        self.assertEqual(launcher.reconcile(record['launch_id'])['state'], 'running', 'a change outside the launcher waits for the next listing')
+        self.assertEqual(launcher.stop(record['launch_id'])['state'], 'stopped', 'its own stop is seen at once')
+        self.fake.agents[0]['state'] = 'done'
+        launcher.reconcile(record['launch_id'])
+        launcher.attach(self.fake.agents[0]['id'], 'hello', str(self.root / 'work-1'))
+        self.assertEqual(launcher.reconcile(record['launch_id'])['state'], 'running', 'and so is its own attach')
+
+    def test_an_injected_runner_is_listed_every_time(self):
+        record = self.launch()
+        before = self.listings()
+        self.launcher.reconcile(record['launch_id'])
+        self.launcher.reconcile(record['launch_id'])
+        self.assertEqual(self.listings() - before, 2)
+
     def test_a_refused_launch_records_the_reason_and_starts_again_under_the_same_owner(self):
         self.fake.refusal = 'Workspace not trusted. Run `claude` in /x once and accept the trust prompt, then retry.\n'
         record = self.launch()
@@ -242,7 +271,8 @@ class ClaudeApplierTests(unittest.TestCase):
         self.assertIn('never ask a short-answer question without one', prompt)
         self.assertIn('fill nothing in that field until then', prompt)
         self.assertIn('Still ask before typing or drawing a signature.', prompt)
-        self.assertNotIn('record_answer', prompt)
+        self.assertNotIn('After you fill an answer you decided', prompt)
+        self.assertIn('same_as set to its entry_id', prompt, 'a related answer filled exactly still saves the new wording')
 
     def test_with_auto_submit_on_the_applier_decides_answers_and_asks_only_when_necessary(self):
         self.launcher.store.set_auto_submit(True, actor='user via test', source='test')

@@ -521,6 +521,30 @@ class ApplierMcpTests(unittest.TestCase):
         self.tools(1, 'Sierra').record_answer('What is your gender identity?', 'Decline to answer', common_question='gender')
         self.assertEqual(self.tools(2, 'Other Co').lookup_answer('Gender', common_question='gender')['answer'], 'Decline to answer')
 
+    def test_a_related_answer_filled_exactly_saves_the_forms_wording_with_auto_submit_off(self):
+        bank = AnswerBank(self.root)
+        saved = bank.learn('In which country do you hold citizenship?', 'Canada', {'kind': 'global'}, request_id='r1', reply_version=1, channel='discord')
+        related = self.tools(1, 'Sierra').lookup_answer('Nationality')['related']
+        self.assertEqual([(r['entry_id'], r['answer']) for r in related], [(saved['id'], 'Canada')])
+        server = StdioServer(self.tools(1, 'Sierra'))
+        server.response({'jsonrpc': '2.0', 'id': 0, 'method': 'initialize', 'params': {}})
+        failed, result = call(server, 'record_answer', {'question': 'Nationality', 'answer': 'Canada', 'same_as': saved['id']})
+        self.assertFalse(failed)
+        self.assertEqual(result, {'saved': True, 'entry_id': saved['id']})
+        self.assertEqual(self.tools(2, 'Other Co').lookup_answer('Nationality')['answer'], 'Canada')
+        self.assertEqual(bank.read()['entries'][0]['versions'][-1]['approval']['source']['kind'], 'user_reply')
+        changed = self.tools(1, 'Sierra').record_answer('Country of citizenship', 'Canadian', same_as=saved['id'])
+        self.assertFalse(changed['saved'])
+        self.assertFalse(self.tools(1, 'Sierra').lookup_answer('Country of citizenship')['allowed'])
+        self.assertEqual([v['answer'] for v in bank.read()['entries'][0]['versions']], ['Canada', 'Canada'], 'an answer never changes')
+
+    def test_a_wording_is_never_added_to_another_companys_answer(self):
+        bank = AnswerBank(self.root)
+        saved = bank.learn('Why Pave?', 'Your mission', {'kind': 'company', 'company': 'Pave'}, request_id='r1', reply_version=1, channel='discord')
+        result = self.tools(1, 'Sierra').record_answer('Why do you want to join us?', 'Your mission', same_as=saved['id'])
+        self.assertFalse(result['saved'])
+        self.assertEqual(len(bank.read()['entries'][0]['versions']), 1)
+
     def test_a_job_not_found_page_is_reported_closed(self):
         self.assertEqual(self.tools(1, 'Finch Legal').report_closed('Job not found. The job you requested was not found.')['recorded'], True)
         self.assertEqual(self.store.skip(1)['reason'], 'Job not found. The job you requested was not found.')

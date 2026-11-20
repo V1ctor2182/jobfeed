@@ -20,6 +20,10 @@ from pipeline.submission_reservation import admission_lock
 STALL_AFTER = timedelta(minutes=10)
 # Longer than STALL_AFTER, so the watchdog still reports a session stuck without a question before it is parked.
 PARK_AFTER = timedelta(minutes=15)
+# A job that tried Submit waits on the user for its outcome, a CAPTCHA or a lost tab, often for days. Its session parks after
+# this long idle, and the Submit guard keeps a restarted one from clicking again (2026-11-18: 16 such sessions held
+# about 4 GB for up to four days, and earlyoom killed the applying browser's extension instead).
+ATTEMPTED_PARK_AFTER = timedelta(hours=1)
 OWN_FLOW_BLOCKERS = frozenset({'captcha', 'tab_missing'})
 # How long a finished job's Applier may keep working, to close its tabs and end its turn, before its session is stopped anyway.
 CLOSE_GRACE = timedelta(minutes=5)
@@ -37,13 +41,17 @@ def watch(store, launches, now):
     """Return (job_id, kind, detail) for every condition that warrants one message to the user."""
     requests = store.requests()
     readbacks = Counter((r['job_id'], r['field']) for r in store.readback_fields())
+    replies = store.last_replies()
     findings = []
     for job in store.jobs():
         job_id, launch = job['job_id'], launches.get(job['job_id'])
         if launch is None:
             continue
         waiting = any(r['job_id'] == job_id and r['state'] in {'open', 'escalated'} for r in requests)
-        last = datetime.fromisoformat(job['last_progress_at'] or launch['created_at'])
+        # The clock starts again when the Applier is resumed or gets a reply: its last progress may be hours old by then
+        # (2026-11-18: each of 160 Appliers resumed after a browser outage was reported stalled at once).
+        last = max(datetime.fromisoformat(at) for at in (job['last_progress_at'] or launch['created_at'], launch.get('resumed_at'),
+                                                          replies.get(job_id)) if at)
         submitted = (store.submit_state(job_id) or {}).get('state') == 'submitted' or store.skip(job_id) is not None
         # A submitted or skipped job is over, even while its session runs on to close its tabs (2026-11-12: three jobs the
         # user had just skipped were reported stalled seconds later).
@@ -95,14 +103,19 @@ def parking(launch, requests, submit, finished, now):
     """Whether to park one reconciled launch now: None to leave it alone, otherwise Park with the open request it waits on.
 
     requests are the job's requests, oldest first. Left alone: no live process, idle for less than PARK_AFTER, a finished
-    job (stop_finished owns it), a recorded Submit attempt (the job keeps its session), an escalation waiting for the
-    supervisor, or an open CAPTCHA or lost-tab blocker (their own flows stop or requeue the session).
+    or submitted job (stop_finished owns it), an escalation waiting for the supervisor, and, before any Submit attempt, an
+    open CAPTCHA or lost-tab blocker (their own flows stop or requeue the session). A job with a Submit attempt parks only
+    after ATTEMPTED_PARK_AFTER, whatever it waits on.
     """
-    if not has_process(launch) or launch['idle_since'] is None or now - datetime.fromisoformat(launch['idle_since']) < PARK_AFTER:
+    if not has_process(launch) or launch['idle_since'] is None:
         return None
-    if finished or (submit is not None and submit['state'] not in RETRYABLE_SUBMIT):
+    idle = now - datetime.fromisoformat(launch['idle_since'])
+    attempted = submit is not None and submit['state'] not in RETRYABLE_SUBMIT
+    if idle < (ATTEMPTED_PARK_AFTER if attempted else PARK_AFTER):
         return None
-    if any(r['state'] == 'escalated' or (r['state'] == 'open' and r['blocker_type'] in OWN_FLOW_BLOCKERS) for r in requests):
+    if finished or (attempted and submit['state'] == 'submitted'):
+        return None
+    if any(r['state'] == 'escalated' or (not attempted and r['state'] == 'open' and r['blocker_type'] in OWN_FLOW_BLOCKERS) for r in requests):
         return None
     waiting = [r['id'] for r in requests if r['state'] == 'open']
     return Park(waiting[-1] if waiting else None)

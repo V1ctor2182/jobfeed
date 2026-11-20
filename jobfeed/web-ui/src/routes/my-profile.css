@@ -1,3 +1,15 @@
+/* The section list stays in view while a long section scrolls. When the grid stacks, the column is only as tall
+   as the list, so it cannot stick. The 2px padding keeps the container's shadow from being clipped by the scroll box. */
+.profile-aside {
+  position: sticky;
+  top: 18px;
+  max-height: calc(100vh - 36px);
+  overflow-y: auto;
+  margin: -2px;
+  padding: 2px;
+  scrollbar-width: thin;
+}
+
 .profile-nav {
   list-style: none;
   margin: 0;

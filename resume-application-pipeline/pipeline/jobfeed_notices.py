@@ -62,6 +62,9 @@ def answer_events(store):
             pair = f"{question} → {shorten(version['answer'], 150, placeholder='…')}"
             approval = version.get('approval') or {}
             source = approval.get('source', {})
+            # A merge is the user's own Dashboard action and a new wording changes no answer, so neither is news on Discord.
+            if version.get('merged_into') or source.get('merged_from') or source.get('alias_added_by'):
+                continue
             direct = DIRECT_SAVES.get(source.get('kind'))
             saved = source.get('action') == 'save'
             if 'imported_status' not in version and not direct and not saved:

@@ -3658,7 +3658,7 @@ export interface components {
              * Action
              * @enum {string}
              */
-            action: "create" | "edit" | "approve" | "revoke" | "save";
+            action: "create" | "edit" | "approve" | "revoke" | "save" | "merge";
             draft?: components["schemas"]["AnswerDraft"] | null;
             /** Entry Id */
             entry_id?: string | null;
@@ -3666,6 +3666,8 @@ export interface components {
             expected_revision: number;
             /** Expected Version */
             expected_version?: number | null;
+            /** Merge Entry Ids */
+            merge_entry_ids?: string[] | null;
         };
         /**
          * AnswerBankState
@@ -3743,6 +3745,8 @@ export interface components {
             created_at: string;
             /** Imported Status */
             imported_status?: string | null;
+            /** Merged Into */
+            merged_into?: string | null;
             /** Question */
             question: string;
             /** Review Decision */

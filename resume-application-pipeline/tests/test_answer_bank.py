@@ -19,6 +19,32 @@ class AnswerBankTest(unittest.TestCase):
                       'scope': {'kind': 'company', 'company': 'Acme'}, 'valid_until': None}
         self.context = {'job_id': '1', 'company': 'Acme'}
 
+    def test_a_one_word_label_finds_a_saved_answer_that_uses_the_word(self):
+        # 2026-11-18: a form labelled "Citizenship" never matched "In which country/region do you have citizenship?".
+        self.draft = dict(self.draft, question='In which country/region do you have citizenship?', answer='Canada', aliases=[],
+                          scope={'kind': 'global'})
+        self.create()
+        self.approve()
+        self.assertEqual([m['answer'] for m in self.bank.related('Citizenship', self.context)], ['Canada'])
+        self.assertEqual(self.bank.related('Country of birth', self.context), [], 'two words still need two in common')
+
+    def test_a_label_worded_differently_finds_the_saved_answer_first(self):
+        # 2026-11-18: a form asking "Nationality" missed the saved citizenship answer and asked the user again.
+        self.draft = dict(self.draft, question='In which country/region do you have citizenship?', answer='Canada', aliases=[],
+                          scope={'kind': 'global'})
+        self.create()
+        self.approve()
+        for label in ('Nationality', 'Citizenship', 'Country of citizenship'):
+            with self.subTest(label):
+                self.assertEqual([m['answer'] for m in self.bank.related(label, self.context)][:1], ['Canada'])
+        self.assertEqual(self.bank.related('Member of the National Guard?', self.context), [], 'a national guard is not a nationality')
+
+    def test_salary_and_compensation_wordings_meet(self):
+        self.draft = dict(self.draft, question='What is your desired salary?', answer='120,000', aliases=[], scope={'kind': 'global'})
+        self.create()
+        self.approve()
+        self.assertEqual([m['answer'] for m in self.bank.related('Expected compensation', self.context)], ['120,000'])
+
     def create(self):
         return self.bank.mutate({'action': 'create', 'entry_id': 'project', 'expected_revision': 0, 'draft': self.draft})
 
@@ -302,3 +328,149 @@ class DashboardSaveTest(unittest.TestCase):
         self.assertIsNone(catalog['race']['entry_id'])
         self.assertEqual(catalog['pronouns']['options'], [])
         self.assertIn('Ethnicity', catalog['race']['aliases'])
+
+
+class MergeTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.bank = AnswerBank(Path(self.temp.name))
+        self.context = {'company': 'Acme', 'job_id': '7'}
+
+    def save(self, entry_id, question, answer, scope=None):
+        self.bank.mutate({'action': 'save', 'entry_id': entry_id, 'expected_revision': self.bank.read()['revision'],
+                          'draft': {'question': question, 'answer': answer, 'scope': scope or {'kind': 'global'}}}, dashboard=True)
+
+    def merge(self, target, sources, revision=None):
+        return self.bank.mutate({'action': 'merge', 'entry_id': target, 'merge_entry_ids': sources,
+                                 'expected_revision': self.bank.read()['revision'] if revision is None else revision}, dashboard=True)
+
+    def entry(self, entry_id):
+        return next(e for e in self.bank.read()['entries'] if e['id'] == entry_id)
+
+    def test_merge_folds_wordings_into_the_kept_answer_and_revokes_the_others_with_their_history(self):
+        kept = self.bank.learn('Name of your current employer', 'Example Corp', {'kind': 'global'}, request_id='r1', reply_version=1, channel='discord')
+        self.save('recent', 'Most recent employer', 'Example Corp')
+        self.save('worked', 'Where have you most recently worked?', 'Example Corp')
+        self.bank.mutate({'action': 'save', 'entry_id': 'worked', 'expected_revision': self.bank.read()['revision'], 'expected_version': 1,
+                          'draft': {'question': 'Where have you most recently worked?', 'answer': 'Example Corp', 'aliases': ['Last company'],
+                                    'scope': {'kind': 'global'}}}, dashboard=True)
+        self.merge(kept['id'], ['recent', 'worked'])
+        current = self.entry(kept['id'])['versions'][-1]
+        self.assertEqual((current['state'], current['answer'], current['question']), ('approved', 'Example Corp', 'Name of your current employer'))
+        self.assertEqual(current['aliases'], ['Most recent employer', 'Where have you most recently worked?', 'Last company'])
+        self.assertEqual(current['approval']['source'], {'kind': 'user_reply', 'channel': 'discord', 'request_id': 'r1', 'merged_from': ['recent', 'worked']})
+        for source, versions in (('recent', 2), ('worked', 3)):
+            history = self.entry(source)['versions']
+            self.assertEqual(len(history), versions, 'every earlier version is kept')
+            self.assertEqual((history[-1]['state'], history[-1]['merged_into']), ('revoked', kept['id']))
+            self.assertEqual(history[-2]['superseded_state'], 'approved')
+        for wording in ('Most recent employer', 'Last company', 'where have you most recently worked'):
+            found = self.bank.resolve(wording, self.context)
+            self.assertEqual((found['entry_id'], found['answer']), (kept['id'], 'Example Corp'))
+        self.assertEqual({m['entry_id'] for m in self.bank.related('Most recent employer', self.context)}, {kept['id']})
+
+    def test_a_users_answer_still_outranks_an_applier_answer_after_a_merge(self):
+        self.bank.decide('Current employer', 'Guessed Co', {'kind': 'global'}, self.context, owner='owner-7')
+        self.save('user', 'Employer name', 'Example Corp')
+        self.save('other', 'Current employer', 'Example Corp')
+        self.merge('user', ['other'])
+        self.assertEqual(self.bank.resolve('Current employer', self.context)['entry_id'], 'user')
+        self.assertEqual(self.entry('user')['versions'][-1]['approval']['source']['kind'], 'dashboard')
+
+    def test_an_applier_answer_stays_an_applier_answer_when_merged_into(self):
+        decided = self.bank.decide('Preferred working hours', 'Daytime', {'kind': 'global'}, self.context, owner='owner-7')
+        self.save('hours', 'What hours do you prefer to work?', 'Daytime')
+        self.merge(decided['id'], ['hours'])
+        source = self.entry(decided['id'])['versions'][-1]['approval']['source']
+        self.assertEqual((source['kind'], source['job_id']), ('applier_auto', '7'))
+
+    def test_only_answers_at_the_same_scope_merge(self):
+        self.save('one', 'Why Acme?', 'Reason', {'kind': 'company', 'company': 'Acme'})
+        self.save('two', 'Why join Acme?', 'Reason', {'kind': 'company', 'company': ' acme'})
+        self.save('three', 'Why join us?', 'Reason')
+        revision = self.bank.read()['revision']
+        with self.assertRaises(BankError) as raised:
+            self.merge('one', ['two', 'three'])
+        self.assertEqual(raised.exception.code, 'invalid')
+        self.assertEqual(self.bank.read()['revision'], revision)
+        self.merge('one', ['two'])
+        self.assertEqual(self.bank.resolve('Why join Acme?', self.context)['entry_id'], 'one')
+
+    def test_merge_refuses_a_stale_revision_unsaved_answers_and_other_callers(self):
+        self.save('one', 'First wording', 'Same')
+        self.save('two', 'Second wording', 'Same')
+        with self.assertRaises(BankError) as raised:
+            self.merge('one', ['two'], revision=0)
+        self.assertEqual(raised.exception.code, 'conflict')
+        with self.assertRaises(BankError):
+            self.bank.mutate({'action': 'merge', 'entry_id': 'one', 'merge_entry_ids': ['two'], 'expected_revision': self.bank.read()['revision']})
+        self.bank.mutate({'action': 'revoke', 'entry_id': 'two', 'expected_version': 1, 'expected_revision': self.bank.read()['revision']})
+        with self.assertRaises(BankError):
+            self.merge('one', ['two'])
+        for sources in ([], ['one'], ['missing']):
+            with self.subTest(sources), self.assertRaises(BankError):
+                self.merge('one', sources)
+
+    def test_a_replayed_merge_changes_nothing(self):
+        self.save('one', 'First wording', 'Same')
+        self.save('two', 'Second wording', 'Same')
+        before = self.bank.read()['revision']
+        state = self.merge('one', ['two'], revision=before)
+        replay = self.merge('one', ['two'], revision=before)
+        self.assertEqual(replay, state)
+        self.assertEqual(self.bank.read()['revision'], before + 1)
+
+    def test_the_dashboard_command_merges(self):
+        import subprocess
+        import sys
+        self.save('one', 'First wording', 'Same')
+        self.save('two', 'Second wording', 'Same')
+        request = {'action': 'merge', 'entry_id': 'one', 'merge_entry_ids': ['two'], 'expected_revision': self.bank.read()['revision']}
+        result = subprocess.run([sys.executable, '-m', 'pipeline.answer_bank', '--root', self.temp.name, 'dashboard-mutate'], input=json.dumps(request),
+                                capture_output=True, text=True, cwd=Path(__file__).resolve().parents[1], check=True)
+        self.assertNotIn('error', json.loads(result.stdout))
+        self.assertEqual(self.bank.resolve('Second wording', self.context)['entry_id'], 'one')
+
+
+class AddAliasTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.bank = AnswerBank(Path(self.temp.name))
+        self.context = {'company': 'Acme', 'job_id': '7'}
+        self.entry = self.bank.learn('In which country do you hold citizenship?', 'Canada', {'kind': 'global'}, request_id='r1', reply_version=1, channel='discord')
+
+    def test_a_new_wording_resolves_exactly_to_the_same_answer_and_source(self):
+        self.assertFalse(self.bank.resolve('Nationality', self.context)['allowed'])
+        self.bank.add_alias(self.entry['id'], 'Nationality', 'Canada', self.context, owner='owner-7')
+        found = self.bank.resolve('Nationality', self.context)
+        self.assertEqual((found['entry_id'], found['answer']), (self.entry['id'], 'Canada'))
+        current = self.bank.read()['entries'][0]['versions'][-1]
+        self.assertEqual((current['question'], current['aliases']), ('In which country do you hold citizenship?', ['Nationality']))
+        self.assertEqual(current['approval']['source'], {'kind': 'user_reply', 'channel': 'discord', 'request_id': 'r1',
+                                                         'alias_added_by': {'owner': 'owner-7', 'job_id': '7'}})
+        self.bank.add_alias(self.entry['id'], 'nationality?', 'Canada', self.context, owner='owner-8')
+        self.assertEqual(len(self.bank.read()['entries'][0]['versions']), 2, 'a known wording adds nothing')
+
+    def refused(self, *args, context=None):
+        with self.assertRaises(BankError) as raised:
+            self.bank.add_alias(*args, context or self.context, owner='owner-7')
+        self.assertEqual(raised.exception.code, 'refused')
+
+    def test_it_refuses_another_answer_an_out_of_reach_entry_and_unknown_entries(self):
+        self.refused(self.entry['id'], 'Nationality', 'Canadian')
+        acme = self.bank.learn('Why Acme?', 'Reason', {'kind': 'company', 'company': 'Acme'}, request_id='r2', reply_version=1, channel='discord')
+        self.refused(acme['id'], 'Why us?', 'Reason', context={'company': 'Other Co', 'job_id': '8'})
+        self.refused('missing', 'Nationality', 'Canada')
+        self.refused(self.entry['id'], 'Email', 'Canada')
+        self.assertEqual([len(e['versions']) for e in self.bank.read()['entries']], [1, 1])
+
+    def test_it_refuses_revoked_and_expired_answers(self):
+        self.bank.mutate({'action': 'revoke', 'entry_id': self.entry['id'], 'expected_version': 1, 'expected_revision': self.bank.read()['revision']})
+        self.refused(self.entry['id'], 'Nationality', 'Canada')
+        expiring = self.bank.learn('Notice period', 'Two weeks', {'kind': 'global'}, request_id='r3', reply_version=1, channel='discord')
+        store = json.loads(self.bank.path.read_text())
+        next(e for e in store['entries'] if e['id'] == expiring['id'])['versions'][-1]['valid_until'] = '2020-01-01'
+        self.bank.path.write_text(json.dumps(store))
+        self.refused(expiring['id'], 'How much notice do you need?', 'Two weeks')

@@ -140,6 +140,17 @@ class DashboardSubmissionTests(unittest.TestCase):
         self.assertIn('expired',self.preview()['reason'])
         self.assertEqual(self.fixture.sent,[])
 
+    def test_a_job_answer_merged_into_another_shows_only_the_kept_answer(self):
+        scope = {'kind':'job','company':'Rilla','job_id':'1'}
+        for entry_id, question in (('kept','Why Rilla?'), ('merged','Why do you want to join Rilla?')):
+            self.bank.mutate({'action':'save','entry_id':entry_id,'expected_revision':self.bank.read()['revision'],
+                              'draft':{'question':question,'answer':'The same reason.','scope':scope}}, dashboard=True)
+        self.bank.mutate({'action':'merge','entry_id':'kept','merge_entry_ids':['merged'],'expected_revision':self.bank.read()['revision']}, dashboard=True)
+        preview = self.preview()
+        self.assertTrue(preview['eligible'])
+        self.assertNotIn('merged', [answer['entry_id'] for answer in preview['answers']])
+        self.assertIn('kept', [answer['entry_id'] for answer in preview['answers']])
+
     def test_exact_attempt_marker_only_allowed_during_bound_live_turn(self):
         self.confirm()
         self.fixture.running()

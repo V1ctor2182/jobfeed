@@ -5,7 +5,8 @@ hands each message's raw bytes to confirmation_email.record, which keeps one onl
 accepts it. The blocker is then answered "submitted" from source email, with the message as its provenance, and the
 Applier records the outcome against the saved email. When no such email has arrived after SETTLE_AFTER, the user's
 standing rule answers it: no confirmation email means not submitted. The user is asked only when this check has not
-run for ASK_AFTER. Gmail is reached as the account program reaches it: through `claude -p`, reading only the raw tool result.
+run for ASK_AFTER. A tab_missing blocker after a Submit attempt is checked the same way: an email answers it "submitted",
+and no email after SETTLE_AFTER leaves the marker no_email_key(request) that lets the worker apply to the job again. Gmail is reached as the account program reaches it: through `claude -p`, reading only the raw tool result.
 """
 from __future__ import annotations
 
@@ -37,11 +38,20 @@ def _call(tool, tool_input):
         raise GmailError(str(exc)) from None
 
 
+def no_email_key(request_id):
+    return f'no-email-{request_id}'
+
+
 def waiting(store):
-    """The open submit_unknown blockers of jobs with a running Applier, oldest first. An ended Applier cannot take the answer."""
-    live = {int(row['job_id']) for row in store._read("SELECT DISTINCT job_id FROM applier_launches WHERE state NOT IN ('stopped','finished','failed')", ())}
+    """The open submit_unknown blockers, and tab_missing blockers after a Submit attempt, oldest first.
+
+    An Applier that ended on its own cannot take the answer, but the worker can: with no email it applies to the job again
+    (captcha_holds.ended_runs). 2026-11-18: five such blockers of ended Appliers had waited for days, unchecked."""
+    lost = {r['id'] for r in store.lost_after_submit()}
+    # A deliberately stopped Applier's job is the user's to settle.
+    stopped = {int(row['job_id']) for row in store._read("SELECT DISTINCT job_id FROM applier_launches WHERE state='stopped'", ())}
     rows = [store.request(r['id']) for r in store.requests()
-            if r['state'] == 'open' and r['blocker_type'] == 'submit_unknown' and int(r['job_id']) in live]
+            if r['state'] == 'open' and (r['blocker_type'] == 'submit_unknown' or r['id'] in lost) and int(r['job_id']) not in stopped]
     return sorted(rows, key=lambda r: r['created_at'])
 
 
@@ -94,12 +104,21 @@ def check(pipeline, store, *, call=_call, record=None, tried=None, now=None):
                 continue
             if result['status'] != 'confirmed':
                 continue
-            source = 'email-' + hashlib.sha256(result['message_id'].encode()).hexdigest()[:32]
+            # One email can confirm two blockers of the same job, and a source ID names one reply, so the request is part of it
+            # (2026-11-18: the second reply raised and ended the whole pass, twice).
+            source = 'email-' + hashlib.sha256(f"{request['id']}:{result['message_id']}".encode()).hexdigest()[:32]
             store.reply(request['id'], 'submitted', source_kind='email', source_id=source, sender_id='employer-confirmation-email')
             events.append({'event': 'submit_confirmed_by_email', 'job_id': job_id, 'message_id': result['message_id']})
             break
         else:
-            if (now or datetime.now(timezone.utc)) - datetime.fromisoformat(request['created_at']) >= SETTLE_AFTER:
+            if (now or datetime.now(timezone.utc)) - datetime.fromisoformat(request['created_at']) < SETTLE_AFTER:
+                continue
+            if request['blocker_type'] == 'tab_missing':
+                # Its form is gone, so "not submitted" would leave the Applier nothing to do. The worker applies again instead.
+                if store.control(no_email_key(request['id'])) is None:
+                    store.set_control(no_email_key(request['id']), (now or datetime.now(timezone.utc)).isoformat())
+                    events.append({'event': 'lost_tab_unconfirmed_no_email', 'job_id': job_id})
+            else:
                 source = 'no-email-' + hashlib.sha256(request['id'].encode()).hexdigest()[:32]
                 store.reply(request['id'], 'not submitted', source_kind=NO_EMAIL, source_id=source, sender_id='no-confirmation-email')
                 events.append({'event': 'submit_unconfirmed_no_email', 'job_id': job_id})

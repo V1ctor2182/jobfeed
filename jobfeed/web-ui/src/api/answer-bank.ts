@@ -60,3 +60,32 @@ export function saveRequest(bank: AnswerBank, answer: string, target: { entry: A
 export function deleteRequest(bank: AnswerBank, entry: AnswerEntry): AnswerMutation {
   return { action: "revoke", expected_revision: bank.revision, entry_id: entry.id, expected_version: entry.current_version };
 }
+
+export type ScopeFilter = "all" | AnswerDraft["scope"]["kind"];
+export type SourceFilter = "all" | "user_reply" | "applier_auto" | "dashboard";
+
+/** Who approved the answer: the user's reply to an Applier, an Applier under auto submit, or the Dashboard. */
+export function answerSource(version: AnswerVersion): string | undefined {
+  const source = version.approval?.source as { kind?: string } | undefined;
+  return source?.kind;
+}
+
+/** Whether the answer's question, other wordings or answer contain the search text, ignoring case. */
+export function matchesSearch(version: AnswerVersion, text: string): boolean {
+  const needle = text.trim().toLowerCase();
+  return !needle || [version.question, ...(version.aliases ?? []), version.answer].some((value) => value.toLowerCase().includes(needle));
+}
+
+function scopeKey(scope: AnswerDraft["scope"]): string {
+  return [scope.kind, (scope.company ?? "").trim().toLowerCase(), scope.job_id ?? ""].join("\u0000");
+}
+
+/** Answers merge only when they apply to the same companies or job, as the answer store requires. */
+export function sameScope(entries: AnswerEntry[]): boolean {
+  return new Set(entries.map((entry) => scopeKey(currentAnswer(entry).scope))).size <= 1;
+}
+
+/** Keeps one answer and folds the others' wordings into it. The others are removed from use. */
+export function mergeRequest(bank: AnswerBank, keep: AnswerEntry, others: AnswerEntry[]): AnswerMutation {
+  return { action: "merge", expected_revision: bank.revision, entry_id: keep.id, merge_entry_ids: others.map((entry) => entry.id) };
+}

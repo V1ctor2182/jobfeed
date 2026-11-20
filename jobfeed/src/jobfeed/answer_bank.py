@@ -43,6 +43,7 @@ class AnswerVersion(AnswerDraft):
     superseded_state: str | None = None
     superseded_at: str | None = None
     revoked_at: str | None = None
+    merged_into: str | None = None
 
 
 class AnswerEntry(BaseModel):
@@ -77,11 +78,14 @@ class AnswerBankMutation(BaseModel):
     """A dashboard change to the answer bank, checked against a revision."""
 
     model_config = ConfigDict(extra="forbid")
-    action: Literal["create", "edit", "approve", "revoke", "save"]
+    action: Literal["create", "edit", "approve", "revoke", "save", "merge"]
     expected_revision: int = Field(ge=0)
     entry_id: str | None = None
     expected_version: int | None = Field(default=None, ge=1)
     draft: AnswerDraft | None = None
+    merge_entry_ids: list[str] | None = Field(
+        default=None, min_length=1, max_length=100
+    )
 
 
 class AnswerBankError(Exception):

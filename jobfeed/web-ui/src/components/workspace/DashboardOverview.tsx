@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import { Link } from "react-router";
 
 import { profileAnswers, useAnswerBank } from "@/api/answer-bank";
@@ -38,13 +38,16 @@ export function DashboardOverview() {
   const first = series[0];
   const latest = series.at(-1);
 
+  const discoveryLoading = discovery.isPending;
+  const waitingLoading = review.isPending || answers.isPending;
+
   return (
     <div className="jf-dash">
       <div className="jf-kstrip">
-        <Kpi label="Applied" value={totals ? count.format(totals.applied) : "–"} foot={today && <><b className="up">+{today.applied}</b> today</>} spark={daily.map((entry) => entry.applied)} />
-        <Kpi label="Discovered" value={totals ? count.format(totals.jobs) : "–"} foot={yesterday && <><b>{count.format(yesterday.discovered)}</b> yesterday</>} spark={daily.map((entry) => entry.discovered)} />
-        <Kpi label="Evaluated" value={totals ? count.format(totals.evaluated) : "–"} foot={totals && totals.jobs > 0 && <><b>{Math.round((100 * totals.evaluated) / totals.jobs)}%</b> of discovered</>} spark={daily.map((entry) => entry.evaluated)} />
-        <Kpi label={`Model cost, ${COST_WINDOW_DAYS} days`} value={cost.data ? money(cost.data.total_llm_cost_usd) : "–"} foot={runs.data && <><b>{money(costs.at(-2)?.cost ?? 0)}</b> yesterday</>} spark={costs.map((entry) => entry.cost)} />
+        <Kpi label="Applied" loading={discoveryLoading} value={totals ? count.format(totals.applied) : "–"} foot={today && <><b className="up">+{today.applied}</b> today</>} spark={daily.map((entry) => entry.applied)} />
+        <Kpi label="Discovered" loading={discoveryLoading} value={totals ? count.format(totals.jobs) : "–"} foot={yesterday && <><b>{count.format(yesterday.discovered)}</b> yesterday</>} spark={daily.map((entry) => entry.discovered)} />
+        <Kpi label="Evaluated" loading={discoveryLoading} value={totals ? count.format(totals.evaluated) : "–"} foot={totals && totals.jobs > 0 && <><b>{Math.round((100 * totals.evaluated) / totals.jobs)}%</b> of discovered</>} spark={daily.map((entry) => entry.evaluated)} />
+        <Kpi label={`Model cost, ${COST_WINDOW_DAYS} days`} loading={cost.isPending || runs.isPending} value={cost.data ? money(cost.data.total_llm_cost_usd) : "–"} foot={runs.data && <><b>{money(costs.at(-2)?.cost ?? 0)}</b> yesterday</>} spark={costs.map((entry) => entry.cost)} />
       </div>
 
       <div className="jf-dash-grid">
@@ -54,7 +57,7 @@ export function DashboardOverview() {
             {queue?.state === "available" && <span className="jf-meta">{count.format(queue.total ?? 0)} records · {count.format(queueSum.active)} in progress</span>}
             <Link className="jf-chip" to="/runs?tab=queue">Open ↗</Link>
           </div>
-          {apply.isPending && <p className="jf-note" role="status">Loading the application queue.</p>}
+          {apply.isPending && <QueueSkeleton />}
           {apply.data && queue?.state !== "available" && <p className="jf-note">The application queue could not be read.</p>}
           {apply.isError && <p className="jf-note">The application queue could not be loaded.</p>}
           {groups.length > 0 && <>
@@ -78,7 +81,8 @@ export function DashboardOverview() {
         <section className="jf-card jf-pad" aria-labelledby="jf-progress-title">
           <h2 id="jf-progress-title">Apply progress</h2>
           <div className="jf-muted jf-gap">{first ? `Applied since ${dayTick(first.day)}` : "Applied"}</div>
-          <div className="jf-big">{totals ? count.format(totals.applied) : "–"}</div>
+          <div className="jf-big">{discoveryLoading ? <Skel width={120} height={42} /> : totals ? count.format(totals.applied) : "–"}</div>
+          {discoveryLoading && <div className="jf-progress" aria-hidden="true"><Skel width="100%" height={6} /></div>}
           {totals && applyVerdicts > 0 && (
             <div className="jf-progress">
               <div className="bar"><i style={{ width: `${Math.min(100, (100 * totals.applied) / applyVerdicts)}%` }} /></div>
@@ -86,9 +90,9 @@ export function DashboardOverview() {
             </div>
           )}
           <div className="jf-trio">
-            <div><span>In progress</span><b>{queue ? queueSum.active : "–"}</b></div>
-            <div><span>Waiting on you</span><b>{waiting ?? "–"} <small>{waiting === 1 ? "item" : "items"}</small></b></div>
-            <div><span>Queued</span><b>{queue ? queueSum.queued : "–"}</b></div>
+            <div><span>In progress</span><b>{apply.isPending ? <Skel width={32} height={19} /> : queue ? queueSum.active : "–"}</b></div>
+            <div><span>Waiting on you</span><b>{waitingLoading ? <Skel width={56} height={19} /> : <>{waiting ?? "–"} <small>{waiting === 1 ? "item" : "items"}</small></>}</b></div>
+            <div><span>Queued</span><b>{apply.isPending ? <Skel width={32} height={19} /> : queue ? queueSum.queued : "–"}</b></div>
           </div>
           <div className="jf-row">
             <Link className="jf-btn primary" to="/review">Open review</Link>
@@ -100,11 +104,14 @@ export function DashboardOverview() {
       <div className="jf-dash-grid">
         <section className="jf-card" aria-labelledby="jf-applied-title">
           <div className="jf-card-head"><h2 id="jf-applied-title">Applied over time</h2><span className="jf-meta jf-mono">cumulative</span></div>
-          {latest && series.length > 1 ? <AppliedChart series={series} last={latest} /> : <p className="jf-note">No applications recorded yet.</p>}
+          {discoveryLoading
+            ? <div className="jf-chart-skel" role="status" aria-label="Loading applied over time"><Skel width="100%" height="100%" /></div>
+            : latest && series.length > 1 ? <AppliedChart series={series} last={latest} /> : <p className="jf-note">No applications recorded yet.</p>}
         </section>
         <section className="jf-card" aria-labelledby="jf-runs-title">
           <div className="jf-card-head"><h2 id="jf-runs-title">Recent runs</h2><Link className="jf-chip" to="/scanner-runs">All ↗</Link></div>
           <div className="jf-runs">
+            {runs.isPending && <RunsSkeleton />}
             {runs.isError && <p className="jf-note">Recent runs could not be loaded.</p>}
             {runs.data?.runs.length === 0 && <p className="jf-note">No runs in the last {SPARK_DAYS} days.</p>}
             {runs.data?.runs.slice(0, 5).map((run) => <RunRow key={run.run_id} run={run} />)}
@@ -115,8 +122,29 @@ export function DashboardOverview() {
   );
 }
 
-function Kpi({ label, value, foot, spark }: { label: string; value: string; foot: ReactNode; spark: number[] }) {
+/** Pulsing placeholder block; the surrounding region carries the accessible loading label. */
+function Skel({ width, height, style }: { width: CSSProperties["width"]; height: CSSProperties["height"]; style?: CSSProperties }) {
+  return <span className="jf-skel" aria-hidden="true" style={{ width, height, ...style }} />;
+}
+
+const SKEL_SPARK = [14, 22, 18, 28, 20, 32, 24, 30, 18, 26, 34, 22, 28, 36];
+
+function Kpi({ label, value, foot, spark, loading }: { label: string; value: string; foot: ReactNode; spark: number[]; loading: boolean }) {
   const max = Math.max(...spark, 0) || 1;
+  if (loading) {
+    return (
+      <div className="jf-kpi" role="status" aria-busy="true" aria-label={`Loading ${label}`}>
+        <div className="lab">{label}</div>
+        <div className="val"><Skel width={96} height={32} /></div>
+        <div className="foot">
+          <Skel width={84} height={14} />
+          <div className="jf-spark" aria-hidden="true">
+            {SKEL_SPARK.map((height, index) => <i key={index} className="jf-skel" style={{ height, animationDelay: `${index * 60}ms` }} />)}
+          </div>
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="jf-kpi">
       <div className="lab">{label}</div>
@@ -127,6 +155,33 @@ function Kpi({ label, value, foot, spark }: { label: string; value: string; foot
           {spark.map((point, index) => <i key={index} className={index === spark.length - 1 ? "hi" : undefined} style={{ height: Math.max(3, Math.round((38 * point) / max)) }} />)}
         </div>
       </div>
+    </div>
+  );
+}
+
+function QueueSkeleton() {
+  return (
+    <div className="jf-dots-wrap" role="status" aria-busy="true" aria-label="Loading the application queue">
+      {[9, 5, 12].map((columns, group) => (
+        <div key={group} aria-hidden="true">
+          <Skel width={90} height={14} style={{ marginBottom: 10 }} />
+          <div className="jf-dots">{Array.from({ length: columns * 4 }, (_, index) => <i key={index} className="jf-skel" />)}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function RunsSkeleton() {
+  return (
+    <div role="status" aria-busy="true" aria-label="Loading recent runs">
+      {Array.from({ length: 5 }, (_, index) => (
+        <div key={index} className="jf-run" aria-hidden="true">
+          <Skel width={36} height={36} style={{ flex: "none", borderRadius: "50%" }} />
+          <div className="jf-skel-lines"><Skel width={88} height={14} /><Skel width={180} height={12} /></div>
+          <Skel width={56} height={14} style={{ marginLeft: "auto" }} />
+        </div>
+      ))}
     </div>
   );
 }

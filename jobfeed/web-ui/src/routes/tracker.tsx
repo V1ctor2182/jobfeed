@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useSearchParams } from "react-router";
 
 import { useTracker, useTrackerMessage, type MailStatus, type TrackerApplication, type TrackerMessage } from "@/api/tracker";
@@ -74,23 +74,34 @@ function Inbox({ messages, search }: { messages: TrackerMessage[]; search: strin
   const current = Math.min(page, pages - 1);
   const rows = shown.slice(current * PAGE, current * PAGE + PAGE);
   const open = messages.find((message) => message.id === openId) ?? null;
+  const barRef = useRef<HTMLDivElement>(null);
+  const inboxRef = useRef<HTMLDivElement>(null);
+
+  // The list stays put while a long email scrolls, so a new pick may land with the reader's top out of view.
+  const select = (id: string) => {
+    setOpenId(id);
+    const inbox = inboxRef.current;
+    if (inbox && inbox.getBoundingClientRect().top < (barRef.current?.getBoundingClientRect().bottom ?? 0)) inbox.scrollIntoView({ block: "start" });
+  };
 
   return (
     <>
-      <div className="jf-pills jf-tracker-filters" role="group" aria-label="Filter messages">
-        {INBOX_FILTERS.map((id) => (
-          <button key={id} type="button" aria-pressed={filter === id} onClick={() => { setFilter(id); setPage(0); }}>
-            {id === "all" ? "All" : STATUS_LABEL[id]} <b>{id === "all" ? matching.length : matching.filter((message) => message.status === id).length}</b>
-          </button>
-        ))}
+      <div ref={barRef} className="jf-tracker-sticky">
+        <div className="jf-pills jf-tracker-filters" role="group" aria-label="Filter messages">
+          {INBOX_FILTERS.map((id) => (
+            <button key={id} type="button" aria-pressed={filter === id} onClick={() => { setFilter(id); setPage(0); }}>
+              {id === "all" ? "All" : STATUS_LABEL[id]} <b>{id === "all" ? matching.length : matching.filter((message) => message.status === id).length}</b>
+            </button>
+          ))}
+        </div>
       </div>
-      <div className="jf-inbox">
+      <div ref={inboxRef} className="jf-inbox">
         <div className="jf-inbox-list">
           {shown.length === 0 ? <p className="jf-inbox-none">No application email matches.</p> : (
             <ul className="jf-mail" aria-label="Application email">
               {rows.map((message) => (
                 <li key={message.id}>
-                  <button type="button" aria-current={message.id === openId ? "true" : undefined} onClick={() => setOpenId(message.id)}>
+                  <button type="button" aria-current={message.id === openId ? "true" : undefined} onClick={() => select(message.id)}>
                     <span className="jf-mail-avatar" aria-hidden="true">{initials(message.company ?? message.sender_name ?? message.sender)}</span>
                     <span className="jf-mail-body">
                       <span className="jf-mail-top"><b>{message.company ?? message.sender_name ?? message.sender}</b><span>{formatRelativeAge(message.received_at)}</span></span>

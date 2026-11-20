@@ -164,6 +164,9 @@ class DashboardSubmissions:
         warnings = []
         for entry in bank['entries']:
             version = entry['versions'][-1]
+            # A merged answer's wordings now belong to the answer it was merged into, which shows instead.
+            if version.get('merged_into'):
+                continue
             answer_scope = version['scope']
             # The answers this job's Applier decided itself under auto submit mode show too, so the user sees them before Submit.
             if (answer_scope.get('kind') == 'job' and str(answer_scope.get('job_id')) == str(job_id) and answer_scope.get('company', '').casefold() == candidate['company'].casefold()

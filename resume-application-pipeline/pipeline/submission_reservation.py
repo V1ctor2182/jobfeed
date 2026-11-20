@@ -45,11 +45,29 @@ def reservations(root, *, scope=None):
         rows = db.execute(f"""SELECT {columns}, json_extract(preview,'$.scope') AS "scope" FROM requests WHERE
             state IN ('preparing','unknown','queued','running','sync_pending')
             OR (state IN ('blocked','turn_ended') AND prompt IS NOT NULL)""").fetchall()
+    idle = _idle_appliers(Path(root))
     found = []
     for row in map(dict, rows):
         if row.pop('scope') == str(scope) or scope is None:
+            row['applier_idle'] = row.get('owner') in idle
             found.append(row)
     return found
+
+
+# A Claude Applier that is parked or has ended clicks nothing until something wakes it, and a woken one counts as running.
+_IDLE_LAUNCHES = ('parked', 'finished', 'failed', 'stopped')
+
+
+def _idle_appliers(root):
+    path = root / '.pipeline/applier-runtime.sqlite3'
+    if not path.is_file():
+        return set()
+    with closing(read_only(path.resolve())) as db:
+        try:
+            return {row[0] for row in db.execute(f"SELECT launch_id FROM applier_launches WHERE state IN ({','.join('?' * len(_IDLE_LAUNCHES))})",
+                                                 _IDLE_LAUNCHES)}
+        except sqlite3.OperationalError:
+            return set()
 
 
 def assert_available(root, job):
@@ -58,4 +76,6 @@ def assert_available(root, job):
 
 
 def occupies_slot(row):
-    return row['state'] != 'sync_pending' and row['prompt'] is not None and not row.get('terminal_turn')
+    """Whether the confirmation holds an application slot. One whose Applier is parked or has ended holds none: on
+    2026-11-19 four parked Appliers waiting on the user held all four slots, and no job started for a day."""
+    return row['state'] != 'sync_pending' and row['prompt'] is not None and not row.get('terminal_turn') and not row.get('applier_idle')

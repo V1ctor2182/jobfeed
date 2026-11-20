@@ -54,7 +54,8 @@
               "edit",
               "approve",
               "revoke",
-              "save"
+              "save",
+              "merge"
             ],
             "title": "Action",
             "type": "string"
@@ -96,6 +97,22 @@
               }
             ],
             "title": "Expected Version"
+          },
+          "merge_entry_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 100,
+                "minItems": 1,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Merge Entry Ids"
           }
         },
         "required": [
@@ -299,6 +316,17 @@
               }
             ],
             "title": "Imported Status"
+          },
+          "merged_into": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Merged Into"
           },
           "question": {
             "maxLength": 10000,

@@ -131,6 +131,44 @@ class CaptchaHoldTests(unittest.TestCase):
         self.assertEqual(self.started(self.worker(slots=2)), [1], 'after the clear it is dispatched again')
         self.assertEqual(sum('--bg' in call for call in self.fake.calls), 3)
 
+    def held_at(self, page):
+        worker = self.worker()
+        self.assertEqual(self.started(worker), [1])
+        owner, tools = self.applier(1)
+        tools.report_blocker('captcha', 'reCAPTCHA on the review page.', page_url=page)
+        tools.record_tab_closed()
+        self.end_turn(owner)
+        return worker
+
+    def test_an_indeed_captcha_before_submit_is_cleared_once_for_a_run_on_the_employer_site(self):
+        # 2026-11-19: 61 of the 75 jobs held on a CAPTCHA were Indeed's. The user chose to try the employer's own site first.
+        from pipeline.claude_applier import PROMPT
+        worker = self.held_at('https://smartapply.indeed.com/beta/indeedapply/form/review-module')
+        events = self.services.tick(set(worker._application_futures))
+        self.assertIn({'event': 'captcha_held', 'job_id': 1}, events)
+        events = self.services.tick(set(worker._application_futures))
+        self.assertIn({'event': 'captcha_company_site_retry', 'job_id': 1}, events)
+        item = self.p.queue.get(1)
+        self.assertEqual((item.state, item.held, item.hold.cleared_by), (S.QUEUED, False, 'worker: try the employer site instead of Indeed'))
+        self.assertIn("apply on the employer's own site whenever you can", PROMPT)
+
+        self.assertEqual(self.p.process_completions(), [1])
+        self.assertIn(1, self.started(self.worker(slots=2)))
+        owner, tools = self.applier(1)
+        tools.report_blocker('captcha', 'reCAPTCHA again, and the employer site does not list the role.',
+                             page_url='https://www.indeed.com/viewjob?jk=1')
+        tools.record_tab_closed()
+        self.end_turn(owner)
+        self.services.tick(set())
+        self.assertEqual([e for e in self.services.tick(set()) if e['event'] == 'captcha_company_site_retry'], [])
+        self.assertTrue(self.p.queue.get(1).held, 'the second CAPTCHA waits for the user')
+
+    def test_a_captcha_elsewhere_still_waits_for_the_user(self):
+        worker = self.held_at(PAGE)
+        self.services.tick(set(worker._application_futures))
+        self.assertEqual([e for e in self.services.tick(set()) if e['event'] == 'captcha_company_site_retry'], [])
+        self.assertTrue(self.p.queue.get(1).held)
+
     def test_a_captcha_after_a_submit_attempt_keeps_the_session_and_clearing_wakes_it(self):
         worker = self.worker()
         self.assertEqual(self.started(worker), [1])
@@ -265,6 +303,98 @@ class CaptchaHoldTests(unittest.TestCase):
         discord, bridge = self.bridge()
         bridge.sync()
         self.assertIn('Blocked: tab missing', json.dumps(discord.messages['general']))
+
+    def test_a_tab_lost_after_submit_with_no_confirmation_email_is_applied_again_and_checked_first(self):
+        # 2026-11-18: the user's standing rule. Six such jobs waited on the user for up to two days.
+        from pipeline.claude_applier import EARLIER_ATTEMPT
+        from pipeline.confirmation_mail import no_email_key
+        worker = self.worker()
+        self.assertEqual(self.started(worker), [1])
+        owner, tools = self.applier(1)
+        tools.register_tab(41, PAGE)
+        self.launcher.store.authorize_submit(1, source_kind='test', event_id='approval-1')
+        self.assertTrue(tools.request_submit()['authorized'])
+        waiting = threading.Event()
+        waiting.set()
+        tools.report_blocker('tab_missing', 'My form tab is gone after the click.', stop=waiting)
+        [request] = [r['id'] for r in self.launcher.store.requests() if r['blocker_type'] == 'tab_missing']
+        self.end_turn(owner, 'blocked')
+        self.assertEqual(self.services.tick(set(worker._application_futures)), [], 'nothing happens before the mail check found no email')
+        self.launcher.store.set_control(no_email_key(request), 'checked')
+        events = self.services.tick(set(worker._application_futures))
+        self.assertIn({'event': 'lost_after_submit_requeued', 'job_id': 1}, events)
+        item = self.p.queue.get(1)
+        self.assertEqual((item.state, item.codex_application_session_id), (S.QUEUED, None))
+        self.assertIsNone(self.launcher.store.submit_state(1), 'the new run starts with no Submit attempt')
+        self.assertEqual(self.p.process_completions(), [1])
+        self.assertIn(1, self.started(self.worker(slots=2)))
+        prompt = [call for call in self.fake.calls if '--bg' in call and any(str(a).startswith('applier-1-') for a in call)][-1][-1]
+        self.assertTrue(prompt.endswith(EARLIER_ATTEMPT), 'the new Applier first looks for an earlier application')
+
+    # 2026-11-18: 32 jobs whose Applier had ended sat in Applying for days, moved by nothing.
+
+    def ended(self, job_id=1, progress='filled name', hours=1):
+        """Start the job, let its Applier report progress, end its session and date that progress hours ago."""
+        worker = self.worker()
+        self.assertIn(job_id, self.started(worker))
+        owner, tools = self.applier(job_id)
+        tools.register_tab(41, PAGE)
+        tools.record_progress(progress)
+        return worker, owner, tools
+
+    def age(self, job_id, hours=1):
+        import sqlite3
+        from contextlib import closing
+        from datetime import datetime, timedelta, timezone
+        old = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+        with closing(sqlite3.connect(self.launcher.store.path)) as db, db:
+            db.execute('UPDATE applier_jobs SET last_progress_at=? WHERE job_id=?', (old, job_id))
+            db.execute('UPDATE applier_replies SET received_at=? WHERE request_id IN (SELECT id FROM applier_requests WHERE job_id=?)', (old, job_id))
+
+    def test_an_applier_that_ended_before_submit_with_nothing_open_is_filled_again(self):
+        from pipeline.claude_applier import EARLIER_ATTEMPT
+        worker, owner, tools = self.ended()
+        self.end_turn(owner)
+        self.assertNotIn('ended_requeued', [e['event'] for e in self.services.tick(set())], 'not in the half hour after it ended')
+        self.age(1)
+        self.assertIn({'event': 'ended_requeued', 'job_id': 1}, self.services.tick(set()))
+        self.assertEqual(self.p.queue.get(1).state, S.QUEUED)
+        self.assertEqual(self.p.process_completions(), [1])
+        self.assertIn(1, self.started(self.worker(slots=2)))
+        prompt = [call for call in self.fake.calls if '--bg' in call and any(str(a).startswith('applier-1-') for a in call)][-1][-1]
+        self.assertNotIn(EARLIER_ATTEMPT, prompt, 'nothing was sent, so there is nothing to look for')
+
+    def test_an_applier_that_ended_after_submit_with_no_email_applies_again_and_checks_first(self):
+        from pipeline.claude_applier import EARLIER_ATTEMPT
+        worker, owner, tools = self.ended()
+        self.launcher.store.authorize_submit(1, source_kind='test', event_id='approval-1')
+        self.assertTrue(tools.request_submit()['authorized'])
+        waiting = threading.Event()
+        waiting.set()
+        request = tools.report_blocker('submit_unknown', 'The page went blank after the click.', stop=waiting)['request_id']
+        self.end_turn(owner)
+        self.age(1)
+        self.assertNotIn('ended_after_submit_requeued', [e['event'] for e in self.services.tick(set())], 'not before the mail check answered')
+        self.launcher.store.reply(request, 'not submitted', source_kind='no_email', source_id='no-email-1', sender_id='no-confirmation-email')
+        self.age(1)
+        self.assertIn({'event': 'ended_after_submit_requeued', 'job_id': 1}, self.services.tick(set()))
+        self.assertIsNone(self.launcher.store.submit_state(1))
+        self.assertEqual(self.p.process_completions(), [1])
+        self.assertIn(1, self.started(self.worker(slots=2)))
+        prompt = [call for call in self.fake.calls if '--bg' in call and any(str(a).startswith('applier-1-') for a in call)][-1][-1]
+        self.assertTrue(prompt.endswith(EARLIER_ATTEMPT))
+
+    def test_an_ended_applier_waiting_at_review_or_on_a_question_is_left_alone(self):
+        worker, owner, tools = self.ended(progress='ready for review')
+        self.end_turn(owner)
+        self.age(1)
+        self.assertEqual([e for e in self.services.tick(set()) if e['event'].startswith('ended')], [])
+        owner2, tools2 = self.applier(1)
+        tools.record_progress('filled name')
+        self.launcher.store.ask(1, owner, 'question', 'Start date?')
+        self.age(1)
+        self.assertEqual([e for e in self.services.tick(set()) if e['event'].startswith('ended')], [])
+        self.assertEqual(self.p.queue.get(1).state, S.APPLYING)
 
     def test_an_idle_session_still_listed_blocked_is_stopped_then_requeued(self):
         worker = self.worker(slots=2)

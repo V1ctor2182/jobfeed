@@ -19,7 +19,7 @@ import json
 from pathlib import Path
 import sqlite3
 
-from pipeline.applier_runtime import RETRYABLE_SUBMIT, RUN_TABLES, SUBMIT_TABLES, ApplierRuntime
+from pipeline.applier_runtime import ATTEMPTED, RETRYABLE_SUBMIT, RUN_TABLES, SUBMIT_TABLES, ApplierRuntime
 from pipeline.claude_applier import CLI_STATES, ENDED, ClaudeApplierLauncher, InventoryUnavailable
 from pipeline.local_state import private_json, read_only
 from pipeline.claude_dispatch import is_claude_owner
@@ -116,12 +116,13 @@ def _approval(record):
         return None
 
 
-def submit_history(runtime, requests, queue_authorization, unknown_sent_nothing=False):
+def submit_history(runtime, requests, queue_authorization, unknown_sent_nothing=False, retry_attempt=False):
     """Judge a job's Submit records. `runtime` holds its rows per SUBMIT_TABLES, including any this requeue already retired.
 
     unknown_sent_nothing is the user's statement that an attempt recorded as unknown sent nothing, so it and its still
-    open Dashboard request count as settled."""
-    unsent = RETRYABLE_SUBMIT | ({'unknown'} if unknown_sent_nothing else set())
+    open Dashboard request count as settled. retry_attempt is the user's standing rule that an attempt whose outcome nobody
+    saw, recorded as requested or unknown, is applied again (see ATTEMPTED)."""
+    unsent = RETRYABLE_SUBMIT | ({'unknown'} if unknown_sent_nothing else set()) | (ATTEMPTED if retry_attempt else set())
     blocking = [table for table in ('applier_outbox', 'applier_skips') if runtime[table]]
     blocking += [f"applier_submits is {row['state']}" for row in runtime['applier_submits'] if row['state'] not in unsent]
     unused = sorted(row['event_id'] for row in runtime['applier_submit_auth'] if not row['used_at'])
@@ -137,7 +138,7 @@ def submit_history(runtime, requests, queue_authorization, unknown_sent_nothing=
         description = f"Dashboard Submit confirmation {request['id']} is {request['state']}"
         if request['state'] in UNSENT_REQUESTS:
             settled.append(description)
-        elif ((request['state'] in ENDED_REQUESTS | (OPEN if unknown_sent_nothing else set()) and request['id'] in used)
+        elif ((request['state'] in ENDED_REQUESTS | (OPEN if unknown_sent_nothing or retry_attempt else set()) and request['id'] in used)
               or (request['state'] in OPEN | ENDED_REQUESTS and request['id'] in unspent)):
             settled.append(description)
             pending.append(request['id'])
@@ -158,7 +159,7 @@ def batches_listing(root, job_id):
             yield path
 
 
-def observe(config, job_id, unknown_sent_nothing=False):
+def observe(config, job_id, unknown_sent_nothing=False, retry_attempt=False):
     root, pipeline = config.resume_root, config.resume_root / '.pipeline'
     with closing(read_only(config.jobfeed_db)) as db:
         row = db.execute('SELECT * FROM application_queue WHERE job_id=?', (job_id,)).fetchone()
@@ -177,9 +178,14 @@ def observe(config, job_id, unknown_sent_nothing=False):
     retired = next((r['retired'] for r in runtime.requeues(job_id) if r['id'] == entry), {})
     rows = {table: runtime._read(f'SELECT * FROM {table} WHERE job_id=?', (job_id,)) + retired.get(table, []) for table in SUBMIT_TABLES}
     requests = _query(pipeline / 'dashboard-submissions.sqlite3', 'SELECT id,state FROM requests WHERE job=? ORDER BY created_at', (job_id,))
-    submit = submit_history(rows, requests, row['submit_authorization'] if row else None, unknown_sent_nothing)
+    submit = submit_history(rows, requests, row['submit_authorization'] if row else None, unknown_sent_nothing, retry_attempt)
     applier = runtime._read('SELECT owner FROM applier_jobs WHERE job_id=?', (job_id,))
     launch = runtime._read('SELECT launch_id,name,config FROM applier_launches WHERE job_id=?', (job_id,))
+    if retry_attempt and launch:
+        # Under the user's retry rule a receipt Jobfeed rejects for showing no acknowledgement proves nothing was sent.
+        from pipeline.receipts import RECEIPT_FILES, UNACKNOWLEDGED, verdict
+        if verdict(job_id, launch[0]) == UNACKNOWLEDGED:
+            evidence = [name for name in evidence if name not in RECEIPT_FILES]
     batches = tuple(batches_listing(root, job_id))
     suspended_in = tuple(path for path in batches if job_id in json.loads(path.read_text()).get('suspended_job_ids', []))
     return Stranded(job_id, state, owner, folder, tuple(evidence), submit, applier[0]['owner'] if applier else None, launch[0] if launch else None,
@@ -230,12 +236,20 @@ def stopped_service(status_path=DAEMON_STATUS, start_of=process_start, booted_at
             f'before this boot at {_utc(booted)}')
 
 
-def session(launch, agents, service_down):
-    """Judge the launch's session from the CLI inventory, and from the background service when the CLI says it runs."""
+def session(launch, agents, service_down, booted=None):
+    """Judge the launch's session from the CLI inventory, and from the background service when the CLI says it runs.
+
+    After a reboot the CLI keeps listing dead sessions as working or blocked, without a pid. One that started before this
+    boot (booted, in epoch seconds) has ended, as the launcher judges it (2026-11-18: six such jobs could not be requeued)."""
     if agents is None:
         return Session('unknown', 'claude agents --json did not answer')
     cwd = json.loads(launch['config'])['cwd']
-    states = [CLI_STATES.get(a.get('state'), 'unknown') for a in agents if a.get('name') == launch['name'] and a.get('cwd') == cwd]
+
+    def state(agent):
+        if booted is not None and not agent.get('pid') and agent.get('startedAt', booted * 1000) < booted * 1000:
+            return 'finished'
+        return CLI_STATES.get(agent.get('state'), 'unknown')
+    states = [state(a) for a in agents if a.get('name') == launch['name'] and a.get('cwd') == cwd]
     if all(state in ENDED for state in states):
         return Session('ended', f"claude agents reports it {', '.join(states)}" if states else 'claude agents lists no session for it')
     if service_down and all(state in ENDED | {'running'} for state in states):
@@ -288,7 +302,7 @@ def release(root, path, job_id):
 
 
 def requeue(config, job_ids, reason, *, dry_run=False, worker_busy=any_worker, inventory=None, service_status=DAEMON_STATUS, start_of=process_start,
-            booted_at=boot_time, actor=ACTOR, keep_batches=False, unknown_sent_nothing=False):
+            booted_at=boot_time, actor=ACTOR, keep_batches=False, unknown_sent_nothing=False, retry_attempt=False):
     """keep_batches leaves the job in every batch that lists it, so that batch starts it again once it is eligible.
     unknown_sent_nothing is the user's statement, for every listed job, that a Submit attempt recorded as unknown sent nothing."""
     root = config.resume_root
@@ -296,20 +310,24 @@ def requeue(config, job_ids, reason, *, dry_run=False, worker_busy=any_worker, i
     results = []
     with admission_lock(root):
         busy = worker_busy(root)
-        jobs = [observe(config, job_id, unknown_sent_nothing) for job_id in job_ids]
-        agents, service_down = None, None
+        jobs = [observe(config, job_id, unknown_sent_nothing, retry_attempt) for job_id in job_ids]
+        agents, service_down, booted = None, None, None
         if any(job.launch for job in jobs):
             try:
                 agents = inventory()
             except InventoryUnavailable:
                 agents = None
             service_down = stopped_service(service_status, start_of, booted_at)
+            try:
+                booted = booted_at()
+            except (OSError, ValueError):
+                booted = None
         for job in jobs:
             if job.state == ApplicationState.QUEUED and job.owner is None:
                 results.append({'job_id': job.job_id, 'status': 'already_queued', 'requeues': ApplierRuntime(root).requeues(job.job_id),
                                 'already_suspended_in_batches': [str(path) for path in job.suspended_in]})
                 continue
-            judged = session(job.launch, agents, service_down) if job.launch else None
+            judged = session(job.launch, agents, service_down, booted) if job.launch else None
             reason_refused = refusal(job, busy, judged)
             if reason_refused:
                 results.append({'job_id': job.job_id, 'status': 'refused', 'state': job.state, 'reason': reason_refused})
@@ -324,7 +342,7 @@ def requeue(config, job_ids, reason, *, dry_run=False, worker_busy=any_worker, i
                 release(root, path, job.job_id)
             entry = ApplierRuntime(root).requeue(job.job_id, job.state, job.folder, job.owner, map(str, released), actor=actor, reason=reason,
                                                  settled_auth=job.submit.approvals if job.submit.settled else None,
-                                                 unknown_sent_nothing=unknown_sent_nothing)
+                                                 unknown_sent_nothing=unknown_sent_nothing, retry_attempt=retry_attempt)
             if job.folder:
                 retire_selection(config.applications_root / job.folder, entry['id'])
             if job.submit.requests:

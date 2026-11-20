@@ -73,6 +73,9 @@ class FakeDiscord:
             self.threads[parts[1]].update(body)
             return self.threads[parts[1]]
         if method == 'PATCH' and parts[0] == 'channels':
+            if self.threads.get(parts[1], {}).get('archived'):
+                from pipeline.applier_discord import DiscordHTTPError
+                raise DiscordHTTPError(f'Discord PATCH {path} failed with 400', 400)  # Discord: the thread is archived.
             message = next(m for m in self.messages[parts[1]] if m['id'] == parts[3])
             message.update(body)
             return message
@@ -172,6 +175,18 @@ class DiscordBridgeTests(unittest.TestCase):
         self.ask('Do you need sponsorship?', options=['Yes', 'No'])
         self.bridge.sync()
         self.assertEqual([list(buttons(m))[-1] for m in self.asked()], ['Ignore job', 'Ignore job'])
+
+    def test_an_answer_to_a_question_in_an_archived_thread_settles_once_without_failing_the_pass(self):
+        # 2026-11-18: a nine-day-old question in an archived thread failed with 400 on every pass, ending the rest of it.
+        request = self.ask()
+        post = self.asked_in_thread(request)
+        self.discord.threads[self.thread()] = {'name': 'Job 1', 'archived': True}
+        self.store.reply(request, 'June 1', source_kind='dashboard', source_id='click-1', sender_id='400')
+        self.bridge.sync()
+        self.assertEqual(post['components'] and True, True, 'the archived message keeps its buttons')
+        calls = len(self.discord.calls)
+        self.bridge.sync()
+        self.assertFalse([c for c in self.discord.calls[calls:] if c[0] == 'PATCH' and post['id'] in c[1]], 'and is not tried again')
 
     def test_a_question_asked_in_its_thread_before_is_asked_once_in_the_main_channel_and_either_answer_settles_both(self):
         start = self.ask()

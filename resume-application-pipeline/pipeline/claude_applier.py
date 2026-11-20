@@ -24,7 +24,7 @@ import time
 import uuid
 
 from pipeline.applier_mcp import TOOLS
-from pipeline.applier_runtime import DEFAULT_MODEL, MAX_DRAFT, STRONG_MODEL, ApplierRuntime
+from pipeline.applier_runtime import DEFAULT_MODEL, MAX_DRAFT, RETRY_ACTORS, STRONG_MODEL, ApplierRuntime
 from pipeline.model_routing import is_strong_ats
 
 PIPELINE = Path(__file__).resolve().parents[1]
@@ -98,7 +98,8 @@ Rules:
 - {browser_rule}
 - If your registered tab is gone, never open the URL again and never treat a new page as your draft. Call report_blocker with blocker_type tab_missing.
 - If the posting page shows that the job is gone, in any wording, such as closed, expired, filled, removed, no longer available, no longer accepting applications, "Job not found", or a not found (404) page where the posting was, call report_closed with the page's exact sentence, then do what it returns. It is never page_changed, and never a question for the user.
-- If the page shows a CAPTCHA or any bot check, such as reCAPTCHA, hCaptcha or a Cloudflare "Verify you are human" page, before or after Submit, never try to solve it, click through it or get around it. Call report_blocker with blocker_type captcha and the page URL in page_url, then do what it returns.
+- If the page shows a CAPTCHA or any bot check, such as reCAPTCHA, hCaptcha or a Cloudflare "Verify you are human" page, before or after Submit, never try to solve it, click through it or get around it. On an Indeed posting before you have called request_submit, first follow the next rule. Otherwise call report_blocker with blocker_type captcha and the page URL in page_url, then do what it returns.
+- On an Indeed posting, apply on the employer's own site whenever you can. Choose "Apply on company site" when Indeed offers it. When Indeed offers only its own apply form, or shows a CAPTCHA or bot check before you have called request_submit, first look for the same role on the employer's own careers site, with the same title and location, open it in a new tab of your group and call register_tab for it, and apply there. Use Indeed's own form only when the employer's site does not list the role, and report a CAPTCHA on it as the rule above says. Never apply on both.
 - If a Workday page asks you to sign in or create an account, never type an email or password, and never use Forgot Password. Call account_step with the page's exact URL, then do what it returns.
 - If any other employer or applicant-tracking site needs an account before you can apply, make one without asking. Choose its create account form, or its sign-in form when the site says the email already has an account. Type the profile's email yourself, then call fill_password with the page's exact URL: a program types the user's shared password into the password fields. Never see, type or ask for a password, and never use Forgot Password. Then finish the form, and use email_code or email_link when the site emails a code or a confirmation link. Never sign in with Google, Microsoft, Apple, LinkedIn, Facebook or any other personal account, and never grant such an account access: when a site offers nothing else, or wants a code by text message or phone call, call report_blocker with blocker_type user_only_check.
 - If a page asks for a verification code that the site sent to the user's email, before or after Submit, call email_code with the page's exact URL, type the code it returns and continue. It is never a question for the user, and after Submit it is never submit_unknown: the application is not complete until the code is entered. A code sent by text message or made by an authenticator app still needs the user: call report_blocker with blocker_type user_only_check.
@@ -116,6 +117,12 @@ Steps:
 6. Before the final Submit, call request_submit. Follow its answer exactly: click Submit only when it says you are authorized, and click it exactly once.
 7. After a click, wait for the page to settle. If it shows an explicit acknowledgement, take a screenshot with the computer tool, then read the page with get_page_text, then call record_confirmation, one call at a time. If record_confirmation refuses, follow its error and keep the tab open. Once record_submit_outcome with submitted returns recorded, close every tab in your own tab group as it says, the job listing page and any popup included, and call record_tab_closed. Never close a tab before that. Otherwise record not_submitted or unknown as the tools describe.
 '''
+EARLIER_ATTEMPT = ('''
+An earlier Applier for this job clicked Submit but never saw the result, and no confirmation email came.
+Before you fill anything, look for an earlier application on the site: a message such as "You've already applied" or "You have
+applied", an Applied status on the posting, or the application in the site's own list of your applications. If you find one, do
+not fill or submit anything: call report_blocker with blocker_type already_applied and say where you saw it, and wait for its
+reply. A reply of done means apply anyway. Otherwise apply as usual.''')
 _PROFILE_FACT = ("For a contact or identity fact (name, email, phone, address, LinkedIn, GitHub, portfolio), call lookup_profile with the field name and "
                  "fill the profile value, even when the form arrives prefilled with something different.")
 _COMMON_LOOKUP = ("When a question asks one of My Profile's common questions in any wording, such as work authorization, sponsorship, visa status, relocation, "
@@ -125,6 +132,8 @@ _COMMON_LOOKUP = ("When a question asks one of My Profile's common questions in 
 _OTHER_LOOKUP = ("For any other fact, call lookup_profile with the field name, and for any other application question call lookup_answer with the exact question. "
                  "Use an approved answer exactly. When the form offers fixed choices that word it differently, select the choice that means the same. "
                  "If it lists related answers instead, and one of them asks the same thing about the user in other words, fill that answer without asking. "
+                 "Then call record_answer with the form's label as question, that exact answer, and same_as set to its entry_id, so the wording is saved as "
+                 "another way to ask it. "
                  "This never covers a question about this employer or role, a question that needs a written answer, or an answer you would have to change to fit.")
 _HOW_TO_ASK = ("Then call ask_user with the exact question and the field. Ask one question per call, so each reply answers one field. For a form question, also "
                "pass form_question with the label copied exactly from the form, and applies_to: every_company for any fact about the user, such as work "
@@ -240,12 +249,31 @@ def user_mcp_servers(home=None):
     return sorted(name for name in servers if name != 'applier')
 
 
+# `claude agents --json --all` takes about 0.4 s and lists every session. Reconciling each of 648 launches with its own
+# call made a supervisor pass take minutes, and the single-threaded worker started no job for hours (2026-11-19). One
+# listing serves every reconcile for this long, and any start, attach or stop by this process drops it at once.
+INVENTORY_TTL = 5.0
+_inventories = {}
+
+
 class ClaudeApplierLauncher:
-    def __init__(self, root, *, claude='claude', python=sys.executable, run=subprocess.run, attach=None):
+    def __init__(self, root, *, claude='claude', python=sys.executable, run=subprocess.run, attach=None, inventory_ttl=None):
         self.root = Path(root).resolve()
         self.store = ApplierRuntime(self.root)
         self.claude, self.python, self.run = claude, python, run
-        self.attach = attach or self._attach_and_send
+        self._attach = attach or self._attach_and_send
+        # An injected runner, as in tests, answers from state that can change between two calls, so it is read every time.
+        self.inventory_ttl = (INVENTORY_TTL if run is subprocess.run else 0.0) if inventory_ttl is None else inventory_ttl
+
+    def attach(self, *args, **kwargs):
+        self._forget_inventory()
+        try:
+            return self._attach(*args, **kwargs)
+        finally:
+            self._forget_inventory()
+
+    def _forget_inventory(self):
+        _inventories.pop(self.root, None)
 
     def _db(self):
         self.store.path.parent.mkdir(parents=True, exist_ok=True)
@@ -254,7 +282,7 @@ class ClaudeApplierLauncher:
         db.execute('PRAGMA synchronous=FULL')
         db.executescript(_SCHEMA)
         added = (('pid', 'INTEGER'), ('restart_expected', 'INTEGER NOT NULL DEFAULT 0'),
-                 ('idle_since', 'TEXT'), ('parked_at', 'TEXT'), ('parked_request', 'TEXT'))
+                 ('idle_since', 'TEXT'), ('parked_at', 'TEXT'), ('parked_request', 'TEXT'), ('resumed_at', 'TEXT'))
         columns = {row[1] for row in db.execute('PRAGMA table_info(applier_launches)')}
         if any(name not in columns for name, _ in added):
             # Another connection may be adding the same columns, so look again under the write lock.
@@ -311,6 +339,8 @@ class ClaudeApplierLauncher:
         name = f'applier-{job_id}-{launch_id[:8]}'
         prompt = PROMPT.format(job_id=job_id, url=url, materials=', '.join(map(str, materials)) or 'none', browser_rule=browser_rule(self.root),
                                **ANSWERING[self.store.auto_submit()['enabled']])
+        if any(entry['actor'] in RETRY_ACTORS for entry in self.store.requeues(job_id)):
+            prompt += EARLIER_ATTEMPT
         argv = [self.claude, '--bg', '--chrome', '--model', model, '--settings', str(settings), '--mcp-config', str(mcp_config), '--allowedTools', ALLOWED_TOOLS, '--disallowedTools', DISALLOWED_TOOLS]
         for path in materials:
             argv += ['--add-dir', str(path)]
@@ -328,8 +358,10 @@ class ClaudeApplierLauncher:
         try:
             result = self.run(record['config']['argv'], cwd=record['config']['cwd'], env=clean_env(), capture_output=True, text=True, timeout=120)
         except (OSError, subprocess.SubprocessError):
+            self._forget_inventory()
             self._update(launch_id, state='unknown')
             return self.reconcile(launch_id)
+        self._forget_inventory()
         output = _ANSI.sub('', result.stdout + result.stderr)
         match = _BACKGROUNDED.search(output)
         if match:
@@ -354,13 +386,19 @@ class ClaudeApplierLauncher:
         return record
 
     def agents(self):
+        cached = _inventories.get(self.root)
+        if cached is not None and time.monotonic() - cached[0] < self.inventory_ttl:
+            return cached[1]
         try:
             result = self.run([self.claude, 'agents', '--json', '--all'], capture_output=True, text=True, timeout=60)
         except (OSError, subprocess.SubprocessError) as exc:
             raise InventoryUnavailable(f'claude agents --json did not run: {exc}') from exc
         if result.returncode != 0:
             raise InventoryUnavailable('claude agents --json failed')
-        return json.loads(result.stdout)
+        agents = json.loads(result.stdout)
+        if self.inventory_ttl:
+            _inventories[self.root] = (time.monotonic(), agents)
+        return agents
 
     def reconcile(self, launch_id):
         """Match the launch to the CLI inventory by its unique name and record what the CLI reports.
@@ -421,7 +459,9 @@ class ClaudeApplierLauncher:
         record = self.reconcile(launch_id)
         self._update(launch_id, **marker)
         if has_process(record):
+            self._forget_inventory()
             self.run([self.claude, 'stop', record['background_id']], capture_output=True, text=True, timeout=60)
+            self._forget_inventory()
         return self.reconcile(launch_id)
 
     def restart(self, launch_id, message=RESTART_MESSAGE, *, model=None):
@@ -430,7 +470,7 @@ class ClaudeApplierLauncher:
         record = self.reconcile(launch_id)
         if record['state'] not in RESTARTABLE:
             raise ValueError(f"only a stopped or finished Applier can be restarted, this one is {record['state']}")
-        self._update(launch_id, restart_expected=1, idle_since=None)
+        self._update(launch_id, restart_expected=1, idle_since=None, resumed_at=_now())
         self.attach(record['background_id'], message, record['config']['cwd'], model=model)
         record = self.reconcile(launch_id)
         if record['state'] != 'running':
@@ -454,7 +494,7 @@ class ClaudeApplierLauncher:
             self.restart(launch_id, f'{RESTART_MESSAGE}\n\n{message}' if record['state'] == PARKED and record['parked_request'] else message)
             return 'restarted'
         if record.get('cli_state') == 'blocked':
-            self._update(launch_id, idle_since=None)
+            self._update(launch_id, idle_since=None, resumed_at=_now())
             self.attach(record['background_id'], message, record['config']['cwd'])
             return 'messaged'
         return 'busy'

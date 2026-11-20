@@ -77,6 +77,49 @@ class ConfirmationMailTests(unittest.TestCase):
         confirmation_mail.check(self.pipeline, self.store, call=Unreadable(), record=self.record(OLDER))
         self.assertEqual(self.store.latest_reply(request)['source_kind'], 'email')
 
+    def lost_after_submit(self):
+        self.store.authorize_submit(1, source_kind='test', event_id='approval-1')
+        self.assertTrue(self.store.request_submit(1, 'owner-1')[0])
+        return self.store.ask(1, 'owner-1', 'blocker', 'My form tab is gone after the click.', blocker_type='tab_missing')
+
+    def test_a_tab_lost_after_submit_with_no_email_is_marked_for_a_new_run_and_left_unanswered(self):
+        # 2026-11-18: the user's standing rule is that such a job is applied again, not asked about.
+        request = self.lost_after_submit()
+        later = datetime.now(timezone.utc) + confirmation_mail.SETTLE_AFTER + timedelta(minutes=1)
+        self.assertEqual(confirmation_mail.check(self.pipeline, self.store, call=FakeGmail(), record=self.record(None)), [], 'it waits for mail first')
+        self.assertIsNone(self.store.control(confirmation_mail.no_email_key(request)))
+        events = confirmation_mail.check(self.pipeline, self.store, call=FakeGmail(), record=self.record(None), now=later)
+        self.assertEqual(events, [{'event': 'lost_tab_unconfirmed_no_email', 'job_id': 1}])
+        self.assertIsNotNone(self.store.control(confirmation_mail.no_email_key(request)))
+        self.assertIsNone(self.store.latest_reply(request), 'its form is gone, so it gets no "not submitted"')
+        self.assertEqual(confirmation_mail.check(self.pipeline, self.store, call=FakeGmail(), record=self.record(None), now=later), [], 'marked once')
+
+    def test_a_tab_lost_after_submit_is_answered_submitted_by_the_employer_email(self):
+        request = self.lost_after_submit()
+        confirmation_mail.check(self.pipeline, self.store, call=FakeGmail(), record=self.record(OLDER))
+        self.assertEqual(self.store.latest_reply(request)['source_kind'], 'email')
+
+    def test_a_tab_lost_before_any_submit_is_not_the_mail_checks(self):
+        request = self.store.ask(1, 'owner-1', 'blocker', 'My form tab is gone.', blocker_type='tab_missing')
+        later = datetime.now(timezone.utc) + confirmation_mail.SETTLE_AFTER + timedelta(minutes=1)
+        self.assertEqual(confirmation_mail.check(self.pipeline, self.store, call=FakeGmail(), record=self.record(None), now=later), [])
+        self.assertIsNone(self.store.control(confirmation_mail.no_email_key(request)))
+
+    def test_one_email_confirms_two_blockers_of_the_same_job(self):
+        # 2026-11-18: the second reply reused the first one's source ID, raised, and ended the whole pass.
+        first = self.lost_after_submit()
+        second = self.store.ask(1, 'owner-1', 'blocker', 'My form tab is gone again.', blocker_type='tab_missing')
+        events = confirmation_mail.check(self.pipeline, self.store, call=FakeGmail(), record=self.record(OLDER))
+        self.assertEqual(len(events), 2)
+        self.assertEqual([self.store.latest_reply(r)['source_kind'] for r in (first, second)], ['email', 'email'])
+
+    def test_a_blocker_of_an_ended_applier_is_checked_too(self):
+        request = self.blocker()
+        with self.store._write() as db:
+            db.execute("UPDATE applier_launches SET state='finished'")
+        confirmation_mail.check(self.pipeline, self.store, call=FakeGmail(), record=self.record(OLDER))
+        self.assertEqual(self.store.latest_reply(request)['source_kind'], 'email')
+
     def test_without_an_accepted_email_nothing_is_answered(self):
         request = self.blocker()
         self.assertEqual(confirmation_mail.check(self.pipeline, self.store, call=FakeGmail(), record=self.record(None)), [])

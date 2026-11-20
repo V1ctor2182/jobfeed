@@ -32,11 +32,20 @@ def read_only(path, timeout=10):
     return sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=timeout)
 
 BLOCKER_TYPES = frozenset({'missing_fact', 'broken_component', 'user_only_check', 'new_terms',
-                           'tab_missing', 'browser_disconnected', 'page_changed', 'foreign_owner', 'submit_unknown', 'captcha'})
+                           'tab_missing', 'browser_disconnected', 'page_changed', 'foreign_owner', 'submit_unknown', 'captcha',
+                           'already_applied'})
 SUBMIT_OUTCOMES = frozenset({'submitted', 'not_submitted', 'unknown'})
 # Submit may be requested again only after a recorded outcome proves that nothing was submitted.
 RETRYABLE_SUBMIT = frozenset({'not_submitted'})
-REPLY_SOURCES = frozenset({'discord', 'dashboard', 'email', 'no_email'})
+# A Submit attempt whose outcome nobody saw. The user's standing rule (2026-11-18): when the form tab of such an attempt is
+# lost and no confirmation email arrives, the job is applied again from the start by a new Applier, which first looks for
+# an earlier application on the site. RETRY_ACTOR is that requeue's actor.
+ATTEMPTED = frozenset({'requested', 'unknown'})
+RETRY_ACTOR = 'worker: lost tab after Submit, no confirmation email'
+ENDED_RETRY_ACTOR = 'worker: Applier ended after Submit, no confirmation email'
+RETRY_ACTORS = frozenset({RETRY_ACTOR, ENDED_RETRY_ACTOR})
+# apply_browser is the worker's own Done to a browser_disconnected blocker once the applying browser runs again.
+REPLY_SOURCES = frozenset({'discord', 'dashboard', 'email', 'no_email', 'apply_browser'})
 # The user confirms Submit in the Dashboard or in Discord, or turned on auto submit mode; tests use 'test'.
 SUBMIT_SOURCES = frozenset({'dashboard', 'discord', 'auto', 'test'})
 AUTO_SUBMIT = 'auto_submit'
@@ -364,14 +373,16 @@ class ApplierRuntime:
         return f"{job_id}:{previous_state}:{previous_folder or '-'}:{owner or '-'}"
 
     @staticmethod
-    def _settled_unsent(submit, approvals, unknown_sent_nothing=False):
+    def _settled_unsent(submit, approvals, unknown_sent_nothing=False, retry_attempt=False):
         """Whether a job's Submit records sent nothing, with exactly these approvals: no attempt is open, and request_submit
         opens one in the same write that spends an approval, so each approval was spent on a finished attempt or never."""
         return (not submit['applier_outbox'] and not submit['applier_skips']
-                and all(row['state'] in RETRYABLE_SUBMIT | ({'unknown'} if unknown_sent_nothing else set()) for row in submit['applier_submits'])
+                and all(row['state'] in RETRYABLE_SUBMIT | ({'unknown'} if unknown_sent_nothing else set()) | (ATTEMPTED if retry_attempt else set())
+                        for row in submit['applier_submits'])
                 and {row['event_id'] for row in submit['applier_submit_auth']} == set(approvals))
 
-    def requeue(self, job_id, previous_state, previous_folder, owner, batches, *, actor, reason, settled_auth=None, unknown_sent_nothing=False):
+    def requeue(self, job_id, previous_state, previous_folder, owner, batches, *, actor, reason, settled_auth=None, unknown_sent_nothing=False,
+                retry_attempt=False):
         """Record that the user put the job back in the queue, and retire its Applier if it has one.
 
         The Applier's own rows move into the record, its questions close and undelivered messages to it are cancelled,
@@ -389,7 +400,7 @@ class ApplierRuntime:
             found = next((table for table, rows in submit.items() if rows), None)
             if found and settled_auth is None:
                 raise ValueError(f'the job has a record in {found}, so it cannot go back to the queue')
-            if found and not self._settled_unsent(submit, settled_auth, unknown_sent_nothing):
+            if found and not self._settled_unsent(submit, settled_auth, unknown_sent_nothing, retry_attempt):
                 raise ValueError('its Submit records changed and no longer show that nothing was sent')
             tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             retired = {table: [dict(row) for row in db.execute(f'SELECT * FROM {table} WHERE job_id=?', (job_id,))]
@@ -524,6 +535,32 @@ class ApplierRuntime:
     def captcha_reports(self):
         """Open captcha blockers, oldest first. The Applier ended its turn after each; the worker holds its job."""
         return self._read("SELECT id,job_id,text FROM applier_requests WHERE blocker_type='captcha' AND state='open' ORDER BY created_at", ())
+
+    def unconfirmed_by_email(self):
+        """Jobs whose submit_unknown blocker the confirmation mail check answered "not submitted" for want of an email."""
+        rows = self._read("SELECT DISTINCT r.job_id FROM applier_replies p JOIN applier_requests r ON r.id=p.request_id "
+                          "WHERE r.blocker_type='submit_unknown' AND p.source_kind='no_email'", ())
+        return {row['job_id'] for row in rows}
+
+    def ended_launches(self):
+        """Launches recorded as having ended on their own: finished or failed, never a parked or deliberately stopped one."""
+        return self._read("SELECT * FROM applier_launches WHERE state IN ('finished','failed')", ())
+
+    def last_replies(self):
+        """Each job's newest reply time, from the user or a program."""
+        rows = self._read('SELECT r.job_id,MAX(p.received_at) AS at FROM applier_replies p JOIN applier_requests r ON r.id=p.request_id GROUP BY r.job_id', ())
+        return {row['job_id']: row['at'] for row in rows}
+
+    def browser_outages(self, before):
+        """Open browser_disconnected blockers reported before the time before, oldest first."""
+        return self._read("SELECT id,job_id FROM applier_requests WHERE blocker_type='browser_disconnected' AND state='open' AND created_at<? "
+                          'ORDER BY created_at', (before,))
+
+    def lost_after_submit(self):
+        """Open tab_missing blockers of jobs whose Submit attempt has no seen outcome, oldest first."""
+        attempted = ','.join('?' for _ in ATTEMPTED)
+        return self._read("SELECT r.id,r.job_id,r.created_at FROM applier_requests r JOIN applier_submits s ON s.job_id=r.job_id "
+                          f"WHERE r.blocker_type='tab_missing' AND r.state='open' AND s.state IN ({attempted}) ORDER BY r.created_at", tuple(ATTEMPTED))
 
     def lost_tabs(self):
         """Open tab_missing blockers of jobs with no Submit attempt that may have sent anything, oldest first. The Applier

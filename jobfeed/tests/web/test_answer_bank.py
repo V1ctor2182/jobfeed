@@ -251,6 +251,78 @@ async def test_real_cli_save_approves_the_answer_and_lists_common_questions(
         assert stale.status_code == HTTPStatus.CONFLICT
 
 
+async def test_real_cli_merge_folds_one_answer_into_another(tmp_path: Path):
+    source = Path(__file__).resolve().parents[3] / "resume-application-pipeline"
+    if not (source / ".venv/bin/python").exists():
+        pytest.skip("Sibling pipeline runtime is not installed")
+    (tmp_path / ".venv").symlink_to(source / ".venv", target_is_directory=True)
+    (tmp_path / "pipeline").symlink_to(source / "pipeline", target_is_directory=True)
+    headers = {"Origin": ORIGIN}
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app(AnswerBankService(tmp_path))),
+        base_url=ORIGIN,
+    ) as client:
+        revision = 0
+        for entry_id, question in (
+            ("kept", "Current employer"),
+            ("merged", "Most recent employer"),
+        ):
+            saved = await client.post(
+                "/api/answer-bank",
+                json={
+                    "action": "save",
+                    "expected_revision": revision,
+                    "entry_id": entry_id,
+                    "draft": {
+                        "question": question,
+                        "answer": "Example Corp",
+                        "scope": {"kind": "global"},
+                    },
+                },
+                headers=headers,
+            )
+            assert saved.status_code == HTTPStatus.OK, saved.text
+            revision = saved.json()["revision"]
+        merge = {
+            "action": "merge",
+            "expected_revision": revision,
+            "entry_id": "kept",
+            "merge_entry_ids": ["merged"],
+        }
+        merged = await client.post("/api/answer-bank", json=merge, headers=headers)
+        assert merged.status_code == HTTPStatus.OK, merged.text
+        entries = {entry["id"]: entry for entry in merged.json()["entries"]}
+        assert entries["kept"]["versions"][-1]["aliases"] == ["Most recent employer"]
+        assert entries["merged"]["versions"][-1]["state"] == "revoked"
+        assert entries["merged"]["versions"][-1]["merged_into"] == "kept"
+        replay = await client.post("/api/answer-bank", json=merge, headers=headers)
+        assert replay.json()["revision"] == merged.json()["revision"]
+
+
+async def test_merge_requests_reach_the_answer_bank():
+    bank = FakeBank()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app(bank)), base_url=ORIGIN
+    ) as client:
+        merge = {
+            "action": "merge",
+            "expected_revision": 4,
+            "entry_id": "kept",
+            "merge_entry_ids": ["one", "two"],
+        }
+        result = await client.post(
+            "/api/answer-bank", json=merge, headers={"Origin": ORIGIN}
+        )
+        assert result.status_code == HTTPStatus.OK, result.text
+        empty = await client.post(
+            "/api/answer-bank",
+            json={**merge, "merge_entry_ids": []},
+            headers={"Origin": ORIGIN},
+        )
+        assert empty.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+    assert [write.model_dump(exclude_none=True) for write in bank.writes] == [merge]
+
+
 @pytest.mark.parametrize("host", ["jobfeed.localhost:1355", "127.0.0.1:4654"])
 @pytest.mark.parametrize("scheme", ["http", "https"])
 async def test_verified_portless_origin_can_save_draft(host, scheme):
