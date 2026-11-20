@@ -317,6 +317,7 @@ class FakeDashboard:
                     "handshake": {"enabled": True},
                     "linkedin_extension": {"enabled": True},
                     "jobright": {"enabled": False},
+                    "indeed": {"enabled": True},
                 },
             }
         return {"runs": self.runs}
@@ -338,7 +339,7 @@ def _scan(**progress: dict[str, Any]) -> dict[str, Any]:
         ("HTTP 401", "signed out of Handshake"),
         ("No authenticated job request observed. Sign in and retry.", "signed out"),
         ("Jobright Chrome extension is not connected", "not connected"),
-        ("Discovery returned no result", "returned no jobs"),
+        ("Discovery returned no result", "failed (Discovery returned no result)"),
     ],
 )
 def test_each_signed_in_site_reports_its_last_scan(message: str, detail: str) -> None:
@@ -350,17 +351,53 @@ def test_each_signed_in_site_reports_its_last_scan(message: str, detail: str) ->
     ]
     rows = {
         row.check: row
-        for row in doctor_module.check_signed_in_sites(cast(Any, FakeDashboard(runs)))
+        for row in doctor_module.check_sources(cast(Any, FakeDashboard(runs)))
     }
-    assert rows["Handshake sign-in"].status == "fail"
-    assert detail in rows["Handshake sign-in"].detail
-    assert rows["LinkedIn sign-in"].status == "ok"
-    assert "41 jobs found" in rows["LinkedIn sign-in"].detail
-    assert "Jobright sign-in" not in rows
+    assert rows["Source: Handshake"].status == "fail"
+    assert detail in rows["Source: Handshake"].detail
+    assert rows["Source: LinkedIn signed in"].status == "ok"
+    assert "41 found" in rows["Source: LinkedIn signed in"].detail
+    assert "Source: Jobright" not in rows
     if "signed out" in detail:
-        assert "sign me in to Handshake again" in rows["Handshake sign-in"].fix
+        assert "sign me in to Handshake again" in rows["Source: Handshake"].fix
 
 
 def test_a_site_not_scanned_yet_is_not_a_failure() -> None:
-    rows = doctor_module.check_signed_in_sites(cast(Any, FakeDashboard([])))
+    rows = doctor_module.check_sources(cast(Any, FakeDashboard([])))
     assert {row.status for row in rows} == {"off"}
+    assert {row.check for row in rows} == {
+        "Source: Handshake",
+        "Source: LinkedIn signed in",
+        "Source: Indeed",
+    }
+
+
+def _indeed(phase: str, found: int, message: str = "") -> dict[str, Any]:
+    return {
+        "source": "all",
+        "status": "succeeded",
+        "started_at": "2026-11-18T09:10:00+00:00",
+        "scan_progress": {"indeed": {"phase": phase, "message": message}},
+        "scan_stats": {"indeed": {"discovered": found, "inserted": found // 2}},
+    }
+
+
+def _indeed_row(runs: list[dict[str, Any]]) -> Check:
+    rows = doctor_module.check_sources(cast(Any, FakeDashboard(runs)))
+    return next(row for row in rows if row.check == "Source: Indeed")
+
+
+def test_indeed_reports_jobs_found_failures_and_empty_scans() -> None:
+    found = _indeed_row([_indeed("completed", 375)])
+    assert found.status == "ok"
+    assert "375 found, 187 new" in found.detail
+
+    blocked = _indeed_row([_indeed("failed", 0, "HTTP 403")])
+    assert blocked.status == "fail"
+    assert "HTTP 403" in blocked.detail
+    assert "blocking this server" in blocked.fix
+
+    empty = _indeed_row([_indeed("completed", 0)] * 3)
+    assert empty.status == "warn"
+    assert "no jobs in the last 3 scans" in empty.detail
+    assert _indeed_row([_indeed("completed", 0)] * 2).status == "ok"

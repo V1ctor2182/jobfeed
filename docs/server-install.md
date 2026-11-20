@@ -544,7 +544,7 @@ items 1 to 3 yourself. Otherwise tell the user exactly what to click.
    says the extension is not connected, redo item 3.
 
 The first scan proves the sign-in end to end: `jobfeed doctor` then shows
-"Handshake sign-in: … jobs found", or ❌ with the reason.
+"Source: Handshake: … found", or ❌ with the reason.
 
 To turn a site off later: `"$JF" onboard extension disable <site>`.
 
@@ -659,8 +659,10 @@ everything." first.
    reboot, keeps running after logout), every setup step, the AI provider and
    models, the résumé, the job sources, the scan API, one tiny AI request made
    with the service's own `PATH`, the last scan and evaluation, the daily scan
-   (scheduled, last run not failed), the Chrome extension and each signed-in
-   site's last result (a sign-out shows as ❌) when one is on, the private link (must answer 401 without the code), free disk, and
+   (scheduled, last run not failed), every job source that is on (Indeed,
+   LinkedIn, company pages, Handshake…: jobs found in its latest scan; a
+   failure or a sign-out is ❌, three empty scans in a row are ⚠️), the Chrome
+   extension when a signed-in site is on, the private link (must answer 401 without the code), free disk, and
    that the database, résumé and settings stay out of git. Each check is `ok`,
    `warn`, `fail` or `off` (not set up), with a `fix` hint. It exits 1 when any
    check fails.

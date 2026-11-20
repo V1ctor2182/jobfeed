@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from jobfeed.cli.onboard import Dashboard, setup_checks
-from jobfeed.doctor_host import Check, Host, Status
+from jobfeed.doctor_host import Check, Host
 from jobfeed.doctor_system import service_path
 
 _AI_TIMEOUT_S = 120
@@ -112,7 +112,15 @@ def check_ai(host: Host, dashboard: Dashboard, *, skip: bool) -> Check:
     return Check(name, "fail", reason[0][:160], f"Sign in again: `{login}`.")
 
 
-def _when(value: str) -> str:
+def local_time(value: str) -> str:
+    """Return an ISO time as this machine's local date and time.
+
+    Args:
+        value: ISO 8601 timestamp.
+
+    Returns:
+        For example "Nov 20 08:06 UTC".
+    """
     return datetime.fromisoformat(value).astimezone().strftime("%b %d %H:%M %Z")
 
 
@@ -133,7 +141,7 @@ def check_runs(dashboard: Dashboard, *, daily: bool) -> list[Check]:
         if run is None:
             rows.append(Check(name, "off", "none yet"))
             continue
-        when = _when(run["started_at"])
+        when = local_time(run["started_at"])
         if run["status"] == "running":
             rows.append(Check(name, "ok", f"running since {when}"))
         elif run.get("failure_code") == "interrupted":
@@ -184,85 +192,10 @@ def check_runs(dashboard: Dashboard, *, daily: bool) -> list[Check]:
     return rows
 
 
-# Sites read through the Chrome extension with the user's own sign-in:
-# config field -> (label, scan progress key).
-_SIGNED_IN_SITES = {
-    "handshake": ("Handshake", "handshake"),
-    "linkedin_extension": ("LinkedIn", "linkedin-extension"),
-    "jobright": ("Jobright", "jobright"),
-}
-_SIGNED_OUT = ("401", "sign in", "signed out", "login", "authenticated")
-_FINISHED = {"completed", "completed_with_warnings"}
-
-
-def check_signed_in_sites(dashboard: Dashboard) -> list[Check]:
-    """Each signed-in site worked in its latest scan, so its sign-in still holds.
-
-    Args:
-        dashboard: Client for the dashboard.
-
-    Returns:
-        One line per signed-in site that is turned on.
-    """
-    configuration = dashboard.get("/api/config")
-    if not configuration.get("configured"):
-        return []
-    sources = configuration["sources"]
-    runs = [
-        run
-        for run in dashboard.get("/api/runs?limit=50").get("runs", [])
-        if run["source"] != "evaluate"
-    ]
-    rows = []
-    for field, (label, key) in _SIGNED_IN_SITES.items():
-        if not sources.get(field, {}).get("enabled"):
-            continue
-        name = f"{label} sign-in"
-        again = (
-            f'Ask any coding agent: "sign me in to {label} again" '
-            '(steps: "Signing in again" in docs/server-install.md).'
-        )
-        run = next((r for r in runs if key in (r.get("scan_progress") or {})), None)
-        if run is None:
-            rows.append(Check(name, "off", "on; the first scan will test the sign-in"))
-            continue
-        progress = run["scan_progress"][key]
-        phase = str(progress.get("phase") or "")
-        message = str(progress.get("message") or "")
-        when = _when(run["started_at"])
-        if phase in _FINISHED:
-            found = (run.get("scan_stats") or {}).get(key, {}).get("discovered", 0)
-            rows.append(Check(name, "ok", f"{when}: {found} jobs found"))
-        elif phase != "failed":
-            status: Status = "ok" if run["status"] == "running" else "warn"
-            rows.append(
-                Check(name, status, f"{when}: the scan stopped before {label} finished")
-            )
-        elif "not connected" in message.lower():
-            rows.append(
-                Check(
-                    name,
-                    "fail",
-                    f"{when}: the Chrome extension was not connected",
-                    "Keep Chrome open on the server; the extension reconnects "
-                    "within 30 seconds.",
-                )
-            )
-        elif any(sign in message.lower() for sign in _SIGNED_OUT):
-            rows.append(Check(name, "fail", f"{when}: signed out of {label}", again))
-        else:
-            rows.append(
-                Check(
-                    name, "fail", f"{when}: {label} returned no jobs ({message})", again
-                )
-            )
-    return rows
-
-
 __all__ = [
     "check_ai",
     "check_dashboard",
     "check_runs",
-    "check_signed_in_sites",
+    "local_time",
     "setup_rows",
 ]
