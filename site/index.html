@@ -1,0 +1,790 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Jobfeed — find jobs, score them, apply with Claude</title>
+<meta name="description" content="Jobfeed is an open-source, local-first job search workspace. It finds jobs, scores them against your résumé, and applies with Claude Appliers while you keep the final say on every Submit.">
+<meta property="og:title" content="Jobfeed">
+<meta property="og:description" content="Find the right jobs. Let Claude apply. You press Submit.">
+<meta property="og:image" content="https://v1ctor2182.github.io/jobfeed/assets/dashboard.webp">
+<meta property="og:url" content="https://v1ctor2182.github.io/jobfeed/">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #f4f3f0;
+  --shell: #fbfaf8;
+  --panel: #efede9;
+  --line: #e4e1dc;
+  --ink: #171614;
+  --ink-2: #4f4c47;
+  --ink-3: #7d7972;
+  --accent: #e8742a;
+  --accent-text: #b5551a;
+  --accent-soft: #fdeee3;
+  --ok: #2f8a4e;
+  --ok-soft: #e4f1e8;
+  --btn-ink: #171614;
+  --btn-ink-text: #fbfaf8;
+  --code-bg: #1c1b19;
+  --code-ink: #ecebe7;
+  --code-dim: #8d8982;
+  --shadow: 0 1px 0 rgb(23 22 20 / 4%), 0 24px 60px -24px rgb(23 22 20 / 22%);
+  --radius: 18px;
+  --sans: "Geist", ui-sans-serif, system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  --mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #131211;
+    --shell: #1b1a18;
+    --panel: #22201e;
+    --line: #2f2d2a;
+    --ink: #f1efeb;
+    --ink-2: #bdb9b2;
+    --ink-3: #8d8982;
+    --accent: #f08a45;
+    --accent-text: #f4a26b;
+    --accent-soft: #3a2518;
+    --ok: #6cc28a;
+    --ok-soft: #1d3324;
+    --btn-ink: #f1efeb;
+    --btn-ink-text: #131211;
+    --code-bg: #0d0c0b;
+    --shadow: 0 1px 0 rgb(0 0 0 / 30%), 0 24px 60px -24px rgb(0 0 0 / 70%);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #131211;
+  --shell: #1b1a18;
+  --panel: #22201e;
+  --line: #2f2d2a;
+  --ink: #f1efeb;
+  --ink-2: #bdb9b2;
+  --ink-3: #8d8982;
+  --accent: #f08a45;
+  --accent-text: #f4a26b;
+  --accent-soft: #3a2518;
+  --ok: #6cc28a;
+  --ok-soft: #1d3324;
+  --btn-ink: #f1efeb;
+  --btn-ink-text: #131211;
+  --code-bg: #0d0c0b;
+  --shadow: 0 1px 0 rgb(0 0 0 / 30%), 0 24px 60px -24px rgb(0 0 0 / 70%);
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 400 16px/1.6 var(--sans);
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+a { color: inherit; }
+img { max-width: 100%; height: auto; display: block; }
+code, pre, .mono { font-family: var(--mono); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 6px; }
+
+.wrap { width: min(1160px, 100% - 32px); margin-inline: auto; }
+
+/* ---------- nav ---------- */
+.nav {
+  position: sticky; top: 0; z-index: 20;
+  background: color-mix(in srgb, var(--bg) 82%, transparent);
+  backdrop-filter: saturate(1.4) blur(14px);
+  -webkit-backdrop-filter: saturate(1.4) blur(14px);
+  border-bottom: 1px solid transparent;
+  transition: border-color .2s;
+}
+.nav.scrolled { border-bottom-color: var(--line); }
+.nav .wrap { display: flex; align-items: center; gap: 24px; height: 64px; }
+.brand { display: flex; align-items: center; gap: 10px; text-decoration: none; font-weight: 600; font-size: 17px; letter-spacing: -0.01em; }
+.mark {
+  width: 30px; height: 30px; border-radius: 8px; background: var(--ink); color: var(--bg);
+  display: grid; place-items: center;
+}
+.mark svg { width: 18px; height: 18px; }
+.nav-links { display: flex; gap: 22px; margin-left: 12px; }
+.nav-links a { text-decoration: none; color: var(--ink-2); font-size: 14.5px; }
+.nav-links a:hover { color: var(--ink); }
+.nav-right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.lang {
+  display: inline-flex; border: 1px solid var(--line); border-radius: 999px; padding: 3px; background: var(--shell);
+}
+.lang button {
+  border: 0; background: transparent; color: var(--ink-3); font: 500 13px var(--sans);
+  padding: 4px 10px; border-radius: 999px; cursor: pointer;
+}
+.lang button[aria-pressed="true"] { background: var(--ink); color: var(--bg); }
+
+.btn {
+  display: inline-flex; align-items: center; gap: 8px; justify-content: center;
+  height: 42px; padding: 0 18px; border-radius: 11px; font: 500 15px var(--sans);
+  text-decoration: none; border: 1px solid transparent; cursor: pointer; white-space: nowrap;
+  transition: transform .15s, background .15s, border-color .15s;
+}
+.btn:active { transform: translateY(1px); }
+.btn-primary { background: var(--btn-ink); color: var(--btn-ink-text); }
+.btn-primary:hover { background: color-mix(in srgb, var(--btn-ink) 86%, var(--accent)); }
+.btn-ghost { background: var(--shell); color: var(--ink); border-color: var(--line); }
+.btn-ghost:hover { border-color: var(--ink-3); }
+.btn-sm { height: 34px; padding: 0 12px; font-size: 14px; border-radius: 9px; }
+.btn svg { width: 17px; height: 17px; }
+
+/* ---------- hero ---------- */
+.hero { padding: 76px 0 40px; text-align: center; }
+.eyebrow {
+  display: inline-flex; align-items: center; gap: 8px;
+  font: 500 13px var(--mono); color: var(--ink-2); letter-spacing: 0.01em;
+  padding: 6px 12px; border: 1px solid var(--line); border-radius: 999px; background: var(--shell);
+}
+.eyebrow .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+h1 {
+  font-size: clamp(38px, 6.4vw, 74px); line-height: 1.04; letter-spacing: -0.035em;
+  font-weight: 600; margin: 22px auto 0; max-width: 15ch; text-wrap: balance;
+}
+h1 em { font-style: normal; color: var(--accent); }
+html[lang="zh-CN"] h1 { letter-spacing: -0.01em; max-width: 13em; line-height: 1.15; word-break: keep-all; overflow-wrap: anywhere; }
+.lede { font-size: clamp(17px, 2vw, 20px); color: var(--ink-2); max-width: 620px; margin: 22px auto 0; text-wrap: pretty; }
+.hero-cta { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; margin-top: 34px; }
+.cmd {
+  display: inline-flex; align-items: center; gap: 12px; height: 42px; padding: 0 8px 0 16px;
+  background: var(--code-bg); color: var(--code-ink); border-radius: 11px; font: 400 14px var(--mono);
+  max-width: 100%;
+}
+.cmd span.p { color: var(--code-dim); }
+.cmd code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.copy {
+  border: 0; background: rgb(255 255 255 / 9%); color: var(--code-ink); border-radius: 7px;
+  height: 28px; min-width: 28px; padding: 0 8px; display: grid; place-items: center; cursor: pointer;
+  font: 500 12px var(--sans);
+}
+.copy:hover { background: rgb(255 255 255 / 16%); }
+.copy svg { width: 15px; height: 15px; }
+.hero-note { margin-top: 14px; font-size: 13.5px; color: var(--ink-3); }
+
+.shot {
+  margin: 56px auto 0; max-width: 1100px; border-radius: 22px; padding: 10px;
+  background: var(--shell); border: 1px solid var(--line); box-shadow: var(--shadow);
+}
+.shot-bar { display: flex; align-items: center; gap: 7px; padding: 6px 8px 12px; }
+.shot-bar i { width: 11px; height: 11px; border-radius: 50%; background: var(--line); display: block; }
+.shot-bar .url {
+  margin-left: 12px; flex: 1; max-width: 320px; height: 26px; border-radius: 7px; background: var(--panel);
+  font: 400 12px/26px var(--mono); color: var(--ink-3); text-align: left; padding: 0 10px; overflow: hidden; white-space: nowrap;
+}
+.shot-frame { border-radius: 14px; overflow: hidden; aspect-ratio: 16 / 10; background: #f4f3f0; border: 1px solid var(--line); }
+.shot-frame img { width: 100%; height: 100%; object-fit: cover; object-position: top left; }
+.caption { font-size: 13px; color: var(--ink-3); margin-top: 12px; }
+
+/* ---------- sources ---------- */
+.sources { padding: 48px 0 8px; text-align: center; }
+.sources p { font: 500 12.5px var(--mono); text-transform: uppercase; letter-spacing: .08em; color: var(--ink-3); margin: 0 0 16px; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
+.chip {
+  font-size: 14.5px; color: var(--ink-2); padding: 7px 14px; border-radius: 999px;
+  border: 1px solid var(--line); background: var(--shell);
+}
+
+/* ---------- sections ---------- */
+section.block { padding: 110px 0 0; }
+.kicker { font: 500 13px var(--mono); color: var(--accent-text); letter-spacing: .02em; margin: 0 0 14px; }
+h2 {
+  font-size: clamp(30px, 4.2vw, 48px); line-height: 1.08; letter-spacing: -0.03em; font-weight: 600;
+  margin: 0; max-width: 18ch; text-wrap: balance;
+}
+html[lang="zh-CN"] h2 { letter-spacing: -0.005em; line-height: 1.2; max-width: 14em; text-wrap: pretty; word-break: keep-all; overflow-wrap: anywhere; }
+.sub { font-size: 18px; color: var(--ink-2); max-width: 600px; margin: 18px 0 0; text-wrap: pretty; }
+
+/* pipeline */
+.pipe { display: grid; grid-template-columns: repeat(5, 1fr); gap: 0; margin-top: 52px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--shell); overflow: hidden; }
+.step { padding: 26px 22px 28px; border-right: 1px solid var(--line); position: relative; }
+.step:last-child { border-right: 0; }
+.step .n { font: 500 12.5px var(--mono); color: var(--ink-3); display: flex; align-items: center; gap: 8px; }
+.step .n b { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); display: inline-block; }
+.step h3 { font-size: 21px; margin: 18px 0 8px; letter-spacing: -0.015em; font-weight: 600; }
+.step p { margin: 0; color: var(--ink-2); font-size: 14.5px; line-height: 1.55; }
+.step .who { margin-top: 16px; font: 400 12px var(--mono); color: var(--ink-3); }
+
+/* split feature */
+.split { display: grid; grid-template-columns: 1fr 1.08fr; gap: 64px; align-items: center; }
+.split.flip { grid-template-columns: 1.08fr 1fr; }
+.split.flip .copy-col { order: 2; }
+.list { list-style: none; padding: 0; margin: 30px 0 0; display: grid; gap: 18px; }
+.list li { display: grid; grid-template-columns: 28px 1fr; gap: 12px; }
+.list .ic {
+  width: 28px; height: 28px; border-radius: 8px; background: var(--accent-soft); color: var(--accent-text);
+  display: grid; place-items: center;
+}
+.list .ic svg { width: 16px; height: 16px; }
+.list strong { display: block; font-weight: 600; font-size: 16px; }
+.list span { color: var(--ink-2); font-size: 15px; }
+
+.card {
+  background: var(--shell); border: 1px solid var(--line); border-radius: 22px; box-shadow: var(--shadow); overflow: hidden;
+}
+.card.img { padding: 10px; }
+.card.img .inner { border-radius: 14px; overflow: hidden; border: 1px solid var(--line); background: #fff; }
+.fit .inner { max-height: 560px; position: relative; }
+.fit .inner::after {
+  content: ""; position: absolute; inset: auto 0 0 0; height: 90px;
+  background: linear-gradient(to bottom, transparent, #fff);
+}
+
+/* discord mock */
+.thread { padding: 22px 22px 24px; font-size: 14.5px; }
+.thread-head { display: flex; align-items: center; gap: 10px; padding-bottom: 16px; border-bottom: 1px solid var(--line); margin-bottom: 18px; }
+.thread-head .hash { font: 600 18px var(--mono); color: var(--ink-3); }
+.thread-head strong { font-weight: 600; }
+.thread-head small { color: var(--ink-3); margin-left: auto; font: 400 12px var(--mono); }
+.msg { display: grid; grid-template-columns: 36px 1fr; gap: 12px; margin-bottom: 18px; }
+.msg:last-child { margin-bottom: 0; }
+.av { width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center; font: 600 14px var(--sans); }
+.av.bot { background: var(--accent-soft); color: var(--accent-text); }
+.av.me { background: var(--panel); color: var(--ink-2); }
+.msg .meta { font-size: 13px; color: var(--ink-3); }
+.msg .meta b { color: var(--ink); font-weight: 600; margin-right: 6px; }
+.msg .meta .tag { font: 500 10.5px var(--mono); background: var(--accent); color: #fff; padding: 1px 5px; border-radius: 4px; margin-right: 6px; vertical-align: 1px; }
+.msg p { margin: 3px 0 0; color: var(--ink-2); }
+.msg .box {
+  margin-top: 8px; border-left: 3px solid var(--accent); background: var(--panel); border-radius: 0 10px 10px 0;
+  padding: 10px 12px; font-size: 13.5px; color: var(--ink-2);
+}
+.msg .box div { display: flex; justify-content: space-between; gap: 12px; }
+.msg .box div span:last-child { color: var(--ink); font-family: var(--mono); font-size: 12.5px; }
+.msg code.submit { background: var(--ok-soft); color: var(--ok); padding: 2px 8px; border-radius: 6px; font-size: 13.5px; }
+.ex { font: 400 12px var(--mono); color: var(--ink-3); padding: 0 22px 18px; }
+
+/* control */
+.control { margin-top: 48px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+.ctl { background: var(--shell); border: 1px solid var(--line); border-radius: var(--radius); padding: 24px 22px; }
+.ctl .ic { width: 38px; height: 38px; border-radius: 11px; background: var(--panel); display: grid; place-items: center; color: var(--ink); }
+.ctl .ic svg { width: 19px; height: 19px; }
+.ctl h3 { font-size: 17.5px; font-weight: 600; margin: 18px 0 8px; letter-spacing: -0.01em; }
+.ctl p { margin: 0; color: var(--ink-2); font-size: 14.5px; line-height: 1.55; }
+.ctl code { font-size: 13px; background: var(--panel); padding: 1px 5px; border-radius: 5px; }
+
+/* insights */
+.wide { margin-top: 48px; }
+.pills { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 26px; }
+.pills span { font-size: 14px; padding: 6px 12px; border-radius: 9px; background: var(--panel); color: var(--ink-2); }
+
+/* install */
+.install { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 48px; }
+.inst { background: var(--shell); border: 1px solid var(--line); border-radius: var(--radius); padding: 26px; display: flex; flex-direction: column; }
+.inst .label { font: 500 12.5px var(--mono); color: var(--ink-3); }
+.inst h3 { font-size: 21px; font-weight: 600; margin: 10px 0 8px; letter-spacing: -0.015em; }
+.inst > p { margin: 0 0 18px; color: var(--ink-2); font-size: 15px; }
+.code {
+  position: relative; background: var(--code-bg); color: var(--code-ink); border-radius: 13px;
+  padding: 18px 20px; font: 400 13.5px/1.7 var(--mono); margin-top: auto;
+}
+.code pre { margin: 0; white-space: pre-wrap; word-break: break-word; padding-right: 64px; }
+.code .p { color: var(--code-dim); user-select: none; }
+.code .copy { position: absolute; top: 12px; right: 12px; width: auto; }
+.reqs { margin-top: 16px; background: var(--shell); border: 1px solid var(--line); border-radius: var(--radius); padding: 22px 26px; display: grid; grid-template-columns: auto 1fr 1fr 1fr; gap: 24px; align-items: start; }
+.reqs h4 { margin: 0; font-size: 15px; font-weight: 600; }
+.reqs h4 small { display: block; color: var(--ink-3); font-weight: 400; font-size: 13.5px; margin-top: 4px; max-width: 220px; }
+.reqs div { font-size: 14.5px; color: var(--ink-2); }
+.reqs div b { color: var(--ink); font-weight: 600; display: block; }
+
+/* cta + footer */
+.final { margin: 120px 0 0; padding: 72px 24px; text-align: center; border-radius: 28px; background: var(--ink); color: var(--bg); }
+.final h2 { margin: 0 auto; color: var(--bg); }
+.final p { color: color-mix(in srgb, var(--bg) 70%, var(--ink)); max-width: 520px; margin: 16px auto 30px; font-size: 17px; }
+.final .btn-primary { background: var(--bg); color: var(--ink); }
+.final .btn-ghost { background: transparent; color: var(--bg); border-color: color-mix(in srgb, var(--bg) 30%, var(--ink)); }
+footer { padding: 40px 0 48px; color: var(--ink-3); font-size: 14px; }
+footer .wrap { display: flex; flex-wrap: wrap; gap: 12px 28px; align-items: center; }
+footer a { color: var(--ink-2); text-decoration: none; }
+footer a:hover { color: var(--ink); }
+footer .grow { margin-right: auto; display: flex; align-items: center; gap: 10px; }
+
+/* reveal */
+.rv { opacity: 0; transform: translateY(16px); transition: opacity .7s ease, transform .7s ease; }
+.rv.in { opacity: 1; transform: none; }
+@media (prefers-reduced-motion: reduce) { .rv { opacity: 1; transform: none; transition: none; } html { scroll-behavior: auto; } }
+.no-js .rv { opacity: 1; transform: none; }
+
+/* responsive */
+@media (max-width: 1000px) {
+  .pipe { grid-template-columns: 1fr 1fr; }
+  .step { border-bottom: 1px solid var(--line); }
+  .step:nth-child(2n) { border-right: 0; }
+  .step:last-child { grid-column: 1 / -1; border-bottom: 0; }
+  .control { grid-template-columns: 1fr 1fr; }
+  .split, .split.flip { grid-template-columns: 1fr; gap: 40px; }
+  .split.flip .copy-col { order: 0; }
+  .reqs { grid-template-columns: 1fr 1fr; }
+  .reqs h4 { grid-column: 1 / -1; }
+}
+@media (max-width: 720px) {
+  .nav-links { display: none; }
+  .nav .gh-label { display: none; }
+  .hero { padding-top: 48px; }
+  .shot { margin-top: 40px; padding: 6px; border-radius: 16px; }
+  .shot-bar { display: none; }
+  .shot-frame { border-radius: 11px; aspect-ratio: 4 / 5; }
+  .pipe, .control, .install, .reqs { grid-template-columns: 1fr; }
+  .step { border-right: 0; }
+  .step:last-child { grid-column: auto; }
+  section.block { padding-top: 80px; }
+  .final { margin-top: 84px; padding: 56px 20px; border-radius: 22px; }
+  .cmd { width: 100%; }
+  .hero-cta .btn { width: 100%; }
+  .inst { padding: 22px 18px; }
+  .code { padding: 16px; }
+  .code pre { padding-right: 0; padding-top: 30px; }
+}
+</style>
+</head>
+<body class="no-js">
+
+<header class="nav" id="nav">
+  <div class="wrap">
+    <a class="brand" href="#top" aria-label="Jobfeed home">
+      <span class="mark" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="M19 6v14.5a4.5 4.5 0 0 1-4.5 4.5H11v-3.6h3.2a1.2 1.2 0 0 0 1.2-1.2V6H19z" fill="currentColor"/></svg></span>
+      jobfeed
+    </a>
+    <nav class="nav-links" aria-label="Sections">
+      <a href="#how" data-i18n="nav.how">How it works</a>
+      <a href="#applier" data-i18n="nav.applier">Applier</a>
+      <a href="#control" data-i18n="nav.control">Control</a>
+      <a href="#install" data-i18n="nav.install">Install</a>
+    </nav>
+    <div class="nav-right">
+      <div class="lang" role="group" aria-label="Language">
+        <button type="button" data-lang="en" aria-pressed="true">EN</button>
+        <button type="button" data-lang="zh-CN" aria-pressed="false">中文</button>
+      </div>
+      <a class="btn btn-ghost btn-sm" href="https://github.com/V1ctor2182/jobfeed">
+        <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        <span class="gh-label">GitHub</span>
+      </a>
+    </div>
+  </div>
+</header>
+
+<main id="top">
+
+  <!-- HERO -->
+  <section class="hero">
+    <div class="wrap">
+      <span class="eyebrow"><span class="dot"></span><span data-i18n="hero.eyebrow">Open source · local-first · MIT</span></span>
+      <h1 data-i18n="hero.title">Find the right jobs. Let Claude apply. <em>You press Submit.</em></h1>
+      <p class="lede" data-i18n="hero.lede">Jobfeed scans company career pages and job sites, scores every posting against your résumé, and hands the good ones to a Claude Applier that fills the form in a real browser — then waits for you.</p>
+      <div class="hero-cta">
+        <div class="cmd">
+          <span class="p">$</span>
+          <code>git clone https://github.com/V1ctor2182/jobfeed.git &amp;&amp; cd jobfeed &amp;&amp; ./setup.sh</code>
+          <button class="copy" type="button" data-copy="git clone https://github.com/V1ctor2182/jobfeed.git && cd jobfeed && ./setup.sh" aria-label="Copy install command"></button>
+        </div>
+        <a class="btn btn-ghost" href="#install" data-i18n="hero.secondary">Install guide</a>
+      </div>
+      <p class="hero-note" data-i18n="hero.note">macOS or Linux · opens a guided setup at 127.0.0.1:7654 · nothing scans until you start it</p>
+
+      <figure class="shot rv" style="margin-bottom:0">
+        <div class="shot-bar" aria-hidden="true"><i></i><i></i><i></i><span class="url">127.0.0.1:7654/dashboard</span></div>
+        <div class="shot-frame">
+          <img src="assets/dashboard.webp" width="1800" height="1728" alt="Jobfeed dashboard showing applied, discovered and evaluated counts, the application queue and a cumulative applied chart (synthetic data)" data-i18n-alt="hero.alt">
+        </div>
+      </figure>
+      <p class="caption" data-i18n="hero.caption">The dashboard, shown with synthetic data.</p>
+    </div>
+  </section>
+
+  <!-- SOURCES -->
+  <section class="sources">
+    <div class="wrap">
+      <p data-i18n="sources.title">Scans where the jobs are</p>
+      <div class="chips">
+        <span class="chip">Greenhouse</span><span class="chip">Lever</span><span class="chip">Ashby</span>
+        <span class="chip">Workday</span><span class="chip">iCIMS</span><span class="chip">SmartRecruiters</span>
+        <span class="chip">LinkedIn</span><span class="chip">Indeed</span><span class="chip">Jobright</span>
+        <span class="chip">Handshake</span><span class="chip" data-i18n="sources.curated">Curated lists</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- HOW -->
+  <section class="block" id="how">
+    <div class="wrap">
+      <p class="kicker">scan → filter → evaluate → apply → track</p>
+      <h2 class="rv" data-i18n="how.title">One loop, from a blank search to a submitted application.</h2>
+      <p class="sub rv" data-i18n="how.sub">Two parts that run side by side on your machine: Jobfeed finds and ranks the work, the Applier pipeline does the typing.</p>
+      <div class="pipe rv">
+        <div class="step">
+          <div class="n"><b></b>01</div>
+          <h3 data-i18n="s1.t">Scan</h3>
+          <p data-i18n="s1.d">Company career boards, job sites and curated lists, on demand or on a daily timer.</p>
+        </div>
+        <div class="step">
+          <div class="n"><b></b>02</div>
+          <h3 data-i18n="s2.t">Filter</h3>
+          <p data-i18n="s2.d">Local rules drop duplicates, spam and roles you'd never take before any model sees them.</p>
+        </div>
+        <div class="step">
+          <div class="n"><b></b>03</div>
+          <h3 data-i18n="s3.t">Evaluate</h3>
+          <p data-i18n="s3.d">An LLM gives each job a quick score, then a detailed fit review against your résumé.</p>
+        </div>
+        <div class="step">
+          <div class="n"><b></b>04</div>
+          <h3 data-i18n="s4.t">Apply</h3>
+          <p data-i18n="s4.d">One Claude Code Applier per job, in a real Chromium, using one of your own PDF résumés.</p>
+        </div>
+        <div class="step">
+          <div class="n"><b></b>05</div>
+          <h3 data-i18n="s5.t">Track</h3>
+          <p data-i18n="s5.d">Every application, answer, run and dollar of model cost lands back in the dashboard.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- EVIDENCE -->
+  <section class="block">
+    <div class="wrap split">
+      <div class="copy-col">
+        <p class="kicker" data-i18n="ev.k">Evaluate</p>
+        <h2 class="rv" data-i18n="ev.title">Scores you can argue with.</h2>
+        <p class="sub rv" data-i18n="ev.sub">A number alone tells you nothing. Every evaluated job comes with the reasoning behind it, so you decide in seconds — and can see when the model is wrong.</p>
+        <ul class="list rv">
+          <li><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg></span><div><strong data-i18n="ev.l1t">Quick score, then a detailed fit</strong><span data-i18n="ev.l1d">A cheap first pass ranks everything; only the promising jobs get the full review.</span></div></li>
+          <li><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg></span><div><strong data-i18n="ev.l2t">Strengths and gaps, with evidence</strong><span data-i18n="ev.l2d">What in your résumé matches the posting, what's missing, and how much it matters.</span></div></li>
+          <li><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V10"/><path d="M18 20V4"/><path d="M6 20v-4"/></svg></span><div><strong data-i18n="ev.l3t">A clear verdict</strong><span data-i18n="ev.l3d">Apply, consider or skip — and the dashboard shows what every evaluation run cost.</span></div></li>
+        </ul>
+      </div>
+      <div class="card img fit rv">
+        <div class="inner"><img src="assets/fit-review.webp" width="1640" height="1898" alt="Job scores and evidence panel: quick score 83, detailed fit score 86, strengths and gaps for a backend role (synthetic data)" data-i18n-alt="ev.alt"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- APPLIER -->
+  <section class="block" id="applier">
+    <div class="wrap split flip">
+      <div class="copy-col">
+        <p class="kicker" data-i18n="ap.k">Apply</p>
+        <h2 class="rv" data-i18n="ap.title">An Applier that asks instead of guessing.</h2>
+        <p class="sub rv" data-i18n="ap.sub">Each Applier is a Claude Code agent with its own browser. It fills the form the way you would, and when it needs a fact it doesn't have, it asks you on Discord.</p>
+        <ul class="list rv">
+          <li><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg></span><div><strong data-i18n="ap.l1t">Your résumés, untouched</strong><span data-i18n="ap.l1d">It picks the best fit from the PDFs you approved. It never rewrites them.</span></div></li>
+          <li><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></span><div><strong data-i18n="ap.l2t">An answer bank that learns</strong><span data-i18n="ap.l2d">Each answer you give is saved and reused, so you answer “sponsorship?” once, not fifty times.</span></div></li>
+          <li><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg></span><div><strong data-i18n="ap.l3t">A trace of every step</strong><span data-i18n="ap.l3d">Applier trace shows each model call, browser action and wait, so a failed run is never a mystery.</span></div></li>
+        </ul>
+      </div>
+      <div class="card rv" aria-label="Example Discord thread">
+        <div class="thread">
+          <div class="thread-head"><span class="hash">#</span><strong>northwind-labs · senior-backend</strong><small>discord</small></div>
+          <div class="msg">
+            <div class="av bot">A</div>
+            <div>
+              <div class="meta"><b>Applier</b><span class="tag">BOT</span><span data-i18n="d.t1">today 14:02</span></div>
+              <p data-i18n="d.m1">Filled 14 of 15 fields with <code>backend-2026.pdf</code>. One question the profile doesn't answer:</p>
+              <div class="box" data-i18n="d.q">Will you now or in the future require visa sponsorship?</div>
+            </div>
+          </div>
+          <div class="msg">
+            <div class="av me">Y</div>
+            <div>
+              <div class="meta"><b data-i18n="d.you">You</b><span data-i18n="d.t2">today 14:05</span></div>
+              <p data-i18n="d.m2">No. Save that for next time.</p>
+            </div>
+          </div>
+          <div class="msg">
+            <div class="av bot">A</div>
+            <div>
+              <div class="meta"><b>Applier</b><span class="tag">BOT</span><span data-i18n="d.t3">today 14:06</span></div>
+              <p data-i18n="d.m3">Saved to the answer bank. Review summary ready:</p>
+              <div class="box">
+                <div><span data-i18n="d.r1">Résumé</span><span>backend-2026.pdf</span></div>
+                <div><span data-i18n="d.r2">Fields filled</span><span>15 / 15</span></div>
+                <div><span data-i18n="d.r3">Warnings</span><span>0</span></div>
+              </div>
+              <p data-i18n="d.m4">Reply <code>submit</code> to send it.</p>
+            </div>
+          </div>
+          <div class="msg">
+            <div class="av me">Y</div>
+            <div>
+              <div class="meta"><b data-i18n="d.you">You</b><span data-i18n="d.t4">today 14:09</span></div>
+              <p><code class="submit">submit</code></p>
+            </div>
+          </div>
+        </div>
+        <div class="ex" data-i18n="d.ex">Illustrative example.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- CONTROL -->
+  <section class="block" id="control">
+    <div class="wrap">
+      <p class="kicker" data-i18n="c.k">You stay in control</p>
+      <h2 class="rv" data-i18n="c.title">Automation up to the line. The line is yours.</h2>
+      <p class="sub rv" data-i18n="c.sub">Jobfeed is built so the agent can do nearly everything — except the one click that matters, unless you say otherwise.</p>
+      <div class="control">
+        <div class="ctl rv">
+          <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></div>
+          <h3 data-i18n="c1.t">Submit waits for you</h3>
+          <p data-i18n="c1.d">By default, nothing is sent until you press Submit on the dashboard or reply <code>submit</code> in the job's Discord thread.</p>
+        </div>
+        <div class="ctl rv">
+          <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><path d="M12 2v10"/></svg></div>
+          <h3 data-i18n="c2.t">Autopilot is opt-in</h3>
+          <p data-i18n="c2.d">Auto submit and autopilot stay off until you turn them on. CAPTCHAs, open questions and warnings still wait for you.</p>
+        </div>
+        <div class="ctl rv">
+          <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></div>
+          <h3 data-i18n="c3.t">Setup starts nothing</h3>
+          <p data-i18n="c3.d">Installing, running tests and opening the dashboard never start a worker, a browser session or an application.</p>
+        </div>
+        <div class="ctl rv">
+          <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg></div>
+          <h3 data-i18n="c4.t">Your data stays home</h3>
+          <p data-i18n="c4.d">Résumés, profile, answers, credentials and databases live on your machine and are ignored by Git.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- INSIGHTS -->
+  <section class="block">
+    <div class="wrap">
+      <p class="kicker" data-i18n="i.k">Track</p>
+      <h2 class="rv" data-i18n="i.title">See the whole funnel, not just a spreadsheet.</h2>
+      <p class="sub rv" data-i18n="i.sub">How many jobs you found, how many passed, what the model recommended and what you applied to — over any window you choose.</p>
+      <div class="pills rv">
+        <span data-i18n="i.p1">Dashboard</span><span data-i18n="i.p2">Review</span><span data-i18n="i.p3">Tracker</span><span data-i18n="i.p4">Answer Bank</span><span data-i18n="i.p5">Insights</span><span data-i18n="i.p6">Applier trace</span><span data-i18n="i.p7">Apply health</span><span data-i18n="i.p8">Performance</span>
+      </div>
+      <figure class="shot wide rv" style="margin-inline:0;max-width:none">
+        <div class="shot-bar" aria-hidden="true"><i></i><i></i><i></i><span class="url">127.0.0.1:7654/insights</span></div>
+        <div class="shot-frame" style="aspect-ratio:1800/1102">
+          <img src="assets/insights.webp" width="1800" height="1102" alt="Insights page: key numbers, evaluation coverage bars and user decisions chart (synthetic data)" data-i18n-alt="i.alt">
+        </div>
+      </figure>
+    </div>
+  </section>
+
+  <!-- INSTALL -->
+  <section class="block" id="install">
+    <div class="wrap">
+      <p class="kicker" data-i18n="in.k">Install</p>
+      <h2 class="rv" data-i18n="in.title">Running in one command. Or ask your agent.</h2>
+      <p class="sub rv" data-i18n="in.sub">Start on your laptop to find and score jobs. Move to an always-on box when you want the daily loop.</p>
+      <div class="install">
+        <div class="inst rv">
+          <span class="label" data-i18n="in.a.l">On your machine</span>
+          <h3 data-i18n="in.a.t">Find and score jobs</h3>
+          <p data-i18n="in.a.d">Installs the runtime, starts Jobfeed at 127.0.0.1:7654 and walks you through connecting a model, uploading your résumé and picking searches.</p>
+          <div class="code">
+            <button class="copy" type="button" data-copy-from="c1" aria-label="Copy"></button>
+<pre id="c1"><span class="p">$ </span>git clone https://github.com/V1ctor2182/jobfeed.git
+<span class="p">$ </span>cd jobfeed
+<span class="p">$ </span>./setup.sh</pre>
+          </div>
+        </div>
+        <div class="inst rv">
+          <span class="label" data-i18n="in.b.l">On a server, with a coding agent</span>
+          <h3 data-i18n="in.b.t">Hand it to Claude Code or Codex</h3>
+          <p data-i18n="in.b.d">Paste this into an agent that can run commands on your VPS or Mac mini. It installs the service, sets things up with you in chat and tests it all before handing over.</p>
+          <div class="code">
+            <button class="copy" type="button" data-copy-from="c2" aria-label="Copy"></button>
+<pre id="c2">Set up Jobfeed on my server as a background service.
+Read https://raw.githubusercontent.com/V1ctor2182/jobfeed/main/docs/server-install.md
+and follow it exactly, including how it says to talk to me: short, structured
+messages and numbered choices. If you aren't running on my server, ask me how
+to reach it. Ask me before using sudo, don't start any scan, and test
+everything before you hand over.</pre>
+          </div>
+        </div>
+      </div>
+      <div class="reqs rv">
+        <h4 data-i18n="in.r.t">Adding the Applier?<small data-i18n="in.r.s">Three more things on the same machine.</small></h4>
+        <div><b>Claude Code CLI</b><span data-i18n="in.r1">Installed and signed in.</span></div>
+        <div><b>Chromium</b><span data-i18n="in.r2">A separate browser profile just for Appliers.</span></div>
+        <div><b data-i18n="in.r3t">A Discord bot</b><span data-i18n="in.r3">In your own server, so Appliers can ask you questions.</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- FINAL CTA -->
+  <section class="wrap">
+    <div class="final rv">
+      <h2 data-i18n="f.title">Spend your time on interviews, not forms.</h2>
+      <p data-i18n="f.sub">Jobfeed is free and open source under the MIT License.</p>
+      <div class="hero-cta" style="margin-top:0">
+        <a class="btn btn-primary" href="https://github.com/V1ctor2182/jobfeed" data-i18n="f.b1">Get it on GitHub</a>
+        <a class="btn btn-ghost" href="https://github.com/V1ctor2182/jobfeed/blob/main/jobfeed/README.md" data-i18n="f.b2">Read the guide</a>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span class="grow">
+      <span class="mark" aria-hidden="true" style="width:22px;height:22px;border-radius:6px"><svg viewBox="0 0 32 32" style="width:13px;height:13px"><path d="M19 6v14.5a4.5 4.5 0 0 1-4.5 4.5H11v-3.6h3.2a1.2 1.2 0 0 0 1.2-1.2V6H19z" fill="currentColor"/></svg></span>
+      <span data-i18n="ft.ack">Originally created by <a href="https://github.com/wenqiw777/jobfeed">wenqiw777</a>, published with permission.</span>
+    </span>
+    <a href="https://github.com/V1ctor2182/jobfeed">GitHub</a>
+    <a href="https://github.com/V1ctor2182/jobfeed/blob/main/README.zh-CN.md" data-i18n="ft.zh">中文文档</a>
+    <a href="https://github.com/V1ctor2182/jobfeed/blob/main/LICENSE">MIT License</a>
+  </div>
+</footer>
+
+<script>
+(function () {
+  document.body.classList.remove("no-js");
+
+  var ZH = {
+    "nav.how": "工作流程", "nav.applier": "Applier", "nav.control": "掌控权", "nav.install": "安装",
+    "hero.eyebrow": "开源 · 本地优先 · MIT",
+    "hero.title": "找对岗位，交给 Claude 投递，<em>提交键仍由你按。</em>",
+    "hero.lede": "Jobfeed 扫描公司招聘页和求职网站，对照你的简历给每个岗位打分，再把合适的交给 Claude Applier 在真实浏览器里填好申请表——然后等你点头。",
+    "hero.secondary": "安装指南",
+    "hero.note": "macOS 或 Linux · 在 127.0.0.1:7654 打开引导式设置 · 你不点开始，就不会扫描",
+    "hero.caption": "Dashboard 总览（演示数据）。",
+    "hero.alt": "Jobfeed Dashboard：已投递、已发现、已评估数量、投递队列和累计投递曲线（演示数据）",
+    "sources.title": "去岗位所在的地方扫描", "sources.curated": "精选岗位列表",
+    "how.title": "一个闭环：从空白搜索到提交申请。",
+    "how.sub": "两个部分并排跑在你的电脑上：Jobfeed 负责找岗位、排优先级，Applier 流水线负责填表。",
+    "s1.t": "扫描", "s1.d": "公司招聘页、求职网站和精选列表，可以手动触发，也可以每天定时跑。",
+    "s2.t": "过滤", "s2.d": "在任何模型介入之前，本地规则先去掉重复、垃圾岗位和你绝不会投的职位。",
+    "s3.t": "评估", "s3.d": "LLM 先给每个岗位一个快速分，再对照你的简历做详细匹配审阅。",
+    "s4.t": "投递", "s4.d": "每个岗位一个 Claude Code Applier，在真实的 Chromium 里，用你自己的 PDF 简历。",
+    "s5.t": "跟踪", "s5.d": "每一份申请、每个回答、每次运行和每一分模型花费，都记回 Dashboard。",
+    "ev.k": "评估", "ev.title": "每个分数都有理有据。",
+    "ev.sub": "光有一个数字没有意义。每个评估过的岗位都附带打分理由，你几秒就能做决定，也能一眼看出模型哪里判断错了。",
+    "ev.l1t": "先快速打分，再详细匹配", "ev.l1d": "便宜的第一轮给所有岗位排序，只有有希望的岗位才进入完整审阅。",
+    "ev.l2t": "优势与差距，附带依据", "ev.l2d": "简历里哪些经历对得上，缺了什么，影响有多大。",
+    "ev.l3t": "明确的结论", "ev.l3d": "投、可以考虑、跳过——每次评估花了多少钱，Dashboard 上都看得见。",
+    "ev.alt": "岗位评分与依据面板：快速分 83、详细匹配分 86，以及后端岗位的优势和差距（演示数据）",
+    "ap.k": "投递", "ap.title": "不会乱猜、会先问你的 Applier。",
+    "ap.sub": "每个 Applier 都是一个拥有独立浏览器的 Claude Code 智能体。它像你一样填表；遇到不知道的信息，就在 Discord 上问你。",
+    "ap.l1t": "简历原样使用", "ap.l1d": "从你允许的 PDF 里挑最合适的一份，绝不改写。",
+    "ap.l2t": "会成长的答案库", "ap.l2d": "你回答过的问题都会被保存复用——“需要签证担保吗？”只用回答一次，而不是五十次。",
+    "ap.l3t": "每一步都有记录", "ap.l3d": "Applier trace 记下每次模型调用、浏览器操作和等待，失败了也知道为什么。",
+    "d.t1": "今天 14:02", "d.t2": "今天 14:05", "d.t3": "今天 14:06", "d.t4": "今天 14:09", "d.you": "你",
+    "d.m1": "已用 <code>backend-2026.pdf</code> 填好 15 个字段中的 14 个。有一个问题你的资料里没有答案：",
+    "d.q": "你现在或将来是否需要签证担保？",
+    "d.m2": "不需要。下次也这么填。",
+    "d.m3": "已存入答案库。审阅摘要已就绪：",
+    "d.r1": "简历", "d.r2": "已填字段", "d.r3": "警告",
+    "d.m4": "回复 <code>submit</code> 即可提交。",
+    "d.ex": "示意图。",
+    "c.k": "一切由你掌控", "c.title": "自动化到最后一步为止，最后一步属于你。",
+    "c.sub": "Jobfeed 让智能体几乎什么都能做——除了最关键的那一下点击，除非你自己授权。",
+    "c1.t": "Submit 一定等你", "c1.d": "默认情况下，你在 Dashboard 点 Submit，或在该岗位的 Discord 线程里回复 <code>submit</code>，才会真正提交。",
+    "c2.t": "Autopilot 需要你主动开启", "c2.d": "自动提交和 autopilot 默认关闭。遇到验证码、未回答的问题或警告，仍然会等你。",
+    "c3.t": "安装不会启动任何东西", "c3.d": "安装、运行测试、打开 Dashboard，都不会启动 worker、浏览器会话或任何投递。",
+    "c4.t": "数据留在你的电脑上", "c4.d": "简历、个人资料、答案、凭据和数据库都只存在本地，并且被 Git 忽略。",
+    "i.k": "跟踪", "i.title": "看清整个漏斗，而不只是一张表格。",
+    "i.sub": "发现了多少岗位、通过了多少、模型推荐了哪些、你投了哪些——任意时间范围都能看。",
+    "i.p1": "总览", "i.p2": "审阅", "i.p3": "投递跟踪", "i.p4": "答案库", "i.p5": "数据洞察", "i.p6": "Applier 追踪", "i.p7": "投递健康度", "i.p8": "性能",
+    "i.alt": "数据洞察页：关键数字、评估覆盖率和用户决策图表（演示数据）",
+    "in.k": "安装", "in.title": "一条命令跑起来，或者交给你的智能体。",
+    "in.sub": "先在自己电脑上找岗位、打分；想要每天自动跑，再搬到一台常开的机器上。",
+    "in.a.l": "在你的电脑上", "in.a.t": "找岗位、打分",
+    "in.a.d": "安装运行环境，在 127.0.0.1:7654 启动 Jobfeed，引导你连接模型、上传简历、选择搜索条件。",
+    "in.b.l": "在服务器上，交给编程智能体", "in.b.t": "交给 Claude Code 或 Codex",
+    "in.b.d": "把下面这段粘贴给能在你的 VPS 或 Mac mini 上执行命令的智能体。它会装好后台服务，在对话里和你一起完成设置，并在交付前测试全部功能。",
+    "in.r.t": "要加上 Applier？", "in.r.s": "同一台电脑上还需要三样东西。",
+    "in.r1": "已安装并登录。", "in.r2": "给 Applier 专用的独立浏览器配置。",
+    "in.r3t": "一个 Discord bot", "in.r3": "放在你自己的服务器里，让 Applier 能向你提问。",
+    "f.title": "把时间花在面试上，而不是填表。",
+    "f.sub": "Jobfeed 免费开源，采用 MIT 许可证。",
+    "f.b1": "去 GitHub 获取", "f.b2": "阅读使用指南",
+    "ft.ack": "最初由 <a href=\"https://github.com/wenqiw777/jobfeed\">wenqiw777</a> 创建，经其同意在此发布。",
+    "ft.zh": "中文文档"
+  };
+
+  var nodes = document.querySelectorAll("[data-i18n]");
+  var altNodes = document.querySelectorAll("[data-i18n-alt]");
+  var EN = {};
+  nodes.forEach(function (n) { EN[n.dataset.i18n] = n.innerHTML; });
+  altNodes.forEach(function (n) { EN["alt:" + n.dataset.i18nAlt] = n.alt; });
+  var titleEN = document.title;
+
+  function setLang(lang) {
+    var zh = lang === "zh-CN";
+    nodes.forEach(function (n) {
+      var k = n.dataset.i18n;
+      var v = zh ? ZH[k] : EN[k];
+      if (v != null) n.innerHTML = v;
+    });
+    altNodes.forEach(function (n) {
+      var k = n.dataset.i18nAlt;
+      var v = zh ? ZH[k] : EN["alt:" + k];
+      if (v != null) n.alt = v;
+    });
+    document.documentElement.lang = zh ? "zh-CN" : "en";
+    document.title = zh ? "Jobfeed — 找岗位、打分、交给 Claude 投递" : titleEN;
+    document.querySelectorAll(".lang button").forEach(function (b) {
+      b.setAttribute("aria-pressed", String(b.dataset.lang === lang));
+    });
+    try { localStorage.setItem("jobfeed-lang", lang); } catch (e) {}
+  }
+
+  var saved = null;
+  try { saved = localStorage.getItem("jobfeed-lang"); } catch (e) {}
+  var param = new URLSearchParams(location.search).get("lang");
+  var initial = param === "zh" || param === "zh-CN" ? "zh-CN"
+    : param === "en" ? "en"
+    : saved || ((navigator.language || "").toLowerCase().indexOf("zh") === 0 ? "zh-CN" : "en");
+  if (initial !== "en") setLang(initial);
+
+  document.querySelectorAll(".lang button").forEach(function (b) {
+    b.addEventListener("click", function () { setLang(b.dataset.lang); });
+  });
+
+  // copy buttons
+  var COPY = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+  var DONE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
+  document.querySelectorAll(".copy").forEach(function (btn) {
+    btn.innerHTML = COPY;
+    btn.addEventListener("click", function () {
+      var text = btn.dataset.copy;
+      if (!text) {
+        var src = document.getElementById(btn.dataset.copyFrom);
+        text = Array.from(src.childNodes).filter(function (n) {
+          return !(n.nodeType === 1 && n.classList.contains("p"));
+        }).map(function (n) { return n.textContent; }).join("");
+      }
+      var done = function () { btn.innerHTML = DONE; setTimeout(function () { btn.innerHTML = COPY; }, 1400); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done, function () {});
+      }
+    });
+  });
+
+  // nav border on scroll
+  var nav = document.getElementById("nav");
+  var onScroll = function () { nav.classList.toggle("scrolled", window.scrollY > 8); };
+  window.addEventListener("scroll", onScroll, { passive: true }); onScroll();
+
+  // reveal on scroll
+  var els = document.querySelectorAll(".rv");
+  if ("IntersectionObserver" in window) {
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (e) { if (e.isIntersecting) { e.target.classList.add("in"); io.unobserve(e.target); } });
+    }, { rootMargin: "0px 0px -8% 0px", threshold: 0.08 });
+    els.forEach(function (el) { io.observe(el); });
+  } else {
+    els.forEach(function (el) { el.classList.add("in"); });
+  }
+})();
+</script>
+</body>
+</html>
