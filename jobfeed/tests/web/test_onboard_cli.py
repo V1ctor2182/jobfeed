@@ -198,7 +198,7 @@ def test_shell_proxy_settings_do_not_reach_loopback_calls(
     monkeypatch.setenv("ALL_PROXY", "socks5h://127.0.0.1:1080")
     monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:3128")
     monkeypatch.setattr(onboard_module, "_client_factory", httpx.Client)
-    with onboard_module._open_http("http://127.0.0.1:7654") as client:
+    with onboard_module.open_dashboard("http://127.0.0.1:7654") as client:
         assert client.trust_env is False
 
 

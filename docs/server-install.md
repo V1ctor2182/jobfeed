@@ -593,63 +593,48 @@ it, and `--add` tracks all of it.
 
 ## 8. Test the setup
 
-Do not hand over until every check below passes. Send "⏳ Step 8/9 · Testing
-everything." first. Fix each failure and run its check again. If something
-cannot be fixed, say so in the hand-over with what it means for them.
+Do not hand over until the test passes. Send "⏳ Step 8/9 · Testing
+everything." first.
 
-1. **Survives a restart.** Restart the service and wait for it:
+1. **Restart test.** Restart the service and wait for it, so you know it comes
+   back on its own:
 
    ```sh
    systemctl --user restart jobfeed-dashboard.service   # macOS: launchctl kickstart -k "gui/$(id -u)/com.jobfeed.dashboard"
    for i in $(seq 30); do curl -fsS http://127.0.0.1:7654/api/health >/dev/null 2>&1 && break; sleep 1; done
-   curl -fsS http://127.0.0.1:7654/api/health
-   systemctl --user is-enabled jobfeed-dashboard.service
-   loginctl show-user "$USER" -p Linger
    ```
 
-   Pass: health is `ok`, the service is `enabled`, and `Linger=yes`.
-2. **Setup is complete.** `"$JF" onboard check` tests the dashboard, every setup
-   step, the saved AI provider and models, the résumé, the job sources, the scan
-   API and, when a signed-in site is on, the Chrome extension. It exits 1 if any
-   check fails. Right after the restart the extension needs up to 30 seconds to
-   reconnect, so run it again once if only that check fails.
-3. **The AI works from the service.** With a subscription, run one tiny request
-   with the service's own `PATH`, so a missing CLI or an expired sign-in shows
-   up now and not at the first scan:
+2. **Doctor.** Run the full check. It is read-only and starts no scan:
 
    ```sh
-   SERVICE_PATH="$(systemctl --user show jobfeed-dashboard.service -p Environment | sed -n 's/.*PATH=\([^ ]*\).*/\1/p')"
-   env -i HOME="$HOME" PATH="$SERVICE_PATH" claude -p "Reply with OK" --model haiku   # codex: codex exec "Reply with OK"
+   cd "$JOBFEED_HOME/jobfeed" && "$JF" doctor --json
    ```
 
-   Pass: it prints OK. On macOS, use the `SERVICE_PATH` from the plist.
-4. **The daily scan can run** (if it is on):
+   It checks the dashboard, the background service (running, starts after a
+   reboot, keeps running after logout), every setup step, the AI provider and
+   models, the résumé, the job sources, the scan API, one tiny AI request made
+   with the service's own `PATH`, the last scan and evaluation, the daily scan
+   (scheduled, last run not failed), the Chrome extension when a signed-in site
+   is on, the private link (must answer 401 without the code), free disk, and
+   that the database, résumé and settings stay out of git. Each check is `ok`,
+   `warn`, `fail` or `off` (not set up), with a `fix` hint. It exits 1 when any
+   check fails.
 
-   ```sh
-   cd "$JOBFEED_HOME/jobfeed" && JOBFEED_API_URL=http://127.0.0.1:7654 .venv/bin/python scripts/jobfeed_scheduled_cycle.py --check
-   systemctl --user list-timers jobfeed-daily-scan.timer
-   ```
+   Fix every `fail` and run it again. Right after the restart, the Chrome
+   extension needs up to 30 seconds to reconnect, so if only that check fails,
+   wait and rerun. If something cannot be fixed, say so in the hand-over with
+   what it means for them. Pass on each `warn` in one plain sentence.
 
-   Pass: the first prints JSON with `"active"` and starts nothing, and the timer
-   shows the next run at the right hour.
-5. **The private link asks for the code** (if it is on): with the link from
-   `remote-access status`,
-   `curl -s -o /dev/null -w "%{http_code}\n" "<link>/api/health"` prints `401`.
-   If it prints `200`, stop the tunnel at once and tell the user.
-6. **Nothing private is tracked:**
-   `git -C "$JOBFEED_HOME" status --short` prints nothing, and
-   `git -C "$JOBFEED_HOME" check-ignore -q jobfeed/data/jobfeed.sqlite && echo ignored`
-   prints `ignored`.
-
-Report the results as one message:
+Report the result as one message, one line per check that is not `off`, in
+plain words:
 
 ```
-✅ Step 8/9 · All 6 checks passed
-✅ Keeps running and restarts by itself
+✅ Step 8/9 · All checks passed
+✅ Keeps running and starts again by itself
 ✅ Setup complete: Claude (quick: …, detailed: …), résumé, 6 searches
 ✅ AI answers from the background service
-✅ Daily scan ready, next run Fri 08:00 (Shanghai time)
-➖ Private link: not set up
+✅ Daily scan: next run Fri 08:00 (Shanghai time)
+✅ 21 GB free disk
 ✅ Your résumé and data stay private
 ```
 
@@ -684,11 +669,12 @@ Open it: <how, in one or two lines>
 Finds jobs: every day at 08:00 (<their time zone>) · LinkedIn, Indeed, <n> companies, Handshake
 AI: Claude subscription · up to <N> new jobs per run
 Not included: applying to jobs and reading application email
-Tests: 6/6 passed
+Tests: all passed
 
 Next: open the dashboard, go to **Scanner runs** and press **Start scan**, or wait for the daily scan.
 
 Later, ask any coding agent:
+• "Check my Jobfeed"
 • "Update Jobfeed"
 • "Change my Jobfeed searches"
 • "What's my Jobfeed link?"
@@ -703,6 +689,8 @@ Finish with one short **Technical details** block for whoever helps them later:
 the checkout path, the service names, and these commands (Linux):
 
 ```sh
+# check that everything works (read-only)
+cd "$JOBFEED_HOME/jobfeed" && .venv/bin/jobfeed doctor
 # update
 git -C "$JOBFEED_HOME" pull --ff-only && (cd "$JOBFEED_HOME/jobfeed" && ~/.local/bin/uv sync --locked --no-dev --python 3.12) && systemctl --user restart jobfeed-dashboard
 # stop the background services (keeps all data)

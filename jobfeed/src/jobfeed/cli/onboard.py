@@ -109,7 +109,16 @@ _client_factory: Callable[..., httpx.Client] = httpx.Client
 
 
 @contextmanager
-def _open_http(url: str) -> Iterator[httpx.Client]:
+def open_dashboard(url: str) -> Iterator[httpx.Client]:
+    """Open a client for the dashboard on this machine.
+
+    Args:
+        url: Dashboard origin.
+
+    Returns:
+        Context manager for a client that sends the dashboard's own origin and
+        no proxy settings.
+    """
     # Profile writes only accept the dashboard's own origin. This command runs
     # on the same machine as the dashboard, so it sends that origin, and it
     # ignores the shell's proxy settings, which must not route loopback calls.
@@ -146,7 +155,7 @@ def onboard(ctx: click.Context, url: str) -> None:
         ctx: Click invocation context.
         url: Dashboard origin.
     """
-    client = ctx.with_resource(_open_http(url.rstrip("/")))
+    client = ctx.with_resource(open_dashboard(url.rstrip("/")))
     ctx.obj = Dashboard(client)
 
 
@@ -693,13 +702,21 @@ def check(ctx: click.Context) -> None:
     Raises:
         SystemExit: With status 1 when a check fails.
     """
-    results = _checks(_dashboard(ctx))
+    results = setup_checks(_dashboard(ctx))
     _emit({"ok": all(row["ok"] for row in results), "checks": results})
     if not all(row["ok"] for row in results):
         raise SystemExit(1)
 
 
-def _checks(dashboard: Dashboard) -> list[Json]:
+def setup_checks(dashboard: Dashboard) -> list[Json]:
+    """Return one row per setup check: its name, whether it passed, and why.
+
+    Args:
+        dashboard: Client for the running dashboard.
+
+    Returns:
+        Rows with ``check``, ``ok`` and ``detail``.
+    """
     results: list[Json] = []
 
     def add(name: str, ok: bool, detail: str) -> None:
@@ -727,9 +744,11 @@ def _checks(dashboard: Dashboard) -> list[Json]:
             and provider["detailed_model"]
         ),
         f"{provider['name']}: quick {provider['quick_model']}, "
-        f"detailed {provider['detailed_model']}",
+        f"detailed {provider['detailed_model']}"
+        if provider["name"]
+        else "not set up",
     )
-    add("résumé", state["resume"] is not None, str(state["resume"]))
+    add("résumé", state["resume"] is not None, state["resume"] or "not uploaded")
     searches = len(state["enabled_searches"])
     companies = state["tracked_companies"]
     add(
@@ -841,4 +860,4 @@ def finish(  # noqa: PLR0913 - one parameter per Click option
     _emit({"saved": bool(saved.get("configured")), "plan": plan})
 
 
-__all__ = ["onboard"]
+__all__ = ["DEFAULT_URL", "Dashboard", "onboard", "open_dashboard", "setup_checks"]

@@ -284,6 +284,7 @@ from jobfeed.cli.companies import companies  # noqa: E402
 from jobfeed.cli.dev import dev  # noqa: E402
 from jobfeed.cli.digest import digest  # noqa: E402
 from jobfeed.cli.discover import discover_companies  # noqa: E402
+from jobfeed.cli.doctor import doctor  # noqa: E402
 from jobfeed.cli.enrich import enrich_linkedin_guest, enrich_paste  # noqa: E402
 from jobfeed.cli.evaluate import evaluate  # noqa: E402
 from jobfeed.cli.interview import interview  # noqa: E402
@@ -323,6 +324,7 @@ cli.add_command(discover_companies)
 cli.add_command(serve)
 cli.add_command(onboard)
 cli.add_command(remote_access)
+cli.add_command(doctor)
 
 
 __all__ = [

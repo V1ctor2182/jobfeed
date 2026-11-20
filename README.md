@@ -86,7 +86,8 @@ The agent checks the server, installs the dashboard as a service, and walks you
 through setup in the chat: AI sign-in, résumé, job profile, searches and
 limits. It offers optional extras (a daily scan, Handshake and signed-in
 LinkedIn, a private link for your phone, company career pages), tests the whole
-setup, and tells you how to open the dashboard. The steps are in
+setup, and tells you how to open the dashboard. Later, `jobfeed doctor` checks
+that everything still works. The steps are in
 [`docs/server-install.md`](docs/server-install.md) if you prefer to run them
 yourself.
 
