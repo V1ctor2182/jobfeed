@@ -43,10 +43,16 @@ desktop browser and Discord and is covered in the main README.
 Work out where you are running and where Jobfeed should go:
 
 - **You run on the server.** Run the commands below directly.
-- **You run elsewhere** (the user's laptop, a hosted agent). Use whatever you
-  have that runs commands on the server: a remote-shell or machine tool you were
-  given, or `ssh <host>`. If it is not obvious which machine the user means, ask.
-  Run every command below there, not on your own machine.
+- **You run elsewhere** (the user's laptop, a cloud or hosted agent). Use
+  whatever you have that runs commands on the server: a remote-shell or machine
+  tool you were given (for example, a connector that controls the user's cloud
+  computer), or `ssh <host>`. If it is not obvious which machine the user means,
+  ask. Run every command below there, not on your own machine.
+
+If you are a cloud agent, the machine your own shell runs on is a temporary
+sandbox that disappears after this session. Never install Jobfeed there, even if
+it looks like a normal Linux server. If you have no tool that reaches the user's
+server, say so and ask how to reach it.
 
 Check `uname -s`, `hostname` and `whoami` on the server and tell the user which
 machine you are about to change.
