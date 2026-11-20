@@ -301,3 +301,66 @@ def test_runs_report_failures_but_not_restarts() -> None:
     assert rows["Last scan"].status == "warn"
     assert rows["Last evaluation"].status == "fail"
     assert "not signed in" in rows["Last evaluation"].detail
+
+
+class FakeDashboard:
+    """Answers the two reads the sign-in check makes."""
+
+    def __init__(self, runs: list[dict[str, Any]]) -> None:
+        self.runs = runs
+
+    def get(self, path: str) -> dict[str, Any]:
+        if path == "/api/config":
+            return {
+                "configured": True,
+                "sources": {
+                    "handshake": {"enabled": True},
+                    "linkedin_extension": {"enabled": True},
+                    "jobright": {"enabled": False},
+                },
+            }
+        return {"runs": self.runs}
+
+
+def _scan(**progress: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "source": "all",
+        "status": "failed",
+        "started_at": "2026-11-18T09:10:00+00:00",
+        "scan_progress": progress,
+        "scan_stats": {"linkedin-extension": {"discovered": 41}},
+    }
+
+
+@pytest.mark.parametrize(
+    ("message", "detail"),
+    [
+        ("HTTP 401", "signed out of Handshake"),
+        ("No authenticated job request observed. Sign in and retry.", "signed out"),
+        ("Jobright Chrome extension is not connected", "not connected"),
+        ("Discovery returned no result", "returned no jobs"),
+    ],
+)
+def test_each_signed_in_site_reports_its_last_scan(message: str, detail: str) -> None:
+    runs = [
+        _scan(
+            handshake={"phase": "failed", "message": message},
+            **{"linkedin-extension": {"phase": "completed"}},
+        )
+    ]
+    rows = {
+        row.check: row
+        for row in doctor_module.check_signed_in_sites(cast(Any, FakeDashboard(runs)))
+    }
+    assert rows["Handshake sign-in"].status == "fail"
+    assert detail in rows["Handshake sign-in"].detail
+    assert rows["LinkedIn sign-in"].status == "ok"
+    assert "41 jobs found" in rows["LinkedIn sign-in"].detail
+    assert "Jobright sign-in" not in rows
+    if "signed out" in detail:
+        assert "sign me in to Handshake again" in rows["Handshake sign-in"].fix
+
+
+def test_a_site_not_scanned_yet_is_not_a_failure() -> None:
+    rows = doctor_module.check_signed_in_sites(cast(Any, FakeDashboard([])))
+    assert {row.status for row in rows} == {"off"}

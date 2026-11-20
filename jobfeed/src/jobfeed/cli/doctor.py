@@ -21,7 +21,13 @@ import httpx
 
 from jobfeed.cli.onboard import DEFAULT_URL, Dashboard, open_dashboard
 from jobfeed.cli.remote_access import DEFAULT_TUNNEL_METRICS
-from jobfeed.doctor_app import check_ai, check_dashboard, check_runs, setup_rows
+from jobfeed.doctor_app import (
+    check_ai,
+    check_dashboard,
+    check_runs,
+    check_signed_in_sites,
+    setup_rows,
+)
 from jobfeed.doctor_host import Check, Host, Status
 from jobfeed.doctor_system import (
     check_daily_scan,
@@ -70,6 +76,7 @@ def run_checks(  # noqa: PLR0913 - every input is replaceable in tests
             rows.extend(setup_rows(dashboard))
             rows.append(check_ai(host, dashboard, skip=skip_ai))
             rows.extend(check_runs(dashboard, daily=daily.status != "off"))
+            rows.extend(check_signed_in_sites(dashboard))
     rows.append(daily)
     rows.append(check_private_link(host, root, metrics_url))
     rows.append(check_disk(host, root))
@@ -156,4 +163,11 @@ def doctor(
         raise SystemExit(1)
 
 
-__all__ = ["Check", "Host", "check_runs", "doctor", "run_checks"]
+__all__ = [
+    "Check",
+    "Host",
+    "check_runs",
+    "check_signed_in_sites",
+    "doctor",
+    "run_checks",
+]

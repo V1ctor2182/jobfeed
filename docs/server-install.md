@@ -393,9 +393,12 @@ Optional extras (reply with numbers, or "none"):
 4. Company career pages: I suggest companies that fit your profile
 ```
 
-Leave out 2 when the server has no desktop the user can see (it would need
-their own computer to stay on; offer it only if they ask). Set up what they
-chose in the order below, and ask only the follow-up questions each one needs.
+When the confirmed profile is a student, new graduate or intern, write 2 as
+"Handshake, where most student jobs are, and signed-in LinkedIn (recommended)",
+since Handshake shows nothing without a sign-in. Leave out 2 when the user
+cannot see the server's screen (see "Show the user the server's screen" below);
+offer the laptop route only if they ask. Set up what they chose in the order
+below, and ask only the follow-up questions each one needs.
 
 ### Daily scan
 
@@ -481,6 +484,18 @@ open (scans skip these sites while it is closed and still read the others) and
 that a scan opens a search tab in it for a few minutes. Never ask for, type, or
 store their passwords.
 
+**Show the user the server's screen.** They sign in by typing on the server's
+own screen, so they must be able to see it and type into it. Use the first that
+fits:
+
+- Your tool for the server can show its live screen (a cloud computer's live
+  view or "show screen" tool, made for sign-ins, two-step codes and CAPTCHAs):
+  open it and send the user its link.
+- A Mac mini: macOS Screen Sharing (System Settings › General › Sharing). Tell
+  them how to connect from their computer.
+- Neither: the user cannot sign in on the server. Say so in one line and skip
+  this extra, unless they want the laptop route below.
+
 If you can control the server's desktop (click, type, take screenshots), do
 items 1 to 3 yourself. Otherwise tell the user exactly what to click.
 
@@ -499,16 +514,46 @@ items 1 to 3 yourself. Otherwise tell the user exactly what to click.
    not `127.0.0.1`: the extension replaces `127.0.0.1:7654` with another
    address. `"$JF" onboard extension status` must show `"connected": true`.
 4. Open the sites they chose in that Chrome (`https://app.joinhandshake.com`,
-   `https://www.linkedin.com/login`, `https://jobright.ai`) and ask them to
-   sign in on the server's screen, including any code their school or LinkedIn
-   sends, and to reply "done" when they see their home page. Leave those tabs
-   open.
-5. Turn each chosen site on: `"$JF" onboard extension enable handshake`
+   `https://www.linkedin.com/login`, `https://jobright.ai`), one tab each, and
+   send:
+
+   ```
+   ⏳ Step 7/9 · Sign in to Handshake on your server
+   1. Open your server's screen: <link>
+   2. In the Chrome window there, sign in to Handshake, with any code your school sends
+   3. Reply "done" when you see your Handshake home page
+   ```
+
+   Never ask for, type, or store their password. Leave the tabs open.
+5. **Check that the sign-in worked** before you turn a site on. Look at each
+   tab yourself (a screenshot, or the tab's address):
+   - Handshake is signed in when the address is on `app.joinhandshake.com` but
+     not `/login`, and the page shows their name or job search.
+   - LinkedIn is signed in on `/feed` or `/jobs`; not on `/login`,
+     `/checkpoint` or `/authwall`.
+   - Jobright is signed in when it shows their recommended jobs, not its
+     sign-in page.
+
+   If a tab is still on a sign-in or code page, send ❌ with what you see ("the
+   Handshake tab still asks for your school email") and ask them to finish. If
+   you cannot see the screen, ask them what the page shows. Turn on only the
+   sites that passed.
+6. Turn each signed-in site on: `"$JF" onboard extension enable handshake`
    (`linkedin`, `jobright`). Handshake and LinkedIn search the titles from step
    6; pass `--query "<text>"` (repeatable) for different searches. If a command
    says the extension is not connected, redo item 3.
 
+The first scan proves the sign-in end to end: `jobfeed doctor` then shows
+"Handshake sign-in: … jobs found", or ❌ with the reason.
+
 To turn a site off later: `"$JF" onboard extension disable <site>`.
+
+**Signing in again.** Sites sign people out after a while; scans then skip that
+site and `jobfeed doctor` shows ❌ "signed out of Handshake". When the user asks
+to sign in again: show them the server's screen (above), open the site in the
+server's Chrome, have them sign in, check the tab (item 5), and confirm that
+`"$JF" onboard extension status` shows `"connected": true`. The next scan
+clears the ❌.
 
 **Without a desktop**, only if the user insists: the extension runs in Chrome
 on their own computer, which must be on with Chrome open and the SSH tunnel
@@ -516,7 +561,7 @@ on their own computer, which must be on with Chrome open and the SSH tunnel
 https://github.com/V1ctor2182/jobfeed/archive/refs/heads/main.zip, unzip it,
 load `jobfeed-main/jobfeed/extensions/jobright-source` as in item 2, start the
 tunnel, set the URL as in item 3, and sign in. You run the check in item 3 and
-item 5 on the server.
+item 6 on the server.
 
 ### Private link
 
@@ -614,8 +659,8 @@ everything." first.
    reboot, keeps running after logout), every setup step, the AI provider and
    models, the résumé, the job sources, the scan API, one tiny AI request made
    with the service's own `PATH`, the last scan and evaluation, the daily scan
-   (scheduled, last run not failed), the Chrome extension when a signed-in site
-   is on, the private link (must answer 401 without the code), free disk, and
+   (scheduled, last run not failed), the Chrome extension and each signed-in
+   site's last result (a sign-out shows as ❌) when one is on, the private link (must answer 401 without the code), free disk, and
    that the database, résumé and settings stay out of git. Each check is `ok`,
    `warn`, `fail` or `off` (not set up), with a `fix` hint. It exits 1 when any
    check fails.
@@ -680,8 +725,14 @@ Later, ask any coding agent:
 • "What's my Jobfeed link?"
 ```
 
-Add a ⚠️ line when Chrome must stay open for Handshake or LinkedIn, and a line
-that the private link changes when the server restarts. The dashboard has no
+When Handshake, LinkedIn or Jobright is on, add:
+
+```
+⚠️ Keep Chrome open on the server. If Handshake signs you out, scans skip it;
+ask any coding agent "sign me in to Handshake again".
+```
+
+With a private link, add a line that the link changes when the server restarts. The dashboard has no
 Review, Tracker or Answer Bank pages on this install; don't mention them unless
 asked.
 
@@ -695,6 +746,7 @@ cd "$JOBFEED_HOME/jobfeed" && .venv/bin/jobfeed doctor
 git -C "$JOBFEED_HOME" pull --ff-only && (cd "$JOBFEED_HOME/jobfeed" && ~/.local/bin/uv sync --locked --no-dev --python 3.12) && systemctl --user restart jobfeed-dashboard
 # stop the background services (keeps all data)
 systemctl --user disable --now jobfeed-dashboard.service jobfeed-daily-scan.timer jobfeed-tunnel.service
+# signed out of Handshake or LinkedIn: see "Signing in again" in docs/server-install.md
 # current private link
 cd "$JOBFEED_HOME/jobfeed" && .venv/bin/jobfeed remote-access status
 ```
