@@ -32,6 +32,7 @@ from jobfeed.domain.errors import SourceConfigError
 from jobfeed.observability import get_logger, init_otel, init_sentry
 from jobfeed.pipeline_readiness import PipelineReadiness
 from jobfeed.ports.store_perf import StorePerfMixin
+from jobfeed.remote_access import RemoteAccessStore
 from jobfeed.review import ReviewService
 from jobfeed.scan_wiring import build_scan_service
 from jobfeed.services.application import ApplicationService, ApplicationStore
@@ -50,6 +51,7 @@ from jobfeed.web.onboarding_app import (
     _make_post_scan_hook,
 )
 from jobfeed.web.recruiter_sheet_hook import make_post_evaluate_hook
+from jobfeed.web.remote_access_gate import RemoteAccessGate
 from jobfeed.web.routes.account_password import router as account_password_router
 from jobfeed.web.routes.answer_bank import router as answer_bank_router
 from jobfeed.web.routes.application_backfill import (
@@ -279,6 +281,10 @@ def build_web_app(context: AppContext, static_dir: Path | None = None) -> FastAP
     project_root = config_path.resolve().parent
     _configure_onboarding(app, context, project_root, logger, store)
     install_error_handling(app)
+    app.add_middleware(
+        RemoteAccessGate,
+        store=RemoteAccessStore(project_root / "data" / "remote-access.json"),
+    )
     app.include_router(spam_router, prefix="/api")
     app.include_router(health_router, prefix="/api")
     app.include_router(apply_health_router, prefix="/api")

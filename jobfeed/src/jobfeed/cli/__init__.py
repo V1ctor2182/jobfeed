@@ -291,6 +291,7 @@ from jobfeed.cli.login import login  # noqa: E402
 from jobfeed.cli.maintenance import mark_stale_closed  # noqa: E402
 from jobfeed.cli.ml_gate import ml_gate  # noqa: E402
 from jobfeed.cli.onboard import onboard  # noqa: E402
+from jobfeed.cli.remote_access import remote_access  # noqa: E402
 from jobfeed.cli.scan import scan  # noqa: E402
 from jobfeed.cli.serve import DEFAULT_PORT, serve  # noqa: E402
 from jobfeed.cli.snapshots import snapshots  # noqa: E402
@@ -321,6 +322,7 @@ cli.add_command(bootstrap_companies)
 cli.add_command(discover_companies)
 cli.add_command(serve)
 cli.add_command(onboard)
+cli.add_command(remote_access)
 
 
 __all__ = [

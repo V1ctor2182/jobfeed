@@ -28,8 +28,10 @@ desktop browser and Discord and is covered in the main README.
 - Never print, log, or commit API keys or tokens.
 - Do not start a scan or an evaluation. Scans start only after the user finishes
   setup (step 5) and asks for one.
-- Jobfeed's dashboard has no login. It refuses to bind anything except loopback.
-  Do not put it behind a public port, reverse proxy, or `0.0.0.0` forward.
+- Jobfeed's dashboard has no accounts. It refuses to bind anything except
+  loopback. The only way to reach it from outside the server is the private
+  link in step 6, which asks for an access code, or an SSH tunnel. Do not open
+  a public port, a `0.0.0.0` forward, or any other proxy to it.
 - Use `sudo` only for the steps that say so, and ask the user first, in plain
   words ("I need administrator rights to … — OK?"). If `sudo` asks for a
   password, explain that it is the password they use to log in to the server,
@@ -536,8 +538,8 @@ git -C "$JOBFEED_HOME" check-ignore -q jobfeed/data/jobfeed.sqlite && echo data-
 ```
 
 Then help the user open the dashboard, where they will read their job matches.
-It only listens inside the server, on purpose: it has no password. Pick the
-first way that fits, and give step-by-step instructions for their computer:
+It only listens inside the server, on purpose. Pick the first way that fits,
+and give step-by-step instructions for their computer:
 
 - **The server has a screen or a cloud desktop the user can see** (a Mac mini,
   a cloud computer with a desktop): open `http://127.0.0.1:7654` in a browser
@@ -553,10 +555,95 @@ first way that fits, and give step-by-step instructions for their computer:
 
   Then open `http://127.0.0.1:7654` in their browser. Tell them it is normal
   that the Terminal window shows nothing after they log in.
-- **They already use Tailscale on both machines:** run
-  `tailscale serve --bg 7654` on the server and give them the address it prints.
+- **They want to open it from their phone or laptop without a terminal:** set up
+  the private link below. This is the usual choice for a beginner on a server
+  without a desktop.
+- **They already use Tailscale on both machines:** turn on the access code
+  (step 1 below), run `tailscale serve --bg 7654` on the server, and give them
+  the address it prints and the code.
 
-Never make the dashboard reachable from the public internet.
+### A private link, protected by an access code
+
+The dashboard asks for an access code when a request comes through a tunnel,
+and refuses every tunnel request while the code is off. Requests made on the
+server itself never need it. Explain it in plain words and ask first, for
+example: "I can give you a private web link to your Jobfeed, protected by a
+code. Anyone who has both could see your résumé and job list, so keep them to
+yourself. OK?"
+
+1. Create the code:
+
+   ```sh
+   cd "$JOBFEED_HOME/jobfeed" && "$JF" remote-access on
+   ```
+
+   It prints the code once. Send it to the user in this chat and ask them to
+   save it in their password manager or notes. Do not write it anywhere else.
+   If they lose it, run the command again: that makes a new code and signs out
+   every browser.
+2. Install `cloudflared`, Cloudflare's free tunnel program. No account and no
+   `sudo` are needed. On Linux:
+
+   ```sh
+   case "$(uname -m)" in x86_64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; esac
+   mkdir -p ~/.local/bin
+   curl -fsSL -o ~/.local/bin/cloudflared "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$arch"
+   chmod +x ~/.local/bin/cloudflared
+   ```
+
+   On macOS, `brew install cloudflared`.
+3. Run the tunnel in the background. Linux:
+   `~/.config/systemd/user/jobfeed-tunnel.service`:
+
+   ```ini
+   [Unit]
+   Description=Jobfeed private link
+   After=jobfeed-dashboard.service network-online.target
+
+   [Service]
+   ExecStart=%h/.local/bin/cloudflared tunnel --no-autoupdate --url http://127.0.0.1:7654 --metrics 127.0.0.1:7655
+   Restart=on-failure
+   RestartSec=10
+
+   [Install]
+   WantedBy=default.target
+   ```
+
+   ```sh
+   systemctl --user daemon-reload
+   systemctl --user enable --now jobfeed-tunnel.service
+   ```
+
+   macOS: `~/Library/LaunchAgents/com.jobfeed.tunnel.plist` with label
+   `com.jobfeed.tunnel`, `RunAtLoad` and `KeepAlive` true, and
+   `ProgramArguments` `$(brew --prefix)/bin/cloudflared tunnel --no-autoupdate
+   --url http://127.0.0.1:7654 --metrics 127.0.0.1:7655`, loaded with
+   `launchctl bootstrap` like the dashboard.
+4. Get the link, about 10 seconds later:
+
+   ```sh
+   cd "$JOBFEED_HOME/jobfeed" && "$JF" remote-access status
+   ```
+
+   `tunnel_link` is the link. If it stays `null`, read
+   `journalctl --user -u jobfeed-tunnel -n 20`. "network is unreachable" or
+   repeated failures mean the server's network blocks Cloudflare: some cloud
+   sandboxes allow web traffic only through their own proxy. Then turn the
+   tunnel and the code off (below), tell the user in one sentence, and use
+   another way.
+5. Check that the link asks for the code:
+   `curl -s -o /dev/null -w "%{http_code}\n" "<link>/api/health"` must print
+   `401`. If it prints `200`, stop the tunnel at once and tell the user.
+6. Tell the user:
+   - Open the link and enter the code once in each browser.
+   - The link is a random `trycloudflare.com` address that changes when the
+     server restarts. To get the new one, they can ask any coding agent
+     "what's my Jobfeed link?"
+   - On the link they can read jobs, change settings and start scans. Editing
+     My Profile works only on the server itself.
+
+To turn the link off: `systemctl --user disable --now jobfeed-tunnel.service`,
+then `cd "$JOBFEED_HOME/jobfeed" && "$JF" remote-access off`.
 
 Nothing scans until they start a run from the dashboard's **Runs** page or the
 daily scan fires.
@@ -565,7 +652,8 @@ Finish with a short summary in plain words: Jobfeed is installed and keeps
 running in the background; whether it looks for jobs every day and at what time
 (in their time zone); which job sites it reads, including whether Handshake,
 signed-in LinkedIn and Jobright are on and which Chrome must stay open for
-them; how to open the dashboard; and that they can come back to
+them; how to open the dashboard, and, with a private link, that the code is
+needed once per browser; and that they can come back to
 any coding agent and say "update Jobfeed" or "change my Jobfeed searches". Then,
 under a "For later" heading, list the checkout path, the service names, and
 these commands:
@@ -576,6 +664,10 @@ git -C "$JOBFEED_HOME" pull --ff-only && (cd "$JOBFEED_HOME/jobfeed" && ~/.local
 # stop the background services (keeps all data; Linux)
 systemctl --user disable --now jobfeed-dashboard.service jobfeed-daily-scan.timer
 ```
+
+If the private link is on, add:
+`cd "$JOBFEED_HOME/jobfeed" && .venv/bin/jobfeed remote-access status` prints
+the current link, and the turn-off commands above.
 
 If the Chrome extension is installed, also say: after an update, click the
 reload arrow on **Jobfeed Jobright Source** in `chrome://extensions`.
