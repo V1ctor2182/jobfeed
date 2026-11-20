@@ -679,6 +679,83 @@ def _extension_status(dashboard: Dashboard, configuration: Json) -> Json:
     }
 
 
+@onboard.command(name="check")
+@click.pass_context
+def check(ctx: click.Context) -> None:
+    """Test that setup is complete and every enabled part works. Read-only.
+
+    Prints one line per check and exits 1 when any check fails.
+    \f
+
+    Args:
+        ctx: Click invocation context.
+
+    Raises:
+        SystemExit: With status 1 when a check fails.
+    """
+    results = _checks(_dashboard(ctx))
+    _emit({"ok": all(row["ok"] for row in results), "checks": results})
+    if not all(row["ok"] for row in results):
+        raise SystemExit(1)
+
+
+def _checks(dashboard: Dashboard) -> list[Json]:
+    results: list[Json] = []
+
+    def add(name: str, ok: bool, detail: str) -> None:
+        results.append({"check": name, "ok": ok, "detail": detail})
+
+    try:
+        health = dashboard.get("/api/health")
+    except (httpx.HTTPError, click.ClickException) as exc:
+        add("dashboard", False, f"The dashboard does not answer: {exc}")
+        return results
+    add("dashboard", health.get("status") == "ok", f"database {health.get('db')}")
+    state = _status(dashboard)
+    missing = [name for name, done in state["steps"].items() if not done]
+    add(
+        "setup finished",
+        not missing,
+        "all steps done" if not missing else f"missing: {', '.join(missing)}",
+    )
+    provider = state["provider"]
+    add(
+        "AI provider",
+        bool(
+            provider["connected"]
+            and provider["quick_model"]
+            and provider["detailed_model"]
+        ),
+        f"{provider['name']}: quick {provider['quick_model']}, "
+        f"detailed {provider['detailed_model']}",
+    )
+    add("résumé", state["resume"] is not None, str(state["resume"]))
+    searches = len(state["enabled_searches"])
+    companies = state["tracked_companies"]
+    add(
+        "job sources",
+        searches + companies > 0,
+        f"{searches} searches, {companies} company career pages",
+    )
+    try:
+        active = dashboard.get("/api/runs/active").get("runs", [])
+        add("scan API", True, f"{len(active)} runs active")
+    except click.ClickException as exc:
+        add("scan API", False, str(exc))
+    configuration = dashboard.get("/api/config")
+    if configuration.get("configured"):
+        extension = _extension_status(dashboard, configuration)
+        enabled = [name for name, row in extension["sources"].items() if row["enabled"]]
+        if enabled:
+            add(
+                "Chrome extension",
+                extension["connected"],
+                f"needed for {', '.join(enabled)}; "
+                + ("connected" if extension["connected"] else "not connected"),
+            )
+    return results
+
+
 @onboard.command(name="finish")
 @click.option(
     "--jobs-per-run",

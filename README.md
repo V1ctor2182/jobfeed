@@ -76,15 +76,17 @@ remote-machine tool.
 ```text
 Set up Jobfeed on my server as a background service.
 Read https://raw.githubusercontent.com/V1ctor2182/jobfeed/main/docs/server-install.md
-and follow it step by step. If you aren't running on that server, ask me how
-to reach it. Tell me your plan before changing anything, ask me before using
-sudo, and don't start any scan. Ask me everything you need here in this chat.
-When you're done, give me the summary that page asks for.
+and follow it exactly, including how it says to talk to me: short, structured
+messages and numbered choices. If you aren't running on my server, ask me how
+to reach it. Ask me before using sudo, don't start any scan, and test
+everything before you hand over.
 ```
 
-The agent installs the dashboard as a service, optionally schedules a daily
-scan, walks you through setup (model sign-in, résumé, job profile, searches)
-in the chat, and tells you how to open the dashboard. The steps are in
+The agent checks the server, installs the dashboard as a service, and walks you
+through setup in the chat: AI sign-in, résumé, job profile, searches and
+limits. It offers optional extras (a daily scan, Handshake and signed-in
+LinkedIn, a private link for your phone, company career pages), tests the whole
+setup, and tells you how to open the dashboard. The steps are in
 [`docs/server-install.md`](docs/server-install.md) if you prefer to run them
 yourself.
 

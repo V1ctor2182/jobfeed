@@ -235,3 +235,37 @@ def test_extension_sources_wait_for_setup_and_a_connected_extension(
     saved = tomllib.loads((tmp_path / "config.toml").read_text(encoding="utf-8"))
     assert saved["sources"]["handshake"]["enabled"] is False
     assert saved["sources"]["handshake"]["queries"] == ["Platform Engineer"]
+
+
+def _checks(result: Result) -> dict[str, bool]:
+    lines = result.output.splitlines()
+    start = next(i for i, line in enumerate(lines) if line[:1] == "{")
+    payload = json.loads("\n".join(lines[start:]))
+    return {row["check"]: row["ok"] for row in payload["checks"]}
+
+
+def test_check_fails_until_setup_works_end_to_end(tmp_path: Path, app: FastAPI) -> None:
+    early = _run("check")
+    assert early.exit_code == 1
+    assert _checks(early)["setup finished"] is False
+
+    resume = tmp_path / "resume.md"
+    resume.write_text("Platform engineer.\n", encoding="utf-8")
+    _json(_run("resume", str(resume), "--no-analyze"))
+    _json(_run("profile", "--confirm", "-", input_text=json.dumps(PROFILE)))
+    _json(_run("searches", "--enable", "Platform Engineer"))
+    _json(_run("finish"))
+
+    ready = _run("check")
+    assert ready.exit_code == 0, ready.output
+    assert all(_checks(ready).values())
+    assert "Chrome extension" not in _checks(ready)
+
+    bridge = app.state.context["jobright_bridge"]
+    connection = bridge.connect(sources=["jobright", "handshake"])
+    _json(_run("extension", "enable", "handshake"))
+    assert _run("check").exit_code == 0
+    bridge.disconnect(connection)
+    offline = _run("check")
+    assert offline.exit_code == 1
+    assert _checks(offline)["Chrome extension"] is False
