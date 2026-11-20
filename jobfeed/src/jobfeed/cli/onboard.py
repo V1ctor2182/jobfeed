@@ -111,8 +111,11 @@ _client_factory: Callable[..., httpx.Client] = httpx.Client
 @contextmanager
 def _open_http(url: str) -> Iterator[httpx.Client]:
     # Profile writes only accept the dashboard's own origin. This command runs
-    # on the same machine as the dashboard, so it sends that origin.
-    with _client_factory(base_url=url, headers={"Origin": url}) as client:
+    # on the same machine as the dashboard, so it sends that origin, and it
+    # ignores the shell's proxy settings, which must not route loopback calls.
+    with _client_factory(
+        base_url=url, headers={"Origin": url}, trust_env=False
+    ) as client:
         yield client
 
 

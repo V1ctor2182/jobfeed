@@ -115,6 +115,9 @@ Then tell the user the result in one or two plain sentences:
   during big scans, and continue only if they accept that.
 - **Plenty of total memory but under 700 MB available:** other programs are
   using it. Mention that scans may be slow and continue.
+
+Remember `available_mb` for step 5: each model call during a scan runs its own
+CLI process of about 250 MB, so small servers must run fewer at once.
 - **A site is unreachable:** say the server cannot reach the internet sites
   Jobfeed downloads from, and ask whether it is behind a firewall or proxy.
 
@@ -267,8 +270,12 @@ and fix the cause.
 
 Only if the user asked for it. It calls the running dashboard to scan every
 enabled source, then evaluates new jobs. Evaluation spends model credits,
-typically $1–2 a day. It does nothing useful until onboarding (step 5) is
-finished, so tell the user it starts working after that.
+typically $1–2 a day.
+
+Write the files below now, but **turn the schedule on only at the end of step
+5**, after `onboard finish` succeeds. A schedule that is on too early can fire
+in the middle of setup, for example when a sleeping server wakes after the
+scan hour and catches up on the missed run.
 
 ### Linux
 
@@ -306,11 +313,10 @@ WantedBy=timers.target
 
 ```sh
 systemctl --user daemon-reload
-systemctl --user enable --now jobfeed-daily-scan.timer
-systemctl --user list-timers jobfeed-daily-scan.timer
 ```
 
-Do not run `jobfeed-daily-scan.service` by hand during setup.
+Do not enable the timer yet, and do not run `jobfeed-daily-scan.service` by
+hand.
 
 ### macOS
 
@@ -339,10 +345,7 @@ user's hour:
 </plist>
 ```
 
-```sh
-launchctl bootout "gui/$(id -u)/com.jobfeed.daily-scan" 2>/dev/null || true
-launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.jobfeed.daily-scan.plist
-```
+Do not load it with `launchctl` yet.
 
 ## 5. Set up Jobfeed with the user, in chat
 
@@ -414,7 +417,27 @@ them. Every choice below is the user's. Suggest, then wait for their answer.
    per day. With a CLI provider, say that this uses their subscription's usage
    allowance, not extra money. Suggest keeping the defaults, and apply them, or
    their changes, with
-   `"$JF" onboard finish --jobs-per-run N --daily-calls N [--daily-cost USD]`.
+   `"$JF" onboard finish --jobs-per-run N --daily-calls N [--daily-cost USD] --parallel N`.
+   Choose `--parallel` from the `available_mb` you measured before installing:
+   `1` under 1500 MB, `2` under 3000 MB, otherwise `4`. On a small server, tell
+   the user in one sentence that scans run one or two jobs at a time so the
+   server does not run out of memory.
+7. **Turn on the daily scan** (only if the user wanted it in step 0).
+   Linux:
+
+   ```sh
+   systemctl --user enable --now jobfeed-daily-scan.timer
+   systemctl --user list-timers jobfeed-daily-scan.timer
+   ```
+
+   macOS:
+
+   ```sh
+   launchctl bootout "gui/$(id -u)/com.jobfeed.daily-scan" 2>/dev/null || true
+   launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.jobfeed.daily-scan.plist
+   ```
+
+   Tell the user the time it will run, in their time zone.
 
 `"$JF" onboard status` should now report `next_step: done`. Do not start a scan
 unless the user asks for one; their first scan can also be started from the

@@ -245,3 +245,17 @@ def test_requests_go_to_the_dashboard_port_unless_overridden(monkeypatch):
     assert importlib.reload(scheduler).BASE == "http://127.0.0.1:9000"
     monkeypatch.delenv("JOBFEED_API_URL")
     importlib.reload(scheduler)
+
+
+def test_cycle_before_setup_finishes_skips_without_calling_the_dashboard(
+    tmp_path, monkeypatch, capsys
+):
+    calls = []
+    monkeypatch.setattr(scheduler, "request_json", calls.append)
+    monkeypatch.setattr(scheduler, "run_cycle", calls.append)
+    monkeypatch.setattr(
+        "sys.argv", ["cycle", "--config", str(tmp_path / "config.toml")]
+    )
+    assert scheduler.main() == 0
+    assert calls == []
+    assert "setup is not finished" in capsys.readouterr().out

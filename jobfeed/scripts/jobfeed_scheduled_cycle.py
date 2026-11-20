@@ -126,6 +126,12 @@ def main():
     )
     parser.add_argument("--config", type=Path, default=ROOT / "config.toml")
     args = parser.parse_args()
+    if not args.config.is_file():
+        # Onboarding writes config.toml when it finishes. A timer that fires
+        # earlier, such as a missed run caught up after the server wakes,
+        # must not scan with no profile or searches.
+        print(f"Skipped: Jobfeed setup is not finished ({args.config} is missing)")
+        return 0
     jobright = jobright_enabled(args.config)
     if args.check:
         status = {"api": BASE, "active": request_json("/api/runs/active")}

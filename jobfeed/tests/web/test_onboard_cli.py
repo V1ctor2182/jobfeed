@@ -8,7 +8,9 @@ import tomllib
 from collections.abc import Iterator
 from functools import partial
 from pathlib import Path
+from typing import Any
 
+import httpx
 import pytest
 from click.testing import CliRunner, Result
 from fastapi import FastAPI
@@ -74,6 +76,10 @@ def app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[FastAPI]:
 
 class _UnclosedClient(TestClient):
     """Reuse the fixture's running app instead of restarting its lifespan."""
+
+    def __init__(self, app: FastAPI, *, trust_env: bool, **kwargs: Any) -> None:
+        assert trust_env is False
+        super().__init__(app, **kwargs)
 
     def __enter__(self) -> _UnclosedClient:
         return self
@@ -184,3 +190,13 @@ def test_finish_reports_missing_steps_from_the_dashboard() -> None:
 
     assert result.exit_code == 1
     assert "/api/onboarding/finish: Confirm the job profile" in result.output
+
+
+def test_shell_proxy_settings_do_not_reach_loopback_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ALL_PROXY", "socks5h://127.0.0.1:1080")
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:3128")
+    monkeypatch.setattr(onboard_module, "_client_factory", httpx.Client)
+    with onboard_module._open_http("http://127.0.0.1:7654") as client:
+        assert client.trust_env is False

@@ -32,7 +32,9 @@ dependencies = [
     # risk. Its only outbound
     # network is a one-time HuggingFace download of the ONNX model weights.
     "fastembed >= 0.4",
-    "httpx >= 0.28",
+    # [socks]: some servers route traffic through ALL_PROXY=socks5://...;
+    # without socksio every httpx client fails to start there.
+    "httpx[socks] >= 0.28",
     "jinja2 >= 3.1",
     "numpy >= 1.26",
     "xgboost >= 3.2.0",
