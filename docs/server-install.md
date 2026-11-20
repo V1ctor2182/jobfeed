@@ -422,7 +422,9 @@ them. Every choice below is the user's. Suggest, then wait for their answer.
    `1` under 1500 MB, `2` under 3000 MB, otherwise `4`. On a small server, tell
    the user in one sentence that scans run one or two jobs at a time so the
    server does not run out of memory.
-7. **Turn on the daily scan** (only if the user wanted it in step 0).
+7. **Signed-in job sites** (optional; see below). Ask before you turn on the
+   daily scan, so its first run already includes them.
+8. **Turn on the daily scan** (only if the user wanted it in step 0).
    Linux:
 
    ```sh
@@ -445,6 +447,83 @@ dashboard's **Runs** page.
 
 If a command fails, its message names the missing step. Fix that step and
 continue; do not edit `config.toml` or the files in `data/` by hand.
+
+### Signed-in job sites: Handshake, LinkedIn, Jobright
+
+Handshake, and the full LinkedIn and Jobright listings, show jobs only to
+signed-in people. Jobfeed reads them through its Chrome extension, in a Chrome
+where the user is signed in. Ask, in plain words, for example: "Do you use
+Handshake, or want me to also read LinkedIn while you're signed in? It finds
+more jobs than the public search. You'd sign in once, on the server's screen."
+If they say no, skip this section and tell them they can add it later.
+
+Two things must stay true afterwards, so say them in one sentence each:
+
+- That Chrome must stay open. When it is closed, scans skip these sites and
+  still read the others.
+- A scan opens a search tab in that Chrome for a few minutes.
+
+Never ask for, type, or store their passwords. They sign in themselves.
+
+**Which Chrome.** Use the server's own Chrome if the server has a desktop the
+user can see (a cloud computer with a desktop, a Mac mini). That Chrome stays
+on with the server. If the server has no desktop, explain that the extension
+would have to run in Chrome on their own computer, which would have to be on,
+with Chrome open and the SSH tunnel from step 6 running, at every scan. Suggest
+skipping, and continue only if they still want it (see "No desktop" below).
+
+**On the server's desktop.** If you can control the server's desktop (click,
+type, take screenshots), do steps 1 and 2 yourself. Otherwise tell the user
+exactly what to click.
+
+1. Install Chrome if it is missing (`google-chrome --version`; on Debian and
+   Ubuntu, with their OK, download
+   `https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb`
+   and `sudo apt-get install -y ./google-chrome-stable_current_amd64.deb`).
+2. Load the extension. In Chrome, open `chrome://extensions`, turn on
+   **Developer mode** (top right), click **Load unpacked**, and choose the folder
+   `$JOBFEED_HOME/jobfeed/extensions/jobright-source` (in the file dialog, press
+   Ctrl+L and type the path). **Jobfeed Jobright Source** appears in the list.
+3. Point it at the dashboard. Click the puzzle-piece icon in Chrome's toolbar,
+   then **Jobfeed Jobright Source**. Set the Jobfeed URL to exactly
+   `http://localhost:7654` and click **Save**. Use `localhost`, not
+   `127.0.0.1`: the extension replaces `127.0.0.1:7654` with a different
+   address. The popup should say **Connected to Jobfeed**. If the popup is hard
+   to reach, open `chrome-extension://<id>/popup.html` in a tab instead, with
+   the ID shown on `chrome://extensions`.
+4. Check: `"$JF" onboard extension status` shows `"connected": true`.
+5. Have the user sign in. Open the sites they chose in that Chrome:
+   `https://app.joinhandshake.com`, `https://www.linkedin.com/login`,
+   `https://jobright.ai`. Ask them to sign in on the server's screen, including
+   any code their school or LinkedIn sends, and to tell you when they see their
+   home page. Leave those tabs open.
+6. Turn the sites on, one command each:
+
+   ```sh
+   "$JF" onboard extension enable handshake
+   "$JF" onboard extension enable linkedin
+   "$JF" onboard extension enable jobright
+   ```
+
+   Handshake and LinkedIn search for the titles they already chose. Say so in
+   one line, and pass `--query "<text>"` (repeatable) if they want different
+   searches. If a command says the extension is not connected, redo step 3.
+
+**No desktop.** On the user's own computer:
+
+1. Download https://github.com/V1ctor2182/jobfeed/archive/refs/heads/main.zip
+   and unzip it.
+2. Load the folder `jobfeed-main/jobfeed/extensions/jobright-source` as in
+   step 2 above.
+3. Start the SSH tunnel from step 6, then set the extension's URL to
+   `http://localhost:7654` as in step 3.
+4. Sign in to the sites in that Chrome.
+5. Run steps 4 and 6 above from the server.
+
+Tell them that daily scans include these sites only while their computer is on
+with Chrome open and the tunnel running.
+
+To turn a site off later: `"$JF" onboard extension disable <site>`.
 
 ## 6. Verify and hand over
 
@@ -484,7 +563,9 @@ daily scan fires.
 
 Finish with a short summary in plain words: Jobfeed is installed and keeps
 running in the background; whether it looks for jobs every day and at what time
-(in their time zone); how to open the dashboard; and that they can come back to
+(in their time zone); which job sites it reads, including whether Handshake,
+signed-in LinkedIn and Jobright are on and which Chrome must stay open for
+them; how to open the dashboard; and that they can come back to
 any coding agent and say "update Jobfeed" or "change my Jobfeed searches". Then,
 under a "For later" heading, list the checkout path, the service names, and
 these commands:
@@ -495,6 +576,9 @@ git -C "$JOBFEED_HOME" pull --ff-only && (cd "$JOBFEED_HOME/jobfeed" && ~/.local
 # stop the background services (keeps all data; Linux)
 systemctl --user disable --now jobfeed-dashboard.service jobfeed-daily-scan.timer
 ```
+
+If the Chrome extension is installed, also say: after an update, click the
+reload arrow on **Jobfeed Jobright Source** in `chrome://extensions`.
 
 On macOS, replace the `systemctl` parts with
 `launchctl kickstart -k "gui/$(id -u)/com.jobfeed.dashboard"` to restart, and

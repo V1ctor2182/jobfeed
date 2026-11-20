@@ -536,6 +536,149 @@ def _probe(dashboard: Dashboard, entries: list[str]) -> list[Json]:
     )
 
 
+# Sources read through the Chrome extension in a browser signed in to them,
+# by CLI name -> field on the config's `sources` section.
+_EXTENSION_SOURCES = {
+    "handshake": "handshake",
+    "linkedin": "linkedin_extension",
+    "jobright": "jobright",
+}
+# The extension rewrites a saved http://127.0.0.1:7654 to its own default, so a
+# server install points it at the same dashboard through `localhost`.
+EXTENSION_DASHBOARD_URL = "http://localhost:7654"
+
+
+@onboard.group(name="extension")
+def extension() -> None:
+    """Scan Handshake, LinkedIn or Jobright through signed-in Chrome (optional).
+
+    These sites only show jobs to signed-in users, so Jobfeed reads them
+    through its Chrome extension in a Chrome where the user is signed in.
+    """
+
+
+@extension.command(name="status")
+@click.pass_context
+def extension_status(ctx: click.Context) -> None:
+    """Show whether the extension is connected and which of its sources are on.
+    \f
+
+    Args:
+        ctx: Click invocation context.
+    """
+    dashboard = _dashboard(ctx)
+    _emit(_extension_status(dashboard, dashboard.get("/api/config")))
+
+
+@extension.command(name="enable")
+@click.argument("source", type=click.Choice(sorted(_EXTENSION_SOURCES)))
+@click.option(
+    "--query",
+    "queries",
+    multiple=True,
+    metavar="TEXT",
+    help=(
+        "Search text for Handshake or LinkedIn (repeatable). Defaults to the "
+        "titles of the enabled LinkedIn and Indeed searches."
+    ),
+)
+@click.pass_context
+def extension_enable(ctx: click.Context, source: str, queries: tuple[str, ...]) -> None:
+    """Scan SOURCE through the connected extension from now on.
+
+    Needs finished onboarding and a connected extension. Starts no scan.
+    \f
+
+    Args:
+        ctx: Click invocation context.
+        source: Extension source to turn on.
+        queries: Search texts; empty means the enabled search titles.
+
+    Raises:
+        click.ClickException: If onboarding is unfinished or the extension is
+            not connected or cannot scan SOURCE.
+        click.UsageError: If no search text is given or enabled.
+    """
+    dashboard = _dashboard(ctx)
+    current = _configured(dashboard)
+    bridge = dashboard.get("/api/sources/jobright/status")
+    if not bridge.get("connected"):
+        raise click.ClickException(
+            "The Chrome extension is not connected. Load it in Chrome, set its "
+            f"Jobfeed URL to {EXTENSION_DASHBOARD_URL}, and keep Chrome open."
+        )
+    if source not in bridge.get("supported_sources", []):
+        raise click.ClickException(
+            f"The connected extension cannot scan {source}. Update the Jobfeed "
+            "checkout and reload the extension in chrome://extensions."
+        )
+    configuration = {key: current[key] for key in _EDITABLE_SECTIONS}
+    row = configuration["sources"][_EXTENSION_SOURCES[source]]
+    row["enabled"] = True
+    if source != "jobright":
+        row["queries"] = list(dict.fromkeys(queries)) or _search_titles(dashboard)
+    _emit(_extension_status(dashboard, _save(dashboard, configuration)))
+
+
+@extension.command(name="disable")
+@click.argument("source", type=click.Choice(sorted(_EXTENSION_SOURCES)))
+@click.pass_context
+def extension_disable(ctx: click.Context, source: str) -> None:
+    """Stop scanning SOURCE through the extension.
+    \f
+
+    Args:
+        ctx: Click invocation context.
+        source: Extension source to turn off.
+    """
+    dashboard = _dashboard(ctx)
+    current = _configured(dashboard)
+    configuration = {key: current[key] for key in _EDITABLE_SECTIONS}
+    configuration["sources"][_EXTENSION_SOURCES[source]]["enabled"] = False
+    _emit(_extension_status(dashboard, _save(dashboard, configuration)))
+
+
+def _configured(dashboard: Dashboard) -> Json:
+    current = dashboard.get("/api/config")
+    if not current.get("configured"):
+        raise click.ClickException(
+            "Finish onboarding first: run `jobfeed onboard finish`."
+        )
+    return current
+
+
+def _save(dashboard: Dashboard, configuration: Json) -> Json:
+    return dashboard.send("PUT", "/api/config", body=configuration)
+
+
+def _search_titles(dashboard: Dashboard) -> list[str]:
+    rows = dashboard.get("/api/onboarding/searches").get("searches", [])
+    titles = list(dict.fromkeys(row["query"] for row in rows if row["enabled"]))
+    if not titles:
+        raise click.UsageError("No search is enabled; pass --query TEXT.")
+    return titles
+
+
+def _extension_status(dashboard: Dashboard, configuration: Json) -> Json:
+    bridge = dashboard.get("/api/sources/jobright/status")
+    sources = configuration["sources"]
+    return {
+        "connected": bool(bridge.get("connected")),
+        "dashboard_url_for_extension": EXTENSION_DASHBOARD_URL,
+        "sources": {
+            name: {
+                "enabled": sources[field]["enabled"],
+                **(
+                    {"queries": sources[field]["queries"]}
+                    if "queries" in sources[field]
+                    else {}
+                ),
+            }
+            for name, field in _EXTENSION_SOURCES.items()
+        },
+    }
+
+
 @onboard.command(name="finish")
 @click.option(
     "--jobs-per-run",

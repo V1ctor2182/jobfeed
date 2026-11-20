@@ -200,3 +200,38 @@ def test_shell_proxy_settings_do_not_reach_loopback_calls(
     monkeypatch.setattr(onboard_module, "_client_factory", httpx.Client)
     with onboard_module._open_http("http://127.0.0.1:7654") as client:
         assert client.trust_env is False
+
+
+def test_extension_sources_wait_for_setup_and_a_connected_extension(
+    tmp_path: Path, app: FastAPI
+) -> None:
+    early = _run("extension", "enable", "handshake")
+    assert early.exit_code != 0
+    assert "onboard finish" in early.output
+
+    resume = tmp_path / "resume.md"
+    resume.write_text("Platform engineer.\n", encoding="utf-8")
+    _json(_run("resume", str(resume), "--no-analyze"))
+    _json(_run("profile", "--confirm", "-", input_text=json.dumps(PROFILE)))
+    _json(_run("searches", "--enable", "Platform Engineer"))
+    _json(_run("finish"))
+
+    offline = _run("extension", "enable", "handshake")
+    assert offline.exit_code != 0
+    assert "http://localhost:7654" in offline.output
+
+    app.state.context["jobright_bridge"].connect(sources=["jobright", "handshake"])
+    handshake = _json(_run("extension", "enable", "handshake"))
+    assert handshake["connected"] is True  # type: ignore[index]
+    assert handshake["sources"]["handshake"] == {  # type: ignore[index]
+        "enabled": True,
+        "queries": ["Platform Engineer"],
+    }
+    unsupported = _run("extension", "enable", "linkedin", "--query", "SRE")
+    assert unsupported.exit_code != 0
+    assert "cannot scan linkedin" in unsupported.output
+
+    _json(_run("extension", "disable", "handshake"))
+    saved = tomllib.loads((tmp_path / "config.toml").read_text(encoding="utf-8"))
+    assert saved["sources"]["handshake"]["enabled"] is False
+    assert saved["sources"]["handshake"]["queries"] == ["Platform Engineer"]
