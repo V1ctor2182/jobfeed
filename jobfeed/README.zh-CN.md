@@ -203,10 +203,22 @@ ready**，并附上实测证据。它永远不会自动开启过滤器。你审�
 | `jobfeed enrich-linkedin-guest` | 继续一轮按节奏进行的 LinkedIn Guest JD 补全 |
 | `jobfeed evaluate` | 用配置的简历评估符合条件的岗位 |
 | `jobfeed digest` | 生成当前的摘要 |
+| `jobfeed companies sync-intelligence` | 更新公司背景数据（SEC 上市公司、YC 和创业公司列表） |
 | `jobfeed --help` | 列出所有命令和选项 |
 
 如果想明确使用仓库本地的命令，可以用 `./bin/jobfeed ...`。两个入口使用同一份
 配置和同一个 SQLite 数据库。
+
+`jobfeed companies sync-intelligence` 会把结果保存到
+`data/company-intelligence.json`。SEC 只接受 User-Agent 里写明联系人的请求，
+所以运行前请先设置 `JOBFEED_SEC_USER_AGENT`：
+
+```sh
+export JOBFEED_SEC_USER_AGENT="Your Name your.email@example.com"
+```
+
+不设置的话，Jobfeed 会发送一个通用的 User-Agent，SEC 会返回 HTTP 403 拒绝，
+其他来源仍会照常更新。
 
 默认情况下，包含 LinkedIn Guest 的扫描会在发现岗位后自动运行一轮有上限、按节奏
 进行的 JD 补全。单独的补全命令用于继续额外的或被中断的工作。

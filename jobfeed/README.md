@@ -218,10 +218,22 @@ The GUI is the primary interface. The same runtime also exposes a compact CLI:
 | `jobfeed enrich-linkedin-guest` | Resume a paced LinkedIn Guest JD-enrichment pass |
 | `jobfeed evaluate` | Evaluate eligible jobs against the configured résumé |
 | `jobfeed digest` | Render the current digest |
+| `jobfeed companies sync-intelligence` | Refresh company background data (SEC public companies, YC and startup lists) |
 | `jobfeed --help` | List all commands and options |
 
 Use `./bin/jobfeed ...` when you want an explicit repo-local command. Both
 entrypoints use the same configuration and SQLite database.
+
+`jobfeed companies sync-intelligence` saves its results to
+`data/company-intelligence.json`. SEC only answers requests whose User-Agent
+names a contact, so set `JOBFEED_SEC_USER_AGENT` before running it:
+
+```sh
+export JOBFEED_SEC_USER_AGENT="Your Name your.email@example.com"
+```
+
+Without it, Jobfeed sends a generic User-Agent, SEC rejects it with HTTP 403,
+and the command still refreshes the other sources.
 
 By default, a scan that includes LinkedIn Guest automatically runs one bounded,
 paced JD-enrichment pass after discovery. The standalone enrichment command is
