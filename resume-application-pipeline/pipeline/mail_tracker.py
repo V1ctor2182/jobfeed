@@ -4,7 +4,7 @@
 Gmail is reached as the rest of the pipeline reaches it, through `workday_accounts.gmail_call`. Message bodies are never
 fetched during a sync. `body` fetches one when the user opens that message, and keeps it. A small model labels each message's stage and employer. Email text is untrusted, so that model runs with no tools
 and its answer is used only when it is one of the fixed labels. Mail it has not labelled falls back to keyword rules.
-`view` joins the saved mail with the jobs Jobfeed records as applied. Nothing here answers an Applier, changes a job, or
+`check` makes one small search to prove Gmail answers, and saves nothing. `view` joins the saved mail with the jobs Jobfeed records as applied. Nothing here answers an Applier, changes a job, or
 sends mail.
 """
 from __future__ import annotations
@@ -199,7 +199,10 @@ def _row(message):
     names = {n.get('emailAddress'): n.get('displayName') for n in message.get('addressDisplayNames') or ()}
     sender, subject = message.get('sender') or '', html.unescape(message.get('subject') or '')
     snippet = ' '.join(html.unescape(message.get('snippet') or '').replace('͏', ' ').split())
-    received = datetime.fromtimestamp(int(message['internalDate']) / 1000, timezone.utc).isoformat()
+    # Gmail sometimes leaves internalDate out of a search result. One such message must not stop the whole sync, so
+    # it counts as received when the sync saw it.
+    millis = message.get('internalDate')
+    received = datetime.fromtimestamp(int(millis) / 1000, timezone.utc).isoformat() if str(millis or '').isdigit() else _now()
     return (message['id'], message.get('threadId') or message['id'], sender, names.get(sender), subject, snippet, received,
             message.get('viewUrl'), classify(subject, snippet), company_of(sender, names.get(sender), subject), _now())
 
@@ -231,6 +234,12 @@ def label_mail(store, ask=ask_model, *, limit=LABEL_BACKLOG):
         store.label(list(checked.values()))
         labelled += len(checked)
     return labelled
+
+
+def check(call):
+    """One small read-only Gmail search that proves the connector answers. Saves nothing and labels nothing."""
+    page = call(SEARCH, {'query': 'newer_than:2d', 'pageSize': 1, 'view': 'THREAD_VIEW_METADATA_ONLY'})
+    return {'connected': True, 'recent_threads': len(page.get('threads') or ())}
 
 
 def sync(store, call, *, days=None, max_pages=MAX_PAGES, now=None):
@@ -349,10 +358,19 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument('--root', type=Path, default=ROOT)
     parser.add_argument('--jobfeed-db', type=Path)
-    parser.add_argument('command', choices=['sync', 'view', 'body'])
+    parser.add_argument('command', choices=['check', 'sync', 'view', 'body'])
     parser.add_argument('--id')
     args = parser.parse_args(argv)
     store = MailStore(args.root)
+    if args.command == 'check':
+        from pipeline import workday_accounts
+        workday_accounts._PROMPT_ARGUMENTS.setdefault(SEARCH, '{"query":"x"}')
+        try:
+            print(json.dumps(check(workday_accounts.gmail_call)))
+        except workday_accounts.GmailError as exc:
+            print(json.dumps({'error': str(exc)}))
+            return 1
+        return 0
     if args.command == 'sync':
         from pipeline import workday_accounts
         workday_accounts._PROMPT_ARGUMENTS.setdefault(SEARCH, '{"query":"x"}')

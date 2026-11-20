@@ -40,7 +40,9 @@ export default function TrackerPage() {
         <input className="jf-tracker-search" type="search" aria-label={label} placeholder={label} value={search} onChange={(event) => setSearch(event.target.value)} />
       </div>
       <p className="jf-tracker-sync">
-        {sync ? `Mail last checked ${formatRelativeAge(sync.finished_at)} ago · ${sync.new_messages} new` : "Mail has not been checked yet."}
+        {sync
+          ? `Mail last checked ${formatRelativeAge(sync.finished_at)} ago · ${sync.new_messages} new`
+          : "Gmail is not connected yet. Ask your coding agent to \"connect my Gmail to Jobfeed\"; it reads application replies only and sends nothing."}
         {sync?.error && <span className="warn"> · The last check failed, so newer mail may be missing.</span>}
       </p>
       {tracker.isPending && <p role="status" className="jf-tracker-empty">Loading application email.</p>}

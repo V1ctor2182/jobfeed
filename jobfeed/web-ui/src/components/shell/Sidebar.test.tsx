@@ -36,9 +36,11 @@ afterEach(() => {
 test("a Jobfeed without the application pipeline hides the application pages", async () => {
   renderSidebar(false);
   await waitFor(() => expect(screen.queryByRole("link", { name: "Review" })).not.toBeInTheDocument());
-  for (const name of ["Tracker", "Answer Bank", "Applier trace", "Apply health"]) {
+  for (const name of ["Answer Bank", "Applier trace", "Apply health"]) {
     expect(screen.queryByRole("link", { name })).not.toBeInTheDocument();
   }
+  // Application email works with Jobfeed alone, so the Tracker stays.
+  expect(screen.getByRole("link", { name: "Tracker" })).toBeInTheDocument();
   expect(screen.getByRole("link", { name: "Jobs" })).toBeInTheDocument();
   expect(screen.getByRole("link", { name: "Profile" })).toBeInTheDocument();
 });

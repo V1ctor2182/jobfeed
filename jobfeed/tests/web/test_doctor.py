@@ -6,6 +6,7 @@ import importlib
 import subprocess
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
 from typing import Any, cast
@@ -401,3 +402,45 @@ def test_indeed_reports_jobs_found_failures_and_empty_scans() -> None:
     assert empty.status == "warn"
     assert "no jobs in the last 3 scans" in empty.detail
     assert _indeed_row([_indeed("completed", 0)] * 2).status == "ok"
+
+
+class TrackerDashboard:
+    """Answers the tracker read the email check makes."""
+
+    def __init__(self, last_sync: dict[str, Any] | None) -> None:
+        self.last_sync = last_sync
+
+    def get(self, path: str) -> dict[str, Any]:
+        assert path == "/api/tracker"
+        return {"messages": [], "applications": [], "last_sync": self.last_sync}
+
+
+def _email(last_sync: dict[str, Any] | None, *, timer: bool) -> Check:
+    host = FakeHost()
+    host.outputs[("systemctl", "--user", "is-enabled", "jobfeed-mail-sync.timer")] = (
+        (0, "enabled\n", "") if timer else (1, "disabled\n", "")
+    )
+    return doctor_module.check_email(cast(Any, TrackerDashboard(last_sync)), host)
+
+
+def test_application_email_reports_the_last_gmail_read() -> None:
+    now = datetime.now(UTC)
+    recent = {"finished_at": now.isoformat(), "new_messages": 3, "error": None}
+    assert _email(None, timer=False).status == "off"
+    assert _email(None, timer=True).status == "warn"
+
+    ok = _email(recent, timer=True)
+    assert ok.status == "ok"
+    assert "3 new" in ok.detail
+
+    stale = {**recent, "finished_at": (now - timedelta(hours=5)).isoformat()}
+    assert "not checked since" in _email(stale, timer=True).detail
+    assert "automatic checks are off" in _email(recent, timer=False).detail
+
+    signed_out = {
+        **recent,
+        "error": "the Gmail tool returned no result (claude exited 0)",
+    }
+    failed = _email(signed_out, timer=True)
+    assert failed.status == "fail"
+    assert "Connectors" in failed.fix

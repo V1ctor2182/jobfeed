@@ -21,7 +21,7 @@ export const ZONES: Zone[] = [
   { path: "/dashboard", label: "Dashboard", group: "primary", icon: "dashboard", count: null },
   { path: "/review", label: "Review", group: "primary", icon: "review", count: "review", applications: true },
   { path: "/jobs", label: "Jobs", group: "primary", icon: "jobs", count: null, also: ["/library", "/runs", "/application-queue"] },
-  { path: "/tracker", label: "Tracker", group: "primary", icon: "tracker", count: null, applications: true },
+  { path: "/tracker", label: "Tracker", group: "primary", icon: "tracker", count: null },
   { path: "/profile?section=answers", label: "Answer Bank", group: "primary", icon: "answers", count: "answers", applications: true },
   { path: "/profile", label: "Profile", group: "primary", icon: "profile", count: null },
   { path: "/sources", label: "Sources", group: "primary", icon: "sources", count: null },

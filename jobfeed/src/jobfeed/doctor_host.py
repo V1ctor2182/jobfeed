@@ -18,6 +18,8 @@ SCAN_TIMER = "jobfeed-daily-scan.timer"
 SCAN_SERVICE = "jobfeed-daily-scan.service"
 DASHBOARD_AGENT = "com.jobfeed.dashboard"
 SCAN_AGENT = "com.jobfeed.daily-scan"
+MAIL_TIMER = "jobfeed-mail-sync.timer"
+MAIL_AGENT = "com.jobfeed.mail-sync"
 
 
 @dataclass(frozen=True)
@@ -128,6 +130,8 @@ def launch_agent_loaded(host: Host, label: str) -> bool:
 __all__ = [
     "DASHBOARD_AGENT",
     "DASHBOARD_UNIT",
+    "MAIL_AGENT",
+    "MAIL_TIMER",
     "SCAN_AGENT",
     "SCAN_SERVICE",
     "SCAN_TIMER",

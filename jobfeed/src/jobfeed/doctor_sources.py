@@ -1,12 +1,27 @@
-"""`jobfeed doctor` check that each job source found jobs in its latest scan."""
+"""`jobfeed doctor` checks of where jobs and replies come from.
+
+Each job source must have found jobs in its latest scan, and application email
+must have been read from Gmail on schedule.
+"""
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import Any
+
+import click
 
 from jobfeed.cli.onboard import Dashboard
 from jobfeed.doctor_app import local_time
-from jobfeed.doctor_host import Check
+from jobfeed.doctor_host import (
+    MAIL_AGENT,
+    MAIL_TIMER,
+    Check,
+    Host,
+    launch_agent_loaded,
+    systemd,
+)
+from jobfeed.tracker import gmail_problem
 
 # Every job source: config field -> (label, scan progress key, needs a sign-in).
 # Career page search and company discovery find job boards, not jobs, so a scan
@@ -137,4 +152,57 @@ def check_sources(dashboard: Dashboard) -> list[Check]:
     ]
 
 
-__all__ = ["check_sources"]
+_MAIL_STALE = timedelta(hours=2)
+
+
+def check_email(dashboard: Dashboard, host: Host) -> Check:
+    """Application email is read from Gmail on schedule, and the last read worked.
+
+    Args:
+        dashboard: Client for the dashboard.
+        host: Command runner.
+
+    Returns:
+        The report line.
+    """
+    name = "Application email"
+    if host.platform == "darwin":
+        scheduled = launch_agent_loaded(host, MAIL_AGENT)
+    else:
+        scheduled = systemd(host, "is-enabled", MAIL_TIMER) == "enabled"
+    try:
+        last = dashboard.get("/api/tracker").get("last_sync")
+    except click.ClickException:
+        last = None
+    if not last:
+        if scheduled:
+            return Check(
+                name,
+                "warn",
+                "the email check is on but has not run yet",
+                "Run `jobfeed email sync` once.",
+            )
+        return Check(name, "off", "not connected")
+    when = local_time(str(last["finished_at"]))
+    if last.get("error"):
+        reason, fix = gmail_problem(str(last["error"]))
+        return Check(name, "fail", f"{when}: {reason}", fix)
+    if not scheduled:
+        return Check(
+            name,
+            "warn",
+            f"last checked {when}; automatic checks are off",
+            f"systemctl --user enable --now {MAIL_TIMER}",
+        )
+    finished = datetime.fromisoformat(str(last["finished_at"]).replace("Z", "+00:00"))
+    if datetime.now(finished.tzinfo or UTC) - finished > _MAIL_STALE:
+        return Check(
+            name,
+            "warn",
+            f"not checked since {when}",
+            f"systemctl --user status {MAIL_TIMER}",
+        )
+    return Check(name, "ok", f"checked {when}, {last.get('new_messages', 0)} new")
+
+
+__all__ = ["check_email", "check_sources"]

@@ -7,7 +7,7 @@ from pathlib import Path
 
 from datetime import timedelta
 
-from pipeline.mail_tracker import MailStore, body, classify, company_of, label_mail, sync, view
+from pipeline.mail_tracker import MailStore, body, check, classify, company_of, label_mail, sync, view
 
 NOW = datetime(2026, 11, 11, 18, 0, tzinfo=timezone.utc)
 
@@ -205,6 +205,21 @@ class TrackerTests(unittest.TestCase):
     def test_only_a_message_the_sync_saved_can_be_opened(self):
         with self.assertRaisesRegex(ValueError, 'unknown message'):
             body(self.store, 'not-synced', lambda *a: self.fail('Gmail was asked for a message the sync never saved'))
+
+    def test_a_message_without_a_received_time_does_not_stop_the_sync(self):
+        undated = message('m2', 'Application received', 'Thank you for applying')
+        del undated['internalDate']
+        self.assertEqual(sync(self.store, pages([undated, message('m1', 'Interview invitation', 'x')])), 2)
+        self.assertIsNone(self.store.last_run()['error'])
+        self.assertEqual({m['id'] for m in self.store.messages()}, {'m1', 'm2'})
+
+    def test_the_check_makes_one_small_search_and_saves_nothing(self):
+        call = pages([message('m1', 'Application received', 'x')])
+        self.assertEqual(check(call), {'connected': True, 'recent_threads': 1})
+        self.assertEqual(len(call.calls), 1)
+        self.assertEqual(call.calls[0]['pageSize'], 1)
+        self.assertEqual(self.store.messages(), [])
+        self.assertIsNone(self.store.last_run())
 
     def test_other_mail_is_kept_out_of_the_inbox(self):
         sync(self.store, pages([message('m1', 'Limited-Time Offer: 30% Off', 'photos', sender='email@marketing.example.com')]))

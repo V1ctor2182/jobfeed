@@ -2,6 +2,7 @@
 
 import json
 import subprocess
+import sys
 from http import HTTPStatus
 from pathlib import Path
 
@@ -15,6 +16,8 @@ from jobfeed.tracker import (
     TrackerNotFound,
     TrackerService,
     TrackerState,
+    check_gmail,
+    sync_mail,
 )
 from jobfeed.web.errors import install_error_handling
 from jobfeed.web.routes.tracker import router
@@ -188,6 +191,8 @@ def test_the_adapter_runs_the_pipeline_view_with_fixed_arguments(
         return subprocess.CompletedProcess(args, 0, json.dumps(STATE), "")
 
     monkeypatch.setattr(subprocess, "run", run)
+    (tmp_path / ".venv/bin").mkdir(parents=True)
+    (tmp_path / ".venv/bin/python").touch()
     assert (
         TrackerService(tmp_path, tmp_path / "jobfeed.db").state().last_sync.new_messages
         == STATE["last_sync"]["new_messages"]
@@ -213,3 +218,65 @@ def test_a_failed_pipeline_run_is_a_tracker_error(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(subprocess, "run", run)
     with pytest.raises(TrackerError):
         TrackerService(tmp_path, tmp_path / "jobfeed.db").state()
+
+
+def test_without_the_applier_the_tracker_runs_with_jobfeeds_python(
+    monkeypatch, tmp_path: Path
+):
+    calls = []
+
+    def run(args, **_kwargs):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, json.dumps(STATE), "")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    TrackerService(tmp_path, tmp_path / "jobfeed.db").state()
+    assert calls[0][:3] == [sys.executable, "-m", "pipeline.mail_tracker"]
+
+
+@pytest.mark.parametrize(
+    ("stdout", "code", "connected", "reason"),
+    [
+        ('{"connected": true, "recent_threads": 1}', 0, True, None),
+        (
+            '{"error": "the Gmail tool returned no result (claude exited 0)"}',
+            1,
+            False,
+            "no Gmail connector",
+        ),
+        (
+            '{"error": "claude -p did not run: FileNotFoundError"}',
+            1,
+            False,
+            "Claude Code",
+        ),
+    ],
+)
+def test_the_gmail_check_explains_what_to_fix(  # noqa: PLR0913 - one per parameter
+    monkeypatch, tmp_path: Path, stdout, code, connected, reason
+):
+    def run(args, **_kwargs):
+        assert args[-1] == "check"
+        return subprocess.CompletedProcess(args, code, stdout, "")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    result = check_gmail(TrackerService(tmp_path, tmp_path / "jobfeed.db"))
+    assert result.connected is connected
+    if reason:
+        assert reason in (result.reason or "")
+        assert result.fix
+
+
+def test_a_sync_error_that_is_not_the_connector_says_to_retry(
+    monkeypatch, tmp_path: Path
+):
+    def run(args, **_kwargs):
+        return subprocess.CompletedProcess(
+            args, 1, '{"error": "KeyError: \'internalDate\'"}', ""
+        )
+
+    monkeypatch.setattr(subprocess, "run", run)
+    result = sync_mail(TrackerService(tmp_path, tmp_path / "jobfeed.db"))
+    assert "internalDate" in str(result["reason"])
+    assert "jobfeed email sync" in str(result["fix"])
+    assert "Connectors" not in str(result["fix"])

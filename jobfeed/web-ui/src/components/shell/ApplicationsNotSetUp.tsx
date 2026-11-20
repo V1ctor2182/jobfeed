@@ -2,8 +2,8 @@
 export function ApplicationsNotSetUp({ className }: { className?: string }) {
   return (
     <p role="status" className={className}>
-      Applying isn't set up on this Jobfeed. It finds and ranks jobs for you. Answering application questions and
-      reading application email come with the Claude Applier setup.
+      Applying isn't set up on this Jobfeed. It finds and ranks jobs for you. Answering application questions comes
+      with the Claude Applier setup.
     </p>
   );
 }

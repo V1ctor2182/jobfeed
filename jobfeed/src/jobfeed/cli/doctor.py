@@ -28,7 +28,7 @@ from jobfeed.doctor_app import (
     setup_rows,
 )
 from jobfeed.doctor_host import Check, Host, Status
-from jobfeed.doctor_sources import check_sources
+from jobfeed.doctor_sources import check_email, check_sources
 from jobfeed.doctor_system import (
     check_daily_scan,
     check_disk,
@@ -77,6 +77,7 @@ def run_checks(  # noqa: PLR0913 - every input is replaceable in tests
             rows.append(check_ai(host, dashboard, skip=skip_ai))
             rows.extend(check_runs(dashboard, daily=daily.status != "off"))
             rows.extend(check_sources(dashboard))
+            rows.append(check_email(dashboard, host))
     rows.append(daily)
     rows.append(check_private_link(host, root, metrics_url))
     rows.append(check_disk(host, root))
@@ -166,6 +167,7 @@ def doctor(
 __all__ = [
     "Check",
     "Host",
+    "check_email",
     "check_runs",
     "check_sources",
     "doctor",

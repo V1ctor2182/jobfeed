@@ -7,8 +7,9 @@ too.
 
 It installs **Jobfeed** as a background service: it scans job sites, filters
 and ranks the jobs against the user's résumé with AI, and shows them on a
-dashboard. It does not apply to jobs or read application email; that is the
-separate Claude Applier setup in the main README.
+dashboard. As an option, it also reads replies to applications from Gmail
+(confirmations, interviews, rejections, offers). It does not apply to jobs;
+that is the separate Claude Applier setup in the main README.
 
 The user only talks to you, in this chat. Assume they are not technical and
 have no terminal on the server. Everything that needs their input (a choice, a
@@ -58,8 +59,9 @@ message in this shape:
 What you get
 • A job dashboard that runs on your server around the clock
 • New jobs from LinkedIn, Indeed and company career pages, ranked against your résumé by AI
-• Optional extras: a daily scan, Handshake and signed-in LinkedIn, a private link for your phone
-• Not included: applying to jobs and reading application email
+• Optional extras: a daily scan, Handshake and signed-in LinkedIn, a private link for your phone,
+  replies to your applications from Gmail
+• Not included: applying to jobs
 
 What I need from you (about 10 minutes)
 1. Your résumé: a PDF, Word file or pasted text
@@ -391,6 +393,7 @@ Optional extras (reply with numbers, or "none"):
 2. Handshake, signed-in LinkedIn or Jobright: you sign in once on the server's screen
 3. Private link: open the dashboard from your phone or laptop
 4. Company career pages: I suggest companies that fit your profile
+5. Application email: track replies to your applications (confirmations, interviews, rejections) from Gmail. Read-only
 ```
 
 When the confirmed profile is a student, new graduate or intern, write 2 as
@@ -636,6 +639,90 @@ Show them as a numbered list with "all" first, then
 public new-grad and internship list: `"$JF" onboard companies catalog` counts
 it, and `--add` tracks all of it.
 
+### Application email
+
+Jobfeed reads Gmail through the Gmail connector of the user's Claude account,
+one small `claude -p` call at a time, so the server keeps no Google password or
+token. It searches for application mail and saves each message's sender,
+subject and a short preview; it reads a whole email only when the user opens
+it on the Tracker page. A small AI sorts each one: received, needs action,
+interview, rejected, offer. It never sends, deletes or changes email. Say that
+in one or two lines.
+
+It needs Claude Code signed in **on the server** with the user's Claude
+account. With the Claude subscription from step 4 that is already done. With
+an API key or ChatGPT, sign Claude Code in as in step 4 first, or skip this
+extra.
+
+1. Have them connect Gmail to that Claude account:
+
+   ```
+   ⏳ Step 7/9 · Connect Gmail to your Claude account
+   1. On claude.ai, signed in with the same account, open Settings › Connectors
+   2. Next to Gmail, click Connect, choose your Google account and allow access
+   3. Reply "done"
+   ```
+
+2. Check it, with one small read-only search that saves nothing:
+
+   ```sh
+   cd "$JOBFEED_HOME/jobfeed" && "$JF" email check
+   ```
+
+   Pass: `"connected": true`. Otherwise it prints `reason` and `fix`: send
+   them in one plain line each, and run it again after they say "done".
+3. Read the last 45 days once (about a minute; send ⏳ first):
+   `cd "$JOBFEED_HOME/jobfeed" && "$JF" email sync`. It prints how many
+   messages it saved. This reads email only; it is not a job scan.
+4. Check for new mail every 30 minutes. Linux,
+   `~/.config/systemd/user/jobfeed-mail-sync.service`, with the same
+   `JOBFEED_HOME` and `SERVICE_PATH` as the dashboard service (the sync runs
+   `claude`):
+
+   ```ini
+   [Unit]
+   Description=Jobfeed application email sync (reads Gmail, sends nothing)
+
+   [Service]
+   Type=oneshot
+   WorkingDirectory=JOBFEED_HOME/jobfeed
+   Environment=PATH=SERVICE_PATH
+   ExecStart=JOBFEED_HOME/jobfeed/.venv/bin/jobfeed email sync
+   TimeoutStartSec=15min
+   ```
+
+   `~/.config/systemd/user/jobfeed-mail-sync.timer`:
+
+   ```ini
+   [Unit]
+   Description=Check for new application email every 30 minutes
+
+   [Timer]
+   OnCalendar=*:0/30
+   RandomizedDelaySec=5min
+   Persistent=true
+
+   [Install]
+   WantedBy=timers.target
+   ```
+
+   ```sh
+   systemctl --user daemon-reload
+   systemctl --user enable --now jobfeed-mail-sync.timer
+   ```
+
+   macOS: `~/Library/LaunchAgents/com.jobfeed.mail-sync.plist` with label
+   `com.jobfeed.mail-sync`, `WorkingDirectory` `JOBFEED_HOME/jobfeed`,
+   `EnvironmentVariables` `PATH` set to `SERVICE_PATH`, `ProgramArguments`
+   `JOBFEED_HOME/jobfeed/.venv/bin/jobfeed email sync`, and `StartInterval`
+   1800, loaded with `launchctl bootstrap` like the dashboard.
+5. Tell them the dashboard's **Tracker** page shows the replies: an inbox, and
+   a board of where each application stands.
+
+If Gmail later stops answering (the connector was removed, or the Claude
+sign-in expired), `jobfeed doctor` shows ❌ "Application email" with the fix:
+reconnect Gmail on claude.ai, then run `jobfeed email check`.
+
 ## 8. Test the setup
 
 Do not hand over until the test passes. Send "⏳ Step 8/9 · Testing
@@ -662,7 +749,9 @@ everything." first.
    (scheduled, last run not failed), every job source that is on (Indeed,
    LinkedIn, company pages, Handshake…: jobs found in its latest scan; a
    failure or a sign-out is ❌, three empty scans in a row are ⚠️), the Chrome
-   extension when a signed-in site is on, the private link (must answer 401 without the code), free disk, and
+   extension when a signed-in site is on, application email (the last Gmail
+   read worked and ran on schedule), the private link (must answer 401 without
+   the code), free disk, and
    that the database, résumé and settings stay out of git. Each check is `ok`,
    `warn`, `fail` or `off` (not set up), with a `fix` hint. It exits 1 when any
    check fails.
@@ -715,7 +804,8 @@ Then send the hand-over in this shape, with only the lines that apply:
 Open it: <how, in one or two lines>
 Finds jobs: every day at 08:00 (<their time zone>) · LinkedIn, Indeed, <n> companies, Handshake
 AI: Claude subscription · up to <N> new jobs per run
-Not included: applying to jobs and reading application email
+Replies: Gmail checked every 30 minutes, on the Tracker page
+Not included: applying to jobs
 Tests: all passed
 
 Next: open the dashboard, go to **Scanner runs** and press **Start scan**, or wait for the daily scan.
@@ -734,9 +824,10 @@ When Handshake, LinkedIn or Jobright is on, add:
 ask any coding agent "sign me in to Handshake again".
 ```
 
-With a private link, add a line that the link changes when the server restarts. The dashboard has no
-Review, Tracker or Answer Bank pages on this install; don't mention them unless
-asked.
+Leave out the "Replies" line when application email is off. With a private
+link, add a line that the link changes when the server restarts. The dashboard
+has no Review or Answer Bank pages on this install, and its Tracker page stays
+empty without application email; don't mention them unless asked.
 
 Finish with one short **Technical details** block for whoever helps them later:
 the checkout path, the service names, and these commands (Linux):
@@ -747,8 +838,11 @@ cd "$JOBFEED_HOME/jobfeed" && .venv/bin/jobfeed doctor
 # update
 git -C "$JOBFEED_HOME" pull --ff-only && (cd "$JOBFEED_HOME/jobfeed" && ~/.local/bin/uv sync --locked --no-dev --python 3.12) && systemctl --user restart jobfeed-dashboard
 # stop the background services (keeps all data)
-systemctl --user disable --now jobfeed-dashboard.service jobfeed-daily-scan.timer jobfeed-tunnel.service
+systemctl --user disable --now jobfeed-dashboard.service jobfeed-daily-scan.timer jobfeed-tunnel.service jobfeed-mail-sync.timer
 # signed out of Handshake or LinkedIn: see "Signing in again" in docs/server-install.md
+# application email: check Gmail, or read new mail now
+cd "$JOBFEED_HOME/jobfeed" && .venv/bin/jobfeed email check
+cd "$JOBFEED_HOME/jobfeed" && .venv/bin/jobfeed email sync
 # current private link
 cd "$JOBFEED_HOME/jobfeed" && .venv/bin/jobfeed remote-access status
 ```

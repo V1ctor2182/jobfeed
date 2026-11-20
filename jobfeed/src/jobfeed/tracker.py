@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 from typing import Literal
 
@@ -87,8 +88,59 @@ class TrackerNotFound(TrackerError):
     """The message is not one the tracker saved, or Gmail no longer has it."""
 
 
+class GmailCheck(BaseModel):
+    """Whether one small read-only Gmail search worked, and what to do if not."""
+
+    connected: bool
+    recent_threads: int | None = None
+    reason: str | None = None
+    fix: str | None = None
+
+
+_CONNECT_GMAIL = (
+    "On claude.ai, open Settings > Connectors and connect Gmail, using the same "
+    "Claude account this machine is signed in to. Then run `jobfeed email check`."
+)
+
+
+def gmail_problem(error: str) -> tuple[str, str]:
+    """Explain a Gmail connector failure in plain words, with its fix.
+
+    Args:
+        error: The pipeline's error text.
+
+    Returns:
+        What went wrong, and how to fix it.
+    """
+    if "did not run" in error:
+        return (
+            "Claude Code is not installed or not on this program's PATH.",
+            "Install Claude Code, sign in with your Claude account, and try again.",
+        )
+    if "no result" in error:
+        return (
+            "Gmail did not answer: the Claude account signed in on this machine has "
+            "no Gmail connector, or its sign-in expired.",
+            _CONNECT_GMAIL,
+        )
+    if "not JSON" in error:
+        return (
+            "Gmail answered with something unexpected.",
+            "Run `jobfeed email check` again; if it repeats, reconnect Gmail. "
+            + _CONNECT_GMAIL,
+        )
+    return (
+        f"the email check stopped on an error ({error}).",
+        "Run `jobfeed email sync` to try again. If it keeps failing, update "
+        "Jobfeed, which may already have a fix.",
+    )
+
+
 class TrackerService:
-    """Reads the tracker through the pipeline's CLI. It never syncs mail itself."""
+    """Reads the tracker through the pipeline's CLI.
+
+    The dashboard never syncs mail; the sync runs from `jobfeed email sync`.
+    """
 
     def __init__(self, root: Path, jobfeed_db: Path) -> None:
         self.root, self.jobfeed_db = root.resolve(), jobfeed_db.resolve()
@@ -99,10 +151,16 @@ class TrackerService:
         except FileNotFoundError:
             raise ApplicationsNotInstalled from None
 
+    def _python(self) -> str:
+        # The full pipeline environment when the Applier is installed; otherwise
+        # Jobfeed's own Python, which has all the mail tracker needs.
+        pipeline = self.root / ".venv/bin/python"
+        return str(pipeline) if pipeline.exists() else sys.executable
+
     def _spawn(self, *command: str, timeout: int) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [
-                str(self.root / ".venv/bin/python"),
+                self._python(),
                 "-m",
                 "pipeline.mail_tracker",
                 "--root",
@@ -117,6 +175,32 @@ class TrackerService:
             timeout=timeout,
             check=False,
         )
+
+    def mail_command(self, command: str, *, timeout: int) -> dict[str, object]:
+        """Run one Gmail command of the mail tracker and return its JSON.
+
+        Args:
+            command: ``check`` or ``sync``.
+            timeout: Seconds before giving up.
+
+        Returns:
+            The command's JSON, with ``error`` set when it failed.
+        """
+        try:
+            result = self._run(command, timeout=timeout)
+            payload = json.loads(result.stdout)
+        except (
+            OSError,
+            subprocess.SubprocessError,
+            ValueError,
+            ApplicationsNotInstalled,
+        ) as exc:
+            return {"error": type(exc).__name__}
+        if not isinstance(payload, dict):
+            return {"error": "unexpected output"}
+        if result.returncode and "error" not in payload:
+            payload["error"] = result.stderr.strip()[-200:] or "failed"
+        return payload
 
     def state(self) -> TrackerState:
         """Read the saved application email and each application's stage.
@@ -171,3 +255,38 @@ class TrackerService:
             ValidationError,
         ):
             raise TrackerError("This email could not be fetched.") from None
+
+
+def check_gmail(service: TrackerService) -> GmailCheck:
+    """Make one small read-only Gmail search through the connector.
+
+    Args:
+        service: Tracker adapter for this machine's pipeline folder.
+
+    Returns:
+        Whether Gmail answered, or the reason and fix.
+    """
+    payload = service.mail_command("check", timeout=240)
+    if "error" in payload:
+        reason, fix = gmail_problem(str(payload["error"]))
+        return GmailCheck(connected=False, reason=reason, fix=fix)
+    threads = payload.get("recent_threads")
+    return GmailCheck(
+        connected=True, recent_threads=threads if isinstance(threads, int) else None
+    )
+
+
+def sync_mail(service: TrackerService) -> dict[str, object]:
+    """Save new application email and label it. Reads Gmail; sends nothing.
+
+    Args:
+        service: Tracker adapter for this machine's pipeline folder.
+
+    Returns:
+        ``new_messages`` and ``labelled``, or ``error`` with ``reason`` and ``fix``.
+    """
+    payload = service.mail_command("sync", timeout=900)
+    if "error" in payload:
+        reason, fix = gmail_problem(str(payload["error"]))
+        payload.update(reason=reason, fix=fix)
+    return payload
