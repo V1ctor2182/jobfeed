@@ -219,6 +219,19 @@ class TrackerTests(unittest.TestCase):
         self.assertEqual((saved['received_at'], saved['sender_name'], saved['snippet']), ('2026-11-10T09:30:00+00:00', 'Acme Recruiting', 'Pick a time'))
         self.assertEqual(calls[1], ('mcp__claude_ai_Gmail__get_thread', {'threadId': 'm2', 'messageFormat': 'MINIMAL'}))
 
+    def test_the_first_read_dates_every_message_of_a_full_backfill(self):
+        """The Nov 21 box test: 10 of 78 messages past the old 40-thread cap kept no time or name for good."""
+        full = {f'm{n}': message(f'm{n}', 'Application received', 'Thanks', name='Acme', when=f'2026-11-{1 + n % 9:02d}T09:00:00+00:00')
+                for n in range(80)}
+
+        def call(tool, request):
+            if tool.endswith('get_thread'):
+                return {'messages': [full[request['threadId']]]}
+            return {'threads': [{'id': mid, 'messages': [{k: m[k] for k in ('id', 'threadId', 'sender', 'subject')}]} for mid, m in full.items()]}
+        self.assertEqual(sync(self.store, call), 80)
+        saved = self.store.messages()
+        self.assertTrue(all(m['sender_name'] == 'Acme' and m['received_at'].endswith('T09:00:00+00:00') for m in saved))
+
     def test_a_thread_that_cannot_be_read_does_not_stop_the_sync(self):
         from pipeline.workday_accounts import GmailError
         bare = {'id': 'm2', 'threadId': 'm2', 'sender': 'jobs@acme.test', 'subject': 'Application received'}

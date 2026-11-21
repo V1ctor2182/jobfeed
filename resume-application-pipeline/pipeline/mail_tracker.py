@@ -29,7 +29,9 @@ QUERY = ('{subject:application subject:applying subject:applied subject:intervie
          'subject:assessment subject:"thank you for" subject:"next steps" subject:"your interest"} -category:promotions -in:sent')
 PAGE_SIZE = 50
 MAX_PAGES = 12
-DETAIL_THREADS = 40
+# The first read covers BACKFILL_DAYS; a message whose thread is not read keeps no time or name for good.
+DETAIL_THREADS = 200
+DETAIL_WORKERS = 3
 BACKFILL_DAYS = 45
 GHOSTED_AFTER = timedelta(days=21)
 STAGES = ('applied', 'ghosted', 'interviewing', 'rejected', 'offer')
@@ -263,7 +265,7 @@ def sync(store, call, *, days=None, max_pages=MAX_PAGES, now=None):
             fresh = [m for thread in page.get('threads') or () for m in thread.get('messages') or () if m.get('id') and m['id'] not in known]
             # Search results carry no time, preview or sender name, so those come from each new message's thread.
             undated = [m for m in fresh if not str(m.get('internalDate') or '').isdigit()]
-            details = {m['id']: m for m in read_threads(undated, call, max(budget, 0), 'MINIMAL')}
+            details = {m['id']: m for m in read_threads(undated, call, max(budget, 0), 'MINIMAL', DETAIL_WORKERS)}
             budget -= len({m.get('threadId') or m['id'] for m in undated})
             added += store.add([_row(details.get(m['id'], m)) for m in fresh])
             known.update(m['id'] for m in fresh)

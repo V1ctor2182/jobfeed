@@ -238,20 +238,24 @@ def gmail_call(tool, tool_input):
     raise GmailError(f'the Gmail tool returned no result (claude exited {done.returncode})')
 
 
-def read_threads(hits, call, limit, message_format='PLAIN_TEXT'):
+def read_threads(hits, call, limit, message_format='PLAIN_TEXT', workers=1):
     """The full messages for these search hits, newest first, each read from its thread.
 
     Since 2026-11-21 a Gmail search returns no message time, preview or display names; get_thread still does. Each
-    thread is read once, for at most limit threads in search order. A thread the courier cannot return is skipped.
-    A field the thread leaves out keeps its value from the search hit."""
+    thread is read once, for at most limit threads in search order, up to workers at a time. A thread the courier
+    cannot return is skipped. A field the thread leaves out keeps its value from the search hit."""
+    from concurrent.futures import ThreadPoolExecutor
     by_id = {m['id']: m for m in hits if m.get('id')}
-    full = []
-    for thread_id in list(dict.fromkeys(m.get('threadId') or m['id'] for m in by_id.values()))[:limit]:
+    threads = list(dict.fromkeys(m.get('threadId') or m['id'] for m in by_id.values()))[:limit]
+
+    def read(thread_id):
         try:
-            thread = call(_THREAD_TOOL, {'threadId': thread_id, 'messageFormat': message_format})
+            return call(_THREAD_TOOL, {'threadId': thread_id, 'messageFormat': message_format}).get('messages') or ()
         except GmailError:
-            continue
-        full += [{**by_id[m['id']], **m} for m in thread.get('messages') or () if m.get('id') in by_id]
+            return ()
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        messages = [m for found in pool.map(read, threads) for m in found]
+    full = [{**by_id[m['id']], **m} for m in messages if m.get('id') in by_id]
     return sorted(full, key=lambda m: int(m.get('internalDate') or 0), reverse=True)
 
 

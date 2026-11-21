@@ -707,7 +707,7 @@ extra.
 
    Pass: `"connected": true`. Otherwise it prints `reason` and `fix`: send
    them in one plain line each, and run it again after they say "done".
-3. Read the last 45 days once (about a minute; send ⏳ first):
+3. Read the last 45 days once (a few minutes; send ⏳ first):
    `cd "$JOBFEED_HOME/jobfeed" && "$JF" email sync`. It prints how many
    messages it saved. This reads email only; it is not a job scan.
 4. Check for new mail every 30 minutes. Linux,
