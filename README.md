@@ -78,16 +78,16 @@ Set up Jobfeed on my server as a background service.
 Read https://raw.githubusercontent.com/V1ctor2182/jobfeed/main/docs/server-install.md
 and follow it exactly, including how it says to talk to me: short, structured
 messages and numbered choices. If you aren't running on my server, ask me how
-to reach it. Ask me before using sudo, don't start any scan, and test
+to reach it. Ask me before using sudo or starting a scan, and test
 everything before you hand over.
 ```
 
 The agent checks the server, installs the dashboard as a service, and walks you
-through setup in the chat: AI sign-in, résumé, job profile, searches and
-limits. It offers optional extras (a daily scan, Handshake and signed-in
-LinkedIn, a private link for your phone, company career pages, replies to
-your applications from Gmail), tests the whole
-setup, and tells you how to open the dashboard. Later, `jobfeed doctor` checks
+through setup in the chat: AI sign-in, résumé, job profile, searches, when to
+scan (every day, or only when you ask) and limits. It offers optional extras
+(Handshake and signed-in LinkedIn, a private link for your phone, company
+career pages, replies to your applications from Gmail), tests the whole setup,
+offers a first scan, and tells you how to open the dashboard. Later, `jobfeed doctor` checks
 that everything still works. The steps are in
 [`docs/server-install.md`](docs/server-install.md) if you prefer to run them
 yourself.

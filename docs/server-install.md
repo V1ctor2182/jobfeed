@@ -59,7 +59,8 @@ message in this shape:
 What you get
 • A job dashboard that runs on your server around the clock
 • New jobs from LinkedIn, Indeed and company career pages, ranked against your résumé by AI
-• Optional extras: a daily scan, Handshake and signed-in LinkedIn, a private link for your phone,
+• A scan every day by itself, or only when you start one: your choice
+• Optional extras: Handshake and signed-in LinkedIn, a private link for your phone,
   replies to your applications from Gmail
 • Not included: applying to jobs
 
@@ -70,7 +71,7 @@ What I need from you (about 10 minutes)
 
 Steps
 1 Check server ✅ · 2 Install · 3 Background service · 4 AI · 5 Résumé and profile
-6 Searches and limits · 7 Extras · 8 Test · 9 Hand-over
+6 Searches, schedule and limits · 7 Extras · 8 Test · 9 Hand-over
 
 Server: ✅ <memory> memory, <disk> free disk, internet OK
 Start the install? (yes)
@@ -83,8 +84,8 @@ Then post one status line per step as you finish it.
 - Run every command yourself. When the user must act (open a link, approve a
   sign-in), tell them exactly what to click and what they will see.
 - Never print, log, or commit API keys or tokens.
-- Do not start a scan or an evaluation. Scans start only after setup is
-  finished and the user asks for one.
+- Do not start a scan or an evaluation on your own. The only one during setup
+  is the first scan that step 8 offers, after the user says yes.
 - Jobfeed's dashboard has no accounts. It refuses to bind anything except
   loopback. The only ways to reach it from outside the server are the private
   link (step 7), which asks for an access code, and an SSH tunnel. Do not open
@@ -363,7 +364,7 @@ matches the CLI you are running in.
    `$JOBFEED_HOME/jobfeed/data/profile-confirmed.json` and run
    `"$JF" onboard profile --confirm <that file>`.
 
-## 6. Searches and limits
+## 6. Searches, schedule and limits
 
 1. **Searches** (`searches`). `"$JF" onboard searches` lists one LinkedIn and
    one Indeed search per title, all off. Ask as a numbered list of titles with
@@ -378,37 +379,27 @@ matches the CLI you are running in.
    Choose `--parallel` from `available_mb` (step 1): `1` under 1500 MB, `2`
    under 3000 MB, otherwise `4`. On a small server, add one line that scans run
    one or two jobs at a time so the server does not run out of memory.
+3. **Schedule.** Ask:
+
+   ```
+   When should Jobfeed look for new jobs?
+   1. Every morning at 8:00 your time (recommended)
+   2. Every day at another time
+   3. Only when I start a scan myself
+   ```
+
+   For 3, set nothing up. In the status line, say how to start a scan: on the
+   dashboard's **Scanner runs** page, **Start scan**, or ask any coding agent
+   "Run a Jobfeed scan".
 
 `"$JF" onboard status` now reports `next_step: done`.
 
-## 7. Extras
-
-Ask once, as one list. The user can pick several or none:
-
-```
-✅ Step 6/9 · Searches and limits saved.
-
-Optional extras (reply with numbers, or "none"):
-1. Daily scan: look for new jobs every morning (recommended)
-2. Handshake, signed-in LinkedIn or Jobright: you sign in once on the server's screen
-3. Private link: open the dashboard from your phone or laptop
-4. Company career pages: I suggest companies that fit your profile
-5. Application email: track replies to your applications (confirmations, interviews, rejections) from Gmail. Read-only
-```
-
-When the confirmed profile is a student, new graduate or intern, write 2 as
-"Handshake, where most student jobs are, and signed-in LinkedIn (recommended)",
-since Handshake shows nothing without a sign-in. Leave out 2 when the user
-cannot see the server's screen (see "Show the user the server's screen" below);
-offer the laptop route only if they ask. Set up what they chose in the order
-below, and ask only the follow-up questions each one needs.
-
 ### Daily scan
 
-Ask for their city or time zone, and the hour (suggest 8:00). Convert the hour
-to the server's time zone (`date +%Z`; cloud servers often run on UTC). Each
-run scans every enabled source, then evaluates new jobs. With an API key, say
-it typically costs $1–2 a day.
+For 1 or 2, ask for their city or time zone if you don't know it, and for 2 the
+hour. Convert the hour to the server's time zone (`date +%Z`; cloud servers
+often run on UTC). Each run scans every enabled source, then evaluates new
+jobs. With an API key, say it typically costs $1–2 a day.
 
 **Linux.** `~/.config/systemd/user/jobfeed-daily-scan.service`:
 
@@ -478,6 +469,28 @@ launchctl bootout "gui/$(id -u)/com.jobfeed.daily-scan" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.jobfeed.daily-scan.plist
 ```
 
+
+## 7. Extras
+
+Ask once, as one list. The user can pick several or none:
+
+```
+✅ Step 6/9 · Searches, schedule and limits saved.
+
+Optional extras (reply with numbers, or "none"):
+1. Handshake, signed-in LinkedIn or Jobright: you sign in once on the server's screen
+2. Private link: open the dashboard from your phone or laptop
+3. Company career pages: I suggest companies that fit your profile
+4. Application email: track replies to your applications (confirmations, interviews, rejections) from Gmail. Read-only
+```
+
+When the confirmed profile is a student, new graduate or intern, write 1 as
+"Handshake, where most student jobs are, and signed-in LinkedIn (recommended)",
+since Handshake shows nothing without a sign-in. Leave out 1 when the user
+cannot see the server's screen (see "Show the user the server's screen" below);
+offer the laptop route only if they ask. Set up what they chose in the order
+below, and ask only the follow-up questions each one needs.
+
 ### Handshake, signed-in LinkedIn, Jobright
 
 These sites show jobs only to signed-in people. Jobfeed reads them through its
@@ -545,6 +558,29 @@ items 1 to 3 yourself. Otherwise tell the user exactly what to click.
    (`linkedin`, `jobright`). Handshake and LinkedIn search the titles from step
    6; pass `--query "<text>"` (repeatable) for different searches. If a command
    says the extension is not connected, redo item 3.
+7. **Open Chrome again after a restart.** Chrome stays signed in, but nothing
+   reopens it when the server restarts, and the signed-in sites are skipped
+   until it runs. Skip this when the server's desktop already starts Chrome by
+   itself: a desktop service that launches it, or an entry for it in
+   `~/.config/autostart/` or `/etc/xdg/autostart/`.
+   - **Linux desktop.** Find the command Chrome runs with now:
+     `ps -eo args= | grep -E '(chrome|chromium)' | grep -v -e '--type=' -e grep | head -1`.
+     Keep the program path and, if present, its `--user-data-dir=` and
+     `--profile-directory=` options; drop the rest. Write
+     `~/.config/autostart/jobfeed-chrome.desktop`:
+
+     ```ini
+     [Desktop Entry]
+     Type=Application
+     Name=Chrome for Jobfeed
+     Exec=<program path> <kept options>
+     X-GNOME-Autostart-enabled=true
+     ```
+
+   - **Mac mini.** Add Chrome to the login items:
+     `osascript -e 'tell application "System Events" to make login item at end with properties {path:"/Applications/Google Chrome.app", hidden:true}'`.
+
+   Say in the status line that Chrome opens again by itself after a restart.
 
 The first scan proves the sign-in end to end: `jobfeed doctor` then shows
 "Source: Handshake: … found", or ❌ with the reason.
@@ -762,7 +798,7 @@ everything." first.
    what it means for them. Pass on each `warn` in one plain sentence.
 
 Report the result as one message, one line per check that is not `off`, in
-plain words:
+plain words, and offer the first scan in the same message:
 
 ```
 ✅ Step 8/9 · All checks passed
@@ -772,7 +808,36 @@ plain words:
 ✅ Daily scan: next run Fri 08:00 (Shanghai time)
 ✅ 21 GB free disk
 ✅ Your résumé and data stay private
+
+Run a first scan now? It proves every job site works and gives you ranked jobs
+today. About 10–30 minutes.
+1. Yes (recommended)
+2. No, later
 ```
+
+With an API key, add the cost to the question (typically $1–2). With "no",
+go to step 9.
+
+3. **First scan.** With their yes, send "⏳ Step 8/9 · First scan running,
+   about 10–30 minutes." and run one scan of every enabled site, then the AI
+   ranking of the new jobs, the same way the daily scan does. It can outlast
+   your command time limit, so run it in tmux and check every few minutes:
+
+   ```sh
+   tmux new -d -s jfscan "cd '$JOBFEED_HOME/jobfeed' && JOBFEED_API_URL=http://127.0.0.1:7654 .venv/bin/python scripts/jobfeed_scheduled_cycle.py; echo exit=\$? > data/first-scan.exit"
+   tmux has-session -t jfscan 2>/dev/null && echo running || cat "$JOBFEED_HOME/jobfeed/data/first-scan.exit"
+   ```
+
+   When it finishes (`exit=0`; the log is `data/scheduler/cycle.log`), run
+   `"$JF" doctor --json` again. Its "Source: …" lines now say how many jobs
+   each site found. Fix each ❌ that setup can fix (a signed-out site: sign in
+   again as in step 7), then report one line per site and the number of jobs
+   ranked:
+
+   ```
+   ✅ First scan: 212 new jobs, 38 ranked as a good fit
+   ✅ LinkedIn 120 · Indeed 74 · Handshake 18
+   ```
 
 ## 9. Hand-over
 
@@ -808,7 +873,7 @@ Replies: Gmail checked every 30 minutes, on the Tracker page
 Not included: applying to jobs
 Tests: all passed
 
-Next: open the dashboard, go to **Scanner runs** and press **Start scan**, or wait for the daily scan.
+Next: <one line, below>
 
 Later, ask any coding agent:
 • "Check my Jobfeed"
@@ -820,9 +885,16 @@ Later, ask any coding agent:
 When Handshake, LinkedIn or Jobright is on, add:
 
 ```
-⚠️ Keep Chrome open on the server. If Handshake signs you out, scans skip it;
-ask any coding agent "sign me in to Handshake again".
+⚠️ Keep Chrome open on the server (it opens again by itself after a restart). If
+Handshake signs you out, scans skip it; ask any coding agent "sign me in to
+Handshake again".
 ```
+
+For "Next": after a first scan, "open the dashboard and look at today's ranked
+jobs"; otherwise "open the dashboard, go to **Scanner runs** and press **Start
+scan**", adding "or wait for the daily scan" when there is one. With scans only
+on request, write "Finds jobs: when you start a scan · …" in the "Finds jobs"
+line.
 
 Leave out the "Replies" line when application email is off. With a private
 link, add a line that the link changes when the server restarts. The dashboard

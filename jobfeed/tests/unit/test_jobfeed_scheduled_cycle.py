@@ -205,23 +205,17 @@ def test_busy_scan_retry_post_timeout_is_not_repeated():
     assert len([p for p, _ in api.requests if p.endswith("/retry")]) == 1
 
 
-def test_disabled_jobright_is_not_checked_before_scan():
+def test_a_closed_chrome_does_not_stop_the_other_sources():
     api = API([[], []])
-    assert run_cycle(api.request, api.wait) == "succeeded"
-    assert ("/api/sources/jobright/status", None) not in api.requests
-
-
-def test_enabled_jobright_needs_its_extension_before_scan():
-    api = API([[]])
 
     def request(path, payload=None):
         if path == "/api/sources/jobright/status":
             return {"connected": False}
         return api.request(path, payload)
 
-    with pytest.raises(RuntimeError, match="extension is disconnected"):
-        run_cycle(request, api.wait, jobright=True)
-    assert [item for item in api.requests if item[1] is not None] == []
+    assert run_cycle(request, api.wait) == "succeeded"
+    assert ("/api/sources/jobright/status", None) not in api.requests
+    assert api.waits == ["scan-1", "evaluate-1"]
 
 
 @pytest.mark.parametrize(

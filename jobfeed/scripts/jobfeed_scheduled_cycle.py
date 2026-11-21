@@ -48,13 +48,15 @@ def jobright_enabled(config=ROOT / "config.toml"):
     return sources.get("jobright", {}).get("enabled") is True
 
 
-def run_cycle(request=request_json, wait=wait_run, *, jobright=False):
-    """Skip foreground work; API preempts backfill before scan or evaluation."""
+def run_cycle(request=request_json, wait=wait_run):
+    """Skip foreground work; API preempts backfill before scan or evaluation.
+
+    A site read through the Chrome extension fails on its own when Chrome is
+    closed; the scan still stores the other sites' jobs and they are evaluated.
+    """
     if _has_foreground_run(request("/api/runs/active")["runs"]):
         LOG.info("Skipped: another run is active")
         return "skipped_active"
-    if jobright and not request("/api/sources/jobright/status")["connected"]:
-        raise RuntimeError("Chrome extension is disconnected; scan not started")
     outcome = "succeeded"
     for phase, payload in (
         ("scan", {"source": "all"}),
@@ -132,10 +134,9 @@ def main():
         # must not scan with no profile or searches.
         print(f"Skipped: Jobfeed setup is not finished ({args.config} is missing)")
         return 0
-    jobright = jobright_enabled(args.config)
     if args.check:
         status = {"api": BASE, "active": request_json("/api/runs/active")}
-        if jobright:
+        if jobright_enabled(args.config):
             status["bridge"] = request_json("/api/sources/jobright/status")
         print(json.dumps(status))
         return 0
@@ -157,7 +158,7 @@ def main():
             return 0
         try:
             LOG.info("Cycle started")
-            LOG.info("Cycle result=%s", run_cycle(jobright=jobright))
+            LOG.info("Cycle result=%s", run_cycle())
         except Exception:
             LOG.exception("Cycle failed; no automatic POST retry")
             return 1
