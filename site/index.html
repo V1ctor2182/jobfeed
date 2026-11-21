@@ -102,7 +102,7 @@ html[lang="zh-CN"] .up { letter-spacing: .04em; }
 .hero { padding: 24px 0 0; }
 .stage { min-height: max(640px, calc(100svh - 104px)); overflow: hidden; isolation: isolate; display: flex; }
 .hero-c { position: relative; z-index: 3; flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: center; padding: 50px 30px 34px; }
-.band { flex: 1; min-height: 220px; width: 100%; }
+.band { flex: 1; min-height: 270px; width: 100%; }
 .bottom { position: relative; width: min(880px, 100%); padding-top: 64px; color: #fff; }
 .planet {
   position: absolute; z-index: -1; left: 50%; top: 0; width: max(1500px, 185%); aspect-ratio: 1; transform: translateX(-50%); border-radius: 50%;
@@ -113,12 +113,7 @@ html[lang="zh-CN"] .up { letter-spacing: .04em; }
   content: ""; position: absolute; inset: 0; border-radius: 50%; opacity: .6; mix-blend-mode: overlay;
   background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='180' height='180'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='1.15' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
 }
-.mosaic { position: absolute; left: 0; width: 100%; z-index: 0; image-rendering: pixelated; }
-.scanwrap { position: absolute; left: 0; right: 0; z-index: 2; pointer-events: none; }
-.scanline { position: absolute; left: 0; right: 0; top: 0; height: 1px; background: var(--v); animation: sweep 7s linear infinite; }
-.scanline::before { content: ""; position: absolute; left: 0; right: 0; bottom: 1px; height: 46px; background: linear-gradient(transparent, color-mix(in srgb, var(--v) 16%, transparent)); }
-.scanline::after { content: attr(data-y); position: absolute; right: 8px; top: 3px; font-size: 10px; font-weight: 700; color: var(--v); background: var(--paper); padding: 0 4px; }
-@keyframes sweep { from { top: 0; } to { top: 100%; } }
+.mosaic { position: absolute; z-index: 0; }
 .wires { position: absolute; inset: 0; z-index: 2; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
 .wires line, .wires path { stroke: var(--ink); stroke-width: 1; fill: none; vector-effect: non-scaling-stroke; }
 .wires circle { fill: var(--ink); }
@@ -143,8 +138,10 @@ html[lang="zh-CN"] .up { letter-spacing: .04em; }
 .det.done { --c: var(--ink); } .det.done b { color: var(--paper); }
 .det.skip { --c: var(--ink-3); } .det.skip b { color: var(--paper); }
 .det.wait b { background: var(--paper); color: var(--v); box-shadow: inset 0 0 0 1px var(--v); }
-.det.new { animation: blinkin .5s steps(2) 2; }
-@keyframes blinkin { 50% { opacity: 0; } }
+.det { transition: left .24s steps(3), top .24s steps(3), width .24s steps(3), height .24s steps(3); }
+.det.frame { --c: var(--ink-3); border-style: dashed; background: none; transition: none; }
+.det.frame b { background: var(--paper); color: var(--ink-2); box-shadow: inset 0 0 0 1px var(--ink-3); }
+.det.frame::after { display: none; }
 .cross { position: absolute; z-index: 2; width: 13px; height: 13px; transform: translate(-50%, -50%); color: var(--v-2); }
 .cross::before, .cross::after { content: ""; position: absolute; background: currentColor; }
 .cross::before { left: 6px; top: 0; width: 1px; height: 13px; } .cross::after { top: 6px; left: 0; height: 1px; width: 13px; }
@@ -172,7 +169,7 @@ html[lang="zh-CN"] .up { letter-spacing: .04em; }
   -webkit-mask-image: repeating-linear-gradient(90deg, #000 0 .5em, transparent .5em .56em);
           mask-image: repeating-linear-gradient(90deg, #000 0 .5em, transparent .5em .56em);
 }
-.wordmark { font-size: clamp(44px, 12vw, 150px); margin: 0; text-align: center; position: relative; z-index: 1; }
+.wordmark { font-size: clamp(44px, 11vw, 124px); margin: 0; text-align: center; position: relative; z-index: 1; }
 
 .cta-row { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 14px; }
 .barcode { height: 66px; width: 190px; color: var(--ink); }
@@ -189,7 +186,7 @@ footer { padding: 40px 0 48px; }
 .eot .r .barcode { margin-left: auto; }
 
 /* responsive */
-@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } .scanline { animation: none; top: 38%; } .det.new { animation: none; } }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } .det { transition: none; } }
 @media (max-width: 1000px) {
   .top .sys { display: none; }
   .lang { margin-left: auto; }
@@ -198,7 +195,7 @@ footer { padding: 40px 0 48px; }
   .hero { padding-top: 24px; }
   .stage { min-height: calc(100svh - 104px); }
   .hero-c { padding: 66px 16px 40px; }
-  .band { min-height: 260px; }
+  .band { min-height: 280px; }
   .bottom { padding-top: 56px; }
   .planet { width: max(1000px, 280%); }
   .prompt pre { font-size: 11.5px; }
@@ -236,14 +233,12 @@ footer { padding: 40px 0 48px; }
     <div class="wrap">
       <div class="frame stage" id="stage">
         <canvas class="mosaic" id="mosaic" aria-hidden="true"></canvas>
-        <div class="scanwrap" id="scanwrap" aria-hidden="true"><div class="scanline" id="scanline" data-y="y 000"></div></div>
         <svg class="wires" id="wires" aria-hidden="true"></svg>
         <div class="hub up" id="hub" aria-hidden="true"><span class="mark"><svg viewBox="0 0 32 32"><path d="M19 6v14.5a4.5 4.5 0 0 1-4.5 4.5H11v-3.6h3.2a1.2 1.2 0 0 0 1.2-1.2V6H19z" fill="currentColor"/></svg></span>jobfeed</div>
         <div id="dets" aria-hidden="true"></div>
         <span class="cross" style="left:7%;top:34%" aria-hidden="true"></span>
         <span class="cross" style="left:94%;top:27%" aria-hidden="true"></span>
-        <span class="cross" style="left:52%;top:9%" aria-hidden="true"></span>
-        <span class="corner tl up" aria-hidden="true">- 0 1<br>.jobfeed / recognition</span>
+                <span class="corner tl up" aria-hidden="true">- 0 1<br>.jobfeed / recognition</span>
         <span class="corner tr up" id="xy" aria-hidden="true">x 0000 · y 0000<br>scanning</span>
         <span class="corner bl up" aria-hidden="true">( <span class="d" id="dots">...</span> ) demo feed</span>
         <span class="corner br up" aria-hidden="true">applied <span id="count">0128</span></span>
@@ -351,135 +346,195 @@ If you aren't running on my server, ask me how to reach it. Ask me before using 
 
   /* ---------- recognition stage ---------- */
   var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-  function g(x, m, sd) { return Math.exp(-((x - m) * (x - m)) / (2 * sd * sd)); }
-  function noise2(seed) {
-    var r = rng(seed), grid = [];
-    for (var i = 0; i < 64 * 64; i++) grid.push(r());
-    function v(x, y) { x = ((x % 64) + 64) % 64; y = ((y % 64) + 64) % 64; return grid[y * 64 + x]; }
-    return function (x, y) {
-      var xi = Math.floor(x), yi = Math.floor(y), xf = x - xi, yf = y - yi;
-      var u = xf * xf * (3 - 2 * xf), w = yf * yf * (3 - 2 * yf);
-      var a = v(xi, yi), b = v(xi + 1, yi), c = v(xi, yi + 1), d = v(xi + 1, yi + 1);
-      return a + (b - a) * u + (c - a) * w + (a - b - c + d) * u * w;
-    };
-  }
-  var PAL = ["#120a45", "#1d1166", "#2c1a8f", "#3f28b8", "#5638db", "#7258ef", "#937cff", "#b9a9ff", "#d9cfff", "#26301f", "#3c4a33", "#5e3f8f"];
   var stage = document.getElementById("stage"), band = document.getElementById("band");
   var canvas = document.getElementById("mosaic"), ctx = canvas.getContext("2d");
-  var wires = document.getElementById("wires"), hub = document.getElementById("hub");
-  var detsEl = document.getElementById("dets"), scanwrap = document.getElementById("scanwrap"), scanline = document.getElementById("scanline");
+  var wires = document.getElementById("wires"), hub = document.getElementById("hub"), detsEl = document.getElementById("dets");
   var xy = document.getElementById("xy"), countEl = document.getElementById("count");
-  var R = rng(9001), cells = [], cols = 0, rows = 0, B = null, hubP = null, count = 128;
-  var n1 = noise2(4242), n2 = noise2(4253);
-
-  function measure() {
-    var sr = stage.getBoundingClientRect(), br = band.getBoundingClientRect();
-    B = { x: br.left - sr.left, y: br.top - sr.top, w: br.width, h: br.height, W: sr.width, H: sr.height };
-    var mobile = B.W < 720;
-    hubP = mobile ? { x: B.x + B.w * 0.5, y: B.y + 22 } : { x: B.x + B.w * 0.13, y: B.y + B.h * 0.5 };
-    hub.style.left = hubP.x + "px"; hub.style.top = hubP.y + "px";
-    scanwrap.style.top = B.y + "px"; scanwrap.style.height = B.h + "px";
-    wires.setAttribute("viewBox", "0 0 " + B.W + " " + B.H);
-  }
-  function buildMosaic() {
-    var top = B.y - 60, h = B.h + 180, size = B.W < 720 ? 7 : 8;
-    canvas.style.top = top + "px"; canvas.style.height = h + "px";
-    cols = Math.max(1, Math.round(B.W / size)); rows = Math.max(1, Math.round(h / size));
-    canvas.width = cols; canvas.height = rows; cells = [];
-    var r = rng(77);
-    for (var y = 0; y < rows; y++) for (var x = 0; x < cols; x++) {
-      var u = x / cols, t = y / rows;
-      var cloud = g(t, 0.45, 0.15) * (0.35 + 0.75 * g(u, 0.3, 0.17) + 0.75 * g(u, 0.8, 0.15));
-      var trunk = g(u, 0.6 - t * 0.12, 0.045) * (t < 0.55 ? 1.15 : 0.3);
-      var d = Math.max(cloud, trunk) * (0.55 + 0.9 * n1(x / 5.5, y / 5.5)) + (r() < 0.012 ? 0.6 : 0);
-      if (d > 0.68) {
-        var shade = n2(x / 3, y / 3) * 0.75 + r() * 0.35 + (d - 0.68) * 0.25;
-        var idx = Math.min(PAL.length - 1, Math.floor(shade * 8.5));
-        if (r() < 0.06) idx = 9 + Math.floor(r() * 3);
-        cells.push([x, y, idx]);
-      }
-    }
-    drawMosaic();
-  }
-  function drawMosaic() {
-    ctx.clearRect(0, 0, cols, rows);
-    for (var i = 0; i < cells.length; i++) { ctx.fillStyle = PAL[cells[i][2]]; ctx.fillRect(cells[i][0], cells[i][1], 1, 1); }
-  }
-
+  var R = rng(9001), C = {}, L = null, count = 128, packets = [], halo = [], tick = 0;
+  var CW = 40, CH = 27;
   var JOBS = ["Backend eng · fintech", "SWE II · infra", "Platform eng · payments", "ML engineer · search", "Full-stack · health",
     "Data engineer · ads", "iOS engineer · consumer", "SRE · cloud", "Security eng · devtools", "Frontend · design tools"];
-  var dets = [];
-  function pad(n, k) { n = String(Math.round(n)); while (n.length < k) n = "0" + n; return n; }
-  function place(d) {
-    var mobile = B.W < 720, n = dets.length, slot = dets.indexOf(d);
-    var x0 = mobile ? B.x + 6 : hubP.x + 96, x1 = B.x + B.w - 6;
-    var sw = (x1 - x0) / n, w = Math.min(sw - (mobile ? 14 : 30), (mobile ? 92 : 118) + R() * (mobile ? 50 : 100));
-    var y0 = mobile ? B.y + 64 : B.y + 28, h = (mobile ? 48 : 56) + R() * (mobile ? 30 : 56);
-    var x = x0 + slot * sw + R() * Math.max(0, sw - w - (mobile ? 14 : 30));
-    var y = y0 + R() * Math.max(1, B.y + B.h - 30 - h - y0);
-    d.x = x; d.y = y; d.w = w; d.h = h;
-    d.el.style.left = x + "px"; d.el.style.top = y + "px"; d.el.style.width = w + "px"; d.el.style.height = h + "px";
-    d.job = JOBS[Math.floor(R() * JOBS.length)]; d.step = 0; d.score = 0.35 + R() * 0.6; d.wait = R() < 0.2;
-    d.el.classList.remove("new"); void d.el.offsetWidth; if (!reduce) d.el.classList.add("new");
+  function pad(n, k) { n = String(Math.max(0, Math.round(n))); while (n.length < k) n = "0" + n; return n; }
+  function colors() {
+    var cs = getComputedStyle(document.documentElement);
+    ["--v", "--v-2", "--v-deep", "--v-soft", "--ink", "--ink-3", "--paper", "--faint"].forEach(function (k) { C[k.slice(2)] = cs.getPropertyValue(k).trim(); });
+    var h = C.paper.replace("#", ""), lum = parseInt(h.slice(0, 2), 16) + parseInt(h.slice(2, 4), 16) + parseInt(h.slice(4, 6), 16);
+    C.edge = lum < 240 ? C["v-2"] : C["v-deep"];
   }
-  function render(d) {
-    var lab, cls = "";
-    var skip = d.score < 0.55;
-    if (d.step === 0) lab = "Detected";
-    else if (d.step === 1) lab = "Match " + d.score.toFixed(2);
-    else if (skip) { lab = "Skip · low fit"; cls = "skip"; }
-    else if (d.step === 2) lab = "Applying " + (7 + Math.floor(R() * 7)) + "/15";
-    else if (d.wait) { lab = "Waiting · question for you"; cls = "wait"; }
-    else { lab = "Submitted ✓"; cls = "done"; }
-    d.el.className = "det" + (cls ? " " + cls : "");
-    d.el.innerHTML = "<b>" + lab + "</b><i>" + d.job + "</i>";
+  var BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
+
+  var frame = document.createElement("div"), box = document.createElement("div");
+  frame.className = "det frame"; detsEl.appendChild(frame); detsEl.appendChild(box);
+
+  function layout() {
+    colors();
+    var sr = stage.getBoundingClientRect(), br = band.getBoundingClientRect();
+    var mobile = sr.width < 720;
+    var bx = br.left - sr.left, by = br.top - sr.top, bw = br.width, bh = br.height;
+    var S = Math.max(5, Math.min(10, Math.floor((mobile ? bh - 70 : bh - 30) / CH), Math.floor((mobile ? bw : bw * 0.5) / CW)));
+    var GW = Math.floor(bw / S), GH = Math.floor(bh / S);
+    var left = Math.round(bx + (bw - GW * S) / 2), top = Math.round(by + (bh - GH * S) / 2);
+    var cx = mobile ? Math.floor((GW - CW) / 2) : Math.floor(GW * 0.56 - CW / 2);
+    var cy = mobile ? GH - CH - 1 : Math.floor((GH - CH) / 2);
+    L = { S: S, GW: GW, GH: GH, left: left, top: top, cx: cx, cy: cy, mobile: mobile, W: sr.width, H: sr.height };
+    var dpr = window.devicePixelRatio || 1;
+    canvas.style.left = left + "px"; canvas.style.top = top + "px";
+    canvas.style.width = GW * S + "px"; canvas.style.height = GH * S + "px";
+    canvas.width = GW * S * dpr; canvas.height = GH * S * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    hub.style.left = (mobile ? left + GW * S / 2 : bx + 70) + "px";
+    hub.style.top = (mobile ? top + cy * S - 52 : top + (cy + CH / 2) * S) + "px";
+    wires.setAttribute("viewBox", "0 0 " + sr.width + " " + sr.height);
+    halo = [];
+    for (var y = 0; y < GH; y++) for (var x = 0; x < GW; x++) {
+      var dx = Math.max(cx - x, 0, x - (cx + CW - 1)), dy = Math.max(cy - y, 0, y - (cy + CH - 1));
+      if (!dx && !dy) continue;
+      var d = Math.sqrt(dx * dx + dy * dy), th = BAYER[(y % 4) * 4 + (x % 4)] / 16;
+      if (d >= 2 && th < 0.56 - d / 11) halo.push([x, y, 0]);
+    }
+    var fr = rectPx(-1, -1, CW + 2, CH + 2);
+    place(frame, fr);
+    packets = [];
+    draw(); placeBox();
+  }
+  function rectPx(x, y, w, h) {
+    return { x: L.left + (L.cx + x) * L.S - 3, y: L.top + (L.cy + y) * L.S - 3, w: w * L.S + 5, h: h * L.S + 5 };
+  }
+  function place(el, r) { el.style.left = r.x + "px"; el.style.top = r.y + "px"; el.style.width = r.w + "px"; el.style.height = r.h + "px"; }
+
+  /* job cycle */
+  var job, st, ph, t;
+  function newJob() {
+    job = { name: JOBS[Math.floor(R() * JOBS.length)], id: 300 + Math.floor(R() * 650), score: 0.38 + R() * 0.58, wait: R() < 0.3, asked: false };
+    st = { title: 0, scan: -1, score: false, fill: [0, 0, 0, 0, 0], field: 0, submit: 0, skip: 0 };
+    ph = "load"; t = 0;
+    frame.innerHTML = "<b>Target #0" + job.id + " · " + job.name + "</b>";
+  }
+  var FIELD_Y = [8, 11, 14, 17, 20];
+  var A = { r: [0, 0, CW, 6], label: "Detected", cls: "" };
+  function step() {
+    t++;
+    if (ph === "load") {
+      st.scan = t - 1; st.title = Math.min(1, t / 8);
+      A = { r: [1, 1, CW - 2, 5], label: "Reading posting", cls: "" };
+      if (t >= CH) { st.scan = -1; ph = "score"; t = 0; }
+    } else if (ph === "score") {
+      st.score = true;
+      A = { r: [1, 1, CW - 2, 5], label: "Match " + job.score.toFixed(2) + (job.score < 0.55 ? " · low" : " · apply"), cls: job.score < 0.55 ? "skip" : "" };
+      if (t >= 14) { ph = job.score < 0.55 ? "skip" : "apply"; t = 0; }
+    } else if (ph === "skip") {
+      st.skip = Math.min(1, t / 14);
+      A = { r: [0, 0, CW, CH], label: "Skip · low fit", cls: "skip" };
+      if (t >= 26) { ph = "out"; t = 0; }
+    } else if (ph === "apply") {
+      var i = st.field;
+      if (job.wait && i === 3 && !job.asked && st.fill[i] >= 0.35) { ph = "wait"; t = 0; job.asked = true; }
+      else {
+        st.fill[i] = Math.min(1, st.fill[i] + 0.12);
+        if (st.fill[i] >= 1) st.field++;
+        if (st.field >= 5) { ph = "submit"; t = 0; }
+      }
+      var n = Math.min(15, i * 3 + Math.ceil(st.fill[Math.min(i, 4)] * 3));
+      A = { r: [9, FIELD_Y[Math.min(i, 4)] - 1, CW - 11, 4], label: "Applying " + n + "/15", cls: "" };
+    } else if (ph === "wait") {
+      A = { r: [9, FIELD_Y[3] - 1, CW - 11, 4], label: "Waiting · question for you", cls: "wait" };
+      if (t >= 24) { ph = "apply"; t = 0; }
+    } else if (ph === "submit") {
+      st.submit = t;
+      if (t === 4) { count++; countEl.textContent = pad(count, 4); packets.push({ x: L.cx + CW + 1, y: L.cy + CH - 4, w: 4, h: 2, out: true }); }
+      A = { r: [CW - 13, CH - 5, 12, 5], label: t < 4 ? "Submit" : "Submitted ✓", cls: t < 4 ? "" : "done" };
+      if (t >= 22) { ph = "out"; t = 0; }
+    } else if (ph === "out") {
+      A = { r: [0, 0, CW, CH], label: "Next posting", cls: "skip" };
+      if (t >= 5) newJob();
+    }
+  }
+  function placeBox() {
+    var r = rectPx(A.r[0], A.r[1], A.r[2], A.r[3]);
+    place(box, r);
+    box.className = "det" + (A.cls ? " " + A.cls : "");
+    var html = "<b>" + A.label + "</b>";
+    if (box.innerHTML !== html) box.innerHTML = html;
   }
   function drawWires() {
-    var out = "";
-    dets.forEach(function (d) {
-      var tx = d.x + (d.x > hubP.x ? 0 : d.w), ty = d.y + d.h / 2;
-      var mx = hubP.x + (tx - hubP.x) * 0.55;
-      out += '<path d="M' + hubP.x + " " + hubP.y + " L" + mx + " " + hubP.y + " L" + tx + " " + ty + '"/>';
-      out += '<circle cx="' + tx + '" cy="' + ty + '" r="2.5"/>';
-    });
-    wires.innerHTML = out;
+    var hx = hub.offsetLeft + (L.mobile ? 0 : hub.offsetWidth / 2), hy = hub.offsetTop + (L.mobile ? hub.offsetHeight / 2 : 0);
+    var tx = box.offsetLeft + (L.mobile ? 0 : 0), ty = box.offsetTop + box.offsetHeight / 2;
+    if (L.mobile) { tx = box.offsetLeft + box.offsetWidth / 2; ty = box.offsetTop; }
+    var d = L.mobile ? "M" + hx + " " + hy + " L" + hx + " " + (hy + (ty - hy) / 2) + " L" + tx + " " + (hy + (ty - hy) / 2) + " L" + tx + " " + ty
+      : "M" + hx + " " + hy + " L" + (hx + (tx - hx) * 0.5) + " " + hy + " L" + (hx + (tx - hx) * 0.5) + " " + ty + " L" + tx + " " + ty;
+    wires.innerHTML = '<path d="' + d + '"/><circle cx="' + tx + '" cy="' + ty + '" r="2.5"/>';
+    xy.innerHTML = "x " + pad(tx, 4) + " · y " + pad(ty, 4) + "<br>" + (ph === "load" ? "reading" : ph === "wait" ? "holding" : "tracking");
   }
-  function layout() {
-    measure(); buildMosaic();
-    var n = B.W < 720 ? 2 : B.W < 1000 ? 3 : 4;
-    detsEl.innerHTML = ""; dets = [];
-    for (var i = 0; i < n; i++) { var el = document.createElement("div"); detsEl.appendChild(el); dets.push({ el: el }); }
-    dets.forEach(function (d, i) { place(d); d.step = reduce ? [3, 1, 2, 3][i] : i % 3; render(d); });
-    drawWires();
-  }
-  layout();
-  var rt; window.addEventListener("resize", function () { clearTimeout(rt); rt = setTimeout(layout, 160); });
-  if (document.fonts && document.fonts.ready) document.fonts.ready.then(layout);
 
-  if (!reduce) {
-    var k = 0;
-    setInterval(function () {
-      if (document.hidden || !dets.length) return;
-      var d = dets[k++ % dets.length];
-      d.step++;
-      var skip = d.score < 0.55;
-      if ((skip && d.step > 2) || d.step > 3) { place(d); drawWires(); }
-      else if (d.step === 3 && !d.wait) { count++; countEl.textContent = pad(count, 4); }
-      render(d);
-      xy.innerHTML = "x " + pad(d.x, 4) + " · y " + pad(d.y, 4) + "<br>" + (d.step === 0 ? "target lock" : "scanning");
-      for (var j = 0; j < 8; j++) { var c = cells[Math.floor(R() * cells.length)]; if (c) c[2] = Math.min(PAL.length - 1, Math.max(0, c[2] + (R() < 0.5 ? -1 : 1))); }
-      drawMosaic();
-    }, 650);
-    setInterval(function () {
-      var y = scanline.offsetTop; scanline.setAttribute("data-y", "y " + pad(B.y + y, 3));
-    }, 120);
-    stage.addEventListener("pointermove", function (e) {
-      var r = stage.getBoundingClientRect();
-      xy.innerHTML = "x " + pad(e.clientX - r.left, 4) + " · y " + pad(e.clientY - r.top, 4) + "<br>tracking";
-    });
-    var dots = document.getElementById("dots"), di = 0;
-    setInterval(function () { di = (di + 1) % 4; dots.textContent = ".".repeat(di); }, 450);
+  /* pixels */
+  function draw() {
+    var S = L.S, g = S - 1;
+    ctx.clearRect(0, 0, L.GW * S, L.GH * S);
+    function px(x, y, c) { ctx.fillStyle = c; ctx.fillRect(x * S, y * S, g, g); }
+    function rect(x, y, w, h, c) { for (var yy = 0; yy < h; yy++) for (var xx = 0; xx < w; xx++) px(L.cx + x + xx, L.cy + y + yy, c); }
+    function line(x, y, w, c) { rect(x, y, w, 1, c); }
+    halo.forEach(function (h) { px(h[0], h[1], h[2] ? C["v-2"] : C["v-soft"]); });
+    packets.forEach(function (p) { for (var yy = 0; yy < p.h; yy++) for (var xx = 0; xx < p.w; xx++) px(p.x + xx, p.y + yy, p.out ? C.edge : C.v); });
+    if (!st) return;
+    rect(0, 0, CW, CH, C.paper);
+    for (var x = 0; x < CW; x++) { px(L.cx + x, L.cy, C.edge); px(L.cx + x, L.cy + CH - 1, C.edge); }
+    for (var y = 0; y < CH; y++) { px(L.cx, L.cy + y, C.edge); px(L.cx + CW - 1, L.cy + y, C.edge); }
+    var on = st.title > 0;
+    rect(2, 2, 3, 3, on ? C.v : C["v-soft"]);
+    line(7, 2, Math.max(1, Math.round(22 * st.title)), on ? C.edge : C["v-soft"]);
+    line(7, 4, Math.max(1, Math.round(14 * st.title)), on ? C["v-2"] : C["v-soft"]);
+    if (st.score) { var sc = job.score < 0.55 ? C["ink-3"] : C.v; rect(CW - 8, 2, 6, 3, sc); }
+    for (x = 1; x < CW - 1; x += 2) px(L.cx + x, L.cy + 6, C["v-soft"]);
+    for (var i = 0; i < 5; i++) {
+      var fy = FIELD_Y[i], iw = CW - 13;
+      line(2, fy, 5, C["v-2"]);
+      line(10, fy + 1, iw, C["v-soft"]);
+      var fl = Math.round(iw * st.fill[i]);
+      if (fl) { line(10, fy, fl, C.v); line(10, fy + 1, fl, C.v); }
+      if (ph === "wait" && i === 3 && tick % 4 < 2) rect(10 + fl, fy, 1, 2, C.edge);
+    }
+    var lit = st.submit >= 4, flash = lit && st.submit < 12 && st.submit % 2;
+    if (lit) rect(CW - 12, CH - 5, 10, 3, flash ? C.edge : C.v);
+    else {
+      for (x = 0; x < 10; x++) { px(L.cx + CW - 12 + x, L.cy + CH - 5, C.edge); px(L.cx + CW - 12 + x, L.cy + CH - 3, C.edge); }
+      px(L.cx + CW - 12, L.cy + CH - 4, C.edge); px(L.cx + CW - 3, L.cy + CH - 4, C.edge);
+    }
+    if (st.scan >= 0 && st.scan < CH) for (x = 1; x < CW - 1; x++) if ((x + st.scan) % 3) px(L.cx + x, L.cy + st.scan, C["v-2"]);
+    if (st.skip) {
+      var n = Math.round((CH - 2) * st.skip);
+      for (var k = 0; k < n; k++) {
+        var xa = Math.round(1 + k * (CW - 3) / (CH - 3));
+        px(L.cx + xa, L.cy + 1 + k, C.ink); px(L.cx + CW - 2 - xa + 1, L.cy + 1 + k, C.ink);
+      }
+    }
   }
+  function movePackets() {
+    if (L.mobile) { packets = []; return; }
+    var startX = Math.ceil((hub.offsetLeft + hub.offsetWidth / 2 - L.left) / L.S) + 1;
+    if (tick % 5 === 0 && ph !== "out") packets.push({ x: startX, y: L.cy + 3 + Math.floor(R() * (CH - 6)), w: 2 + Math.floor(R() * 3), h: 1 });
+    packets = packets.filter(function (p) {
+      p.x += 1;
+      return p.out ? p.x < L.GW : p.x + p.w < L.cx;
+    });
+  }
+
+  newJob();
+  layout();
+  if (reduce) {
+    ph = "apply"; st.title = 1; st.score = true; st.fill = [1, 1, 1, 0.5, 0]; st.field = 3; job.score = 0.86; job.wait = false;
+    A = { r: [9, FIELD_Y[3] - 1, CW - 11, 4], label: "Applying 11/15", cls: "" };
+    draw(); placeBox(); drawWires();
+  } else {
+    setInterval(function () {
+      if (document.hidden) return;
+      tick++; step(); movePackets(); draw(); placeBox(); drawWires();
+    }, 95);
+  }
+  var rt; window.addEventListener("resize", function () { clearTimeout(rt); rt = setTimeout(function () { layout(); drawWires(); }, 160); });
+  if (window.matchMedia) window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", function () { colors(); draw(); });
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(function () { layout(); drawWires(); });
+  var dots = document.getElementById("dots"), di = 0;
+  if (!reduce) setInterval(function () { di = (di + 1) % 4; dots.textContent = ".".repeat(di); }, 450);
 
 })();
 </script>
