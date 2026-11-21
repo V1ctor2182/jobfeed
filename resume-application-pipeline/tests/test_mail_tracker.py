@@ -206,10 +206,28 @@ class TrackerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'unknown message'):
             body(self.store, 'not-synced', lambda *a: self.fail('Gmail was asked for a message the sync never saved'))
 
-    def test_a_message_without_a_received_time_does_not_stop_the_sync(self):
-        undated = message('m2', 'Application received', 'Thank you for applying')
-        del undated['internalDate']
-        self.assertEqual(sync(self.store, pages([undated, message('m1', 'Interview invitation', 'x')])), 2)
+    def test_a_search_hit_without_time_or_name_gets_them_from_its_thread(self):
+        full = message('m2', 'Interview invitation', 'Pick a time', name='Acme Recruiting', when='2026-11-10T09:30:00+00:00')
+        bare = {k: full[k] for k in ('id', 'threadId', 'sender', 'subject')}  # what Gmail search returns since 2026-11-21
+        calls = []
+
+        def call(tool, request):
+            calls.append((tool, request))
+            return {'threads': [{'id': 'm2', 'messages': [bare]}]} if tool.endswith('search_threads') else {'messages': [full]}
+        self.assertEqual(sync(self.store, call), 1)
+        saved = self.store.messages()[0]
+        self.assertEqual((saved['received_at'], saved['sender_name'], saved['snippet']), ('2026-11-10T09:30:00+00:00', 'Acme Recruiting', 'Pick a time'))
+        self.assertEqual(calls[1], ('mcp__claude_ai_Gmail__get_thread', {'threadId': 'm2', 'messageFormat': 'MINIMAL'}))
+
+    def test_a_thread_that_cannot_be_read_does_not_stop_the_sync(self):
+        from pipeline.workday_accounts import GmailError
+        bare = {'id': 'm2', 'threadId': 'm2', 'sender': 'jobs@acme.test', 'subject': 'Application received'}
+
+        def call(tool, request):
+            if tool.endswith('get_thread'):
+                raise GmailError('the Gmail result was not JSON')
+            return {'threads': [{'id': 'm2', 'messages': [bare]}, {'id': 'm1', 'messages': [message('m1', 'Interview invitation', 'x')]}]}
+        self.assertEqual(sync(self.store, call), 2)
         self.assertIsNone(self.store.last_run()['error'])
         self.assertEqual({m['id'] for m in self.store.messages()}, {'m1', 'm2'})
 

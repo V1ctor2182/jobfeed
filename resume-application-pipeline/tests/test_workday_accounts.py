@@ -75,12 +75,14 @@ class VerificationLinkTests(unittest.TestCase):
             calls.append((tool, arguments))
             if tool.endswith('search_threads'):
                 return {'threads': [{'id': 't1', 'messages': [
-                    {'id': 'old', 'threadId': 't1', 'sender': 'acme@myworkday.com', 'internalDate': '1000'},
-                    {'id': 'spoof', 'threadId': 't1', 'sender': 'acme@myworkday.com.evil.test', 'internalDate': '9000000'},
-                    {'id': 'spoof2', 'threadId': 't1', 'sender': 'acme@otp.workday.com.evil.test', 'internalDate': '9000000'},
-                    {'id': 'new', 'threadId': 't1', 'sender': 'acme@otp.workday.com', 'internalDate': '5000000'}]}]}
-            return {'messages': [{'id': 'old', 'plaintextBody': 'https://acme.wd5.myworkdayjobs.com/en-US/Careers/activate/stale'},
-                                 {'id': 'new', 'plaintextBody': f'Verify: {LINK}'}]}
+                    {'id': 'old', 'threadId': 't1', 'sender': 'acme@myworkday.com'},
+                    {'id': 'spoof', 'threadId': 't1', 'sender': 'acme@myworkday.com.evil.test'},
+                    {'id': 'spoof2', 'threadId': 't1', 'sender': 'acme@otp.workday.com.evil.test'},
+                    {'id': 'new', 'threadId': 't1', 'sender': 'acme@otp.workday.com'}]}]}
+            # The search hits carry no time; the thread does.
+            return {'messages': [{'id': 'old', 'internalDate': '1000', 'plaintextBody': 'https://acme.wd5.myworkdayjobs.com/en-US/Careers/activate/stale'},
+                                 {'id': 'spoof', 'internalDate': '9000000', 'plaintextBody': 'https://evil.test/activate/x'},
+                                 {'id': 'new', 'internalDate': '5000000', 'plaintextBody': f'Verify: {LINK}'}]}
 
         self.assertEqual(find_verification_link(ACME, 'me@example.test', 4000, call), LINK)
         self.assertIn('from:acme@myworkday.com OR from:acme@otp.workday.com', calls[0][1]['query'])

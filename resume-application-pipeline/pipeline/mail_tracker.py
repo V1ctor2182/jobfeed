@@ -29,6 +29,7 @@ QUERY = ('{subject:application subject:applying subject:applied subject:intervie
          'subject:assessment subject:"thank you for" subject:"next steps" subject:"your interest"} -category:promotions -in:sent')
 PAGE_SIZE = 50
 MAX_PAGES = 12
+DETAIL_THREADS = 40
 BACKFILL_DAYS = 45
 GHOSTED_AFTER = timedelta(days=21)
 STAGES = ('applied', 'ghosted', 'interviewing', 'rejected', 'offer')
@@ -199,8 +200,7 @@ def _row(message):
     names = {n.get('emailAddress'): n.get('displayName') for n in message.get('addressDisplayNames') or ()}
     sender, subject = message.get('sender') or '', html.unescape(message.get('subject') or '')
     snippet = ' '.join(html.unescape(message.get('snippet') or '').replace('͏', ' ').split())
-    # Gmail sometimes leaves internalDate out of a search result. One such message must not stop the whole sync, so
-    # it counts as received when the sync saw it.
+    # A message whose thread could not be read has no time. It counts as received when the sync saw it.
     millis = message.get('internalDate')
     received = datetime.fromtimestamp(int(millis) / 1000, timezone.utc).isoformat() if str(millis or '').isdigit() else _now()
     return (message['id'], message.get('threadId') or message['id'], sender, names.get(sender), subject, snippet, received,
@@ -252,7 +252,8 @@ def sync(store, call, *, days=None, max_pages=MAX_PAGES, now=None):
         last = store.last_success()
         gap = ((now or datetime.now(timezone.utc)) - last).days + 2 if last else BACKFILL_DAYS
         days = min(BACKFILL_DAYS, max(3, gap)) if known else BACKFILL_DAYS
-    added, token = 0, None
+    from pipeline.workday_accounts import read_threads
+    added, token, budget = 0, None, DETAIL_THREADS
     try:
         for _ in range(max_pages):
             request = {'query': f'{QUERY} newer_than:{days}d', 'pageSize': PAGE_SIZE, 'view': 'THREAD_VIEW_SUMMARY'}
@@ -260,7 +261,11 @@ def sync(store, call, *, days=None, max_pages=MAX_PAGES, now=None):
                 request['pageToken'] = token
             page = call(SEARCH, request)
             fresh = [m for thread in page.get('threads') or () for m in thread.get('messages') or () if m.get('id') and m['id'] not in known]
-            added += store.add([_row(m) for m in fresh])
+            # Search results carry no time, preview or sender name, so those come from each new message's thread.
+            undated = [m for m in fresh if not str(m.get('internalDate') or '').isdigit()]
+            details = {m['id']: m for m in read_threads(undated, call, max(budget, 0), 'MINIMAL')}
+            budget -= len({m.get('threadId') or m['id'] for m in undated})
+            added += store.add([_row(details.get(m['id'], m)) for m in fresh])
             known.update(m['id'] for m in fresh)
             token = page.get('nextPageToken')
             if not fresh or not token:

@@ -238,16 +238,31 @@ def gmail_call(tool, tool_input):
     raise GmailError(f'the Gmail tool returned no result (claude exited {done.returncode})')
 
 
+def read_threads(hits, call, limit, message_format='PLAIN_TEXT'):
+    """The full messages for these search hits, newest first, each read from its thread.
+
+    Since 2026-11-21 a Gmail search returns no message time, preview or display names; get_thread still does. Each
+    thread is read once, for at most limit threads in search order. A thread the courier cannot return is skipped.
+    A field the thread leaves out keeps its value from the search hit."""
+    by_id = {m['id']: m for m in hits if m.get('id')}
+    full = []
+    for thread_id in list(dict.fromkeys(m.get('threadId') or m['id'] for m in by_id.values()))[:limit]:
+        try:
+            thread = call(_THREAD_TOOL, {'threadId': thread_id, 'messageFormat': message_format})
+        except GmailError:
+            continue
+        full += [{**by_id[m['id']], **m} for m in thread.get('messages') or () if m.get('id') in by_id]
+    return sorted(full, key=lambda m: int(m.get('internalDate') or 0), reverse=True)
+
+
 def find_verification_link(site, email, since, call=gmail_call):
     """The verification link in the newest email from the site's tenant to email that arrived after since (epoch seconds)."""
     senders = ' OR '.join(f'from:{sender}' for sender in site.senders)
     found = call(_SEARCH_TOOL, {'query': f'({senders}) to:{email} newer_than:2d', 'pageSize': 10, 'view': 'THREAD_VIEW_METADATA_ONLY'})
-    messages = [m for thread in found.get('threads') or () for m in thread.get('messages') or ()
-                if parseaddr(m.get('sender', ''))[1].lower() in site.senders and int(m.get('internalDate') or 0) >= since * 1000]
-    for message in sorted(messages, key=lambda m: int(m['internalDate']), reverse=True):
-        thread = call(_THREAD_TOOL, {'threadId': message['threadId'], 'messageFormat': 'PLAIN_TEXT'})
-        body = next((m.get('plaintextBody') or '' for m in thread.get('messages') or () if m.get('id') == message['id']), '')
-        if link := verification_link(body, site):
+    hits = [m for thread in found.get('threads') or () for m in thread.get('messages') or ()
+            if parseaddr(m.get('sender', ''))[1].lower() in site.senders]
+    for message in read_threads(hits, call, limit=5):
+        if int(message.get('internalDate') or 0) >= since * 1000 and (link := verification_link(message.get('plaintextBody') or '', site)):
             return link
     return None
 

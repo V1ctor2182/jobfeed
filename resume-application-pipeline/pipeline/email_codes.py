@@ -62,16 +62,11 @@ def code_in(text):
 def _recent(email, since, words, call):
     """The newest messages to this address after since, each with its sender, subject and plain-text body."""
     found = call(SEARCH, {'query': f'to:{email} newer_than:1d ({words})', 'pageSize': 10, 'view': 'THREAD_VIEW_METADATA_ONLY'})
-    messages = [m for thread in found.get('threads') or () for m in thread.get('messages') or () if int(m.get('internalDate') or 0) >= since * 1000]
-    for message in sorted(messages, key=lambda m: int(m['internalDate']), reverse=True)[:MAX_MESSAGES]:
-        try:
-            thread = call(THREAD, {'threadId': message['threadId'], 'messageFormat': 'PLAIN_TEXT'})
-        except workday_accounts.GmailError:
-            # The courier cannot return some large messages as JSON. One such message must not hide the code in another.
-            continue
-        full = next((m for m in thread.get('messages') or () if m.get('id') == message['id']), None)
-        if full is not None:
-            yield full.get('sender') or message.get('sender') or '', full.get('subject') or '', full.get('plaintextBody') or ''
+    hits = [m for thread in found.get('threads') or () for m in thread.get('messages') or ()]
+    # A thread the courier cannot return, such as one large message, is skipped and does not hide the code in another.
+    messages = [m for m in workday_accounts.read_threads(hits, call, limit=MAX_MESSAGES) if int(m.get('internalDate') or 0) >= since * 1000]
+    for message in messages[:MAX_MESSAGES]:
+        yield message.get('sender') or '', message.get('subject') or '', message.get('plaintextBody') or ''
 
 
 def site_of(host):

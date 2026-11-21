@@ -13,9 +13,10 @@ def mailbox(*messages):
     """A Gmail double: each message is (id, epoch seconds, sender, subject, body)."""
     def call(tool, tool_input):
         if tool == email_codes.SEARCH:
-            return {'threads': [{'messages': [{'id': m[0], 'threadId': 't-' + m[0], 'internalDate': str(m[1] * 1000), 'sender': m[2]}]} for m in messages]}
+            # Like Gmail since 2026-11-21: a search hit has no time; its thread does.
+            return {'threads': [{'messages': [{'id': m[0], 'threadId': 't-' + m[0], 'sender': m[2]}]} for m in messages]}
         m = next(m for m in messages if 't-' + m[0] == tool_input['threadId'])
-        return {'messages': [{'id': m[0], 'sender': m[2], 'subject': m[3], 'plaintextBody': m[4]}]}
+        return {'messages': [{'id': m[0], 'internalDate': str(m[1] * 1000), 'sender': m[2], 'subject': m[3], 'plaintextBody': m[4]}]}
     return call
 
 
