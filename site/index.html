@@ -76,8 +76,28 @@ h1 {
 .star .n { border-left: 1px solid rgba(247, 241, 227, .45); padding: 0 16px; font-variant-numeric: tabular-nums; }
 .star .n svg { width: 14px; height: 14px; }
 .star [hidden] { display: none; }
+.where { margin: 20px 0 0; padding: 9px 16px; border-radius: 14px; font: 400 14.5px/1.5 var(--sans); color: var(--cream); background: rgba(10, 40, 16, .38); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); transition: background .3s, box-shadow .3s; }
+.where.lit { background: rgba(10, 40, 16, .55); box-shadow: 0 0 0 1px rgba(247, 241, 227, .7); }
 
-footer { padding: clamp(72px, 16vh, 180px) 0 40px; }
+/* works with: a slow, endless strip of agent logos */
+.works { padding: clamp(56px, 10vh, 104px) 0 0; }
+.works-t { margin: 0 0 26px; padding: 0 16px; text-align: center; font: 400 13px/1.4 var(--sans); color: var(--ink-3); }
+.marquee {
+  width: min(1120px, 100% - 32px); margin-inline: auto; overflow: hidden;
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 14%, #000 86%, transparent); mask-image: linear-gradient(90deg, transparent, #000 14%, #000 86%, transparent);
+}
+.track { display: flex; width: max-content; }
+.track.run { animation: marquee var(--dur, 30s) linear infinite; }
+.marquee:hover .track { animation-play-state: paused; }
+.agents { display: flex; gap: 60px; margin: 0; padding: 0 60px 0 0; list-style: none; }
+.agents li { display: flex; align-items: center; gap: 11px; font: 500 18px/1 var(--sans); letter-spacing: -.01em; color: var(--ink-2); white-space: nowrap; }
+.agents svg { width: 24px; height: 24px; fill: currentColor; flex: none; }
+.agents img { width: 24px; height: 24px; flex: none; border-radius: 5px; object-fit: contain; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .agents img[src$="genspark.png"] { box-shadow: 0 0 0 1px #3a3835; } }
+@keyframes marquee { to { transform: translateX(-50%); } }
+@media (prefers-reduced-motion: reduce) { .track.run { animation: none; } }
+
+footer { padding: clamp(64px, 12vh, 140px) 0 40px; }
 footer .wrap { display: flex; flex-wrap: wrap; gap: 8px 22px; justify-content: space-between; font-size: 13px; color: var(--ink-3); }
 footer nav { display: flex; flex-wrap: wrap; gap: 8px 22px; }
 footer a { text-decoration: none; } footer a:hover { color: var(--ink); }
@@ -110,12 +130,20 @@ footer a { text-decoration: none; } footer a:hover { color: var(--ink); }
           <div class="acts">
             <button class="copy" type="button"
               data-copy="Set up Jobfeed on my server as a background service.&#10;Read https://raw.githubusercontent.com/V1ctor2182/jobfeed/main/docs/server-install.md&#10;and follow it exactly, including how it says to talk to me: short, structured&#10;messages and numbered choices. If you aren&#x27;t running on my server, ask me how&#10;to reach it. Ask me before using sudo or starting a scan, and test&#10;everything before you hand over."
-              data-done="Copied · paste into Claude Code"
-              title="Copies a setup prompt for Claude Code or Codex">Copy setup prompt</button>
+              data-done="Copied · paste into your agent"
+              title="Copies a setup prompt to paste into your agent">Copy setup prompt</button>
             <a class="star" href="https://github.com/V1ctor2182/jobfeed" aria-label="Star Jobfeed on GitHub"><span><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>Star on GitHub</span><span class="n" id="stars" hidden><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 .25a.75.75 0 01.673.418l1.882 3.815 4.21.612a.75.75 0 01.416 1.279l-3.046 2.97.719 4.192a.75.75 0 01-1.088.791L8 12.347l-3.766 1.98a.75.75 0 01-1.088-.79l.72-4.194L.818 6.374a.75.75 0 01.416-1.28l4.21-.611L7.327.668A.75.75 0 018 .25z"/></svg><b></b></span></a>
           </div>
+          <p class="where" id="where">Paste it into an agent that can run commands on your server:<br>Claude Code, Codex, or one you host yourself.</p>
         </div>
       </div>
+    </div>
+  </section>
+
+  <section class="works" aria-labelledby="works-t">
+    <p class="works-t" id="works-t">Works with any agent that can run commands on your server</p>
+    <div class="marquee">
+      <div class="track" id="track"><ul class="agents"><li><img src="assets/agents/claude.svg" width="24" height="24" alt="">Claude Code</li><li><img src="assets/agents/openai.svg" width="24" height="24" alt="">Codex</li><li><img src="assets/agents/manus.svg" width="24" height="24" alt="">Manus</li><li><img src="assets/agents/orgo.svg" width="24" height="24" alt="">Orgo</li><li><img src="assets/agents/simular-box.svg" width="24" height="24" alt="">Simular box</li><li><img src="assets/agents/genspark.png" width="24" height="24" alt="">Genspark Claw</li><li><img src="assets/agents/openclaw.svg" width="24" height="24" alt="">OpenClaw</li><li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 3h16a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Zm1 2v4h14V5H5Zm-1 8h16a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-6a1 1 0 0 1 1-1Zm1 2v4h14v-4H5Zm2-8h2v2H7V7Zm0 10h2v2H7v-2Z"/></svg>Your own agent</li></ul></div>
     </div>
   </section>
 </main>
@@ -150,6 +178,8 @@ footer a { text-decoration: none; } footer a:hover { color: var(--ink); }
       function done() {
         btn.dataset.busy = "1";
         btn.textContent = btn.dataset.done;
+        var where = document.getElementById("where"); where.classList.add("lit");
+        setTimeout(function () { where.classList.remove("lit"); }, 2200);
         setTimeout(function () { btn.innerHTML = label; delete btn.dataset.busy; }, 2200);
       }
       function fallback() {
@@ -164,6 +194,25 @@ footer a { text-decoration: none; } footer a:hover { color: var(--ink); }
       else fallback();
     });
   });
+
+  /* ---------- works-with strip: repeat the list until it fills the width twice, then loop ---------- */
+  (function () {
+    var track = document.getElementById("track"), list = track.querySelector(".agents");
+    function build() {
+      track.classList.remove("run");
+      while (track.children.length > 1) track.removeChild(track.lastChild);
+      var box = track.parentNode.getBoundingClientRect().width, w = list.getBoundingClientRect().width;
+      if (!w) return;
+      var copies = Math.max(1, Math.ceil(box / w)), half = [list];
+      for (var i = 1; i < copies; i++) { var c = list.cloneNode(true); c.setAttribute("aria-hidden", "true"); track.appendChild(c); half.push(c); }
+      half.forEach(function (n) { var c = n.cloneNode(true); c.setAttribute("aria-hidden", "true"); track.appendChild(c); });
+      track.style.setProperty("--dur", Math.round(copies * w / 45) + "s");
+      track.classList.add("run");
+    }
+    build();
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(build);
+    var t; window.addEventListener("resize", function () { clearTimeout(t); t = setTimeout(build, 200); });
+  })();
 
   /* ---------- noise ---------- */
   function hash(x, y, s) {
@@ -241,7 +290,7 @@ footer a { text-decoration: none; } footer a:hover { color: var(--ink); }
   var fl = document.getElementById("flow"), fx = fl.getContext("2d"), F = null, parts = [], flashes = [], keep = [];
   function keepOut() {
     var a = art.getBoundingClientRect();
-    keep = [document.querySelector("h1"), document.querySelector(".acts")].map(function (el) {
+    keep = [document.querySelector("h1"), document.querySelector(".acts"), document.getElementById("where")].map(function (el) {
       var r = el.getBoundingClientRect(); return { x: r.left - a.left - 10, y: r.top - a.top - 8, w: r.width + 20, h: r.height + 16 };
     });
   }
