@@ -73,6 +73,7 @@ paste this into any coding agent that can run commands on it: Claude Code or
 Codex on the machine itself, or an agent that reaches it over SSH or a
 remote-machine tool.
 
+<!-- setup-prompt:start -->
 ```text
 Set up Jobfeed on my server as a background service.
 Read https://raw.githubusercontent.com/V1ctor2182/jobfeed/main/docs/server-install.md
@@ -81,6 +82,7 @@ messages and numbered choices. If you aren't running on my server, ask me how
 to reach it. Ask me before using sudo or starting a scan, and test
 everything before you hand over.
 ```
+<!-- setup-prompt:end -->
 
 The agent checks the server, installs the dashboard as a service, and walks you
 through setup in the chat: AI sign-in, résumé, job profile, searches, when to

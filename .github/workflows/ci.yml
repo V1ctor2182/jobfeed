@@ -40,6 +40,13 @@ jobs:
               - 'jobfeed/pyproject.toml'
               - '.github/workflows/ci.yml'
 
+  setup-prompt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: README and website setup prompts match docs/setup-prompt.txt
+        run: python3 scripts/sync_setup_prompt.py --check
+
   quality-gate:
     needs: changes
     if: needs.changes.outputs.backend == 'true'

@@ -1,0 +1,6 @@
+Set up Jobfeed on my server as a background service.
+Read https://raw.githubusercontent.com/V1ctor2182/jobfeed/main/docs/server-install.md
+and follow it exactly, including how it says to talk to me: short, structured
+messages and numbered choices. If you aren't running on my server, ask me how
+to reach it. Ask me before using sudo or starting a scan, and test
+everything before you hand over.
