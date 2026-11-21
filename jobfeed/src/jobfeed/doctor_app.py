@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from pathlib import Path
 
 from jobfeed.cli.onboard import Dashboard, setup_checks
 from jobfeed.doctor_host import Check, Host
-from jobfeed.doctor_system import service_path
+from jobfeed.doctor_system import service_environment
 
 _AI_TIMEOUT_S = 120
 _STALE_SCAN = timedelta(hours=36)
@@ -73,7 +72,7 @@ def setup_rows(dashboard: Dashboard) -> list[Check]:
 
 
 def check_ai(host: Host, dashboard: Dashboard, *, skip: bool) -> Check:
-    """The AI provider answers one tiny request from the service's own PATH.
+    """The AI provider answers one tiny request in the service's environment.
 
     Args:
         host: Command runner.
@@ -97,8 +96,7 @@ def check_ai(host: Host, dashboard: Dashboard, *, skip: bool) -> Check:
         login = "codex login --device-auth"
     else:
         return Check(name, "off", "API key providers are checked by each scan")
-    env = {"HOME": str(Path.home()), "PATH": service_path(host)}
-    result = host.run(*command, timeout=_AI_TIMEOUT_S, env=env)
+    result = host.run(*command, timeout=_AI_TIMEOUT_S, env=service_environment(host))
     if result is None:
         return Check(
             name,

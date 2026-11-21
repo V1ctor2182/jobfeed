@@ -30,6 +30,7 @@ from jobfeed.config_sources import (
     SourcesSpeedyApplyConfig,
 )
 from jobfeed.domain.filtering import HardFilters
+from jobfeed.domain.location_terms import location_terms
 from jobfeed.domain.recruiter_sheet import DEFAULT_LOCATIONS, SheetPolicy
 
 
@@ -200,7 +201,7 @@ class HardFiltersSettings(BaseModel):
         return HardFilters(
             title_blocklist=list(self.title_blocklist),
             company_blocklist=list(self.company_blocklist),
-            location_allowlist=list(self.location_allowlist),
+            location_allowlist=location_terms(self.location_allowlist),
             location_blocklist=list(self.location_blocklist),
             posted_within_hours=self.posted_within_hours,
             posted_within_days=self.posted_within_days,

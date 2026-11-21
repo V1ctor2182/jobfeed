@@ -185,6 +185,23 @@ def test_the_ai_answers_from_the_service_path(app: FastAPI, tmp_path: Path) -> N
     assert env is not None
     assert env["PATH"] == SERVICE_PATH
 
+
+def test_the_ai_check_keeps_the_service_managers_proxy(
+    app: FastAPI, tmp_path: Path
+) -> None:
+    app.state.onboarding_provider_service = ConnectedClaude()
+    host = FakeHost()
+    host.outputs[("systemctl", "--user", "show-environment")] = (
+        0,
+        "HTTPS_PROXY=http://127.0.0.1:3128\nPATH=/usr/bin:/bin\n",
+        "",
+    )
+    assert _rows(app, host, tmp_path)["AI answers"].status == "ok"
+    _, env = next(call for call in host.calls if call[0][0] == "claude")
+    assert env is not None
+    assert env["HTTPS_PROXY"] == "http://127.0.0.1:3128"
+    assert env["PATH"] == SERVICE_PATH
+
     host.outputs[("claude",)] = (1, "", "Invalid API key · Please run /login\n")
     failed = _rows(app, host, tmp_path)["AI answers"]
     assert failed.status == "fail"

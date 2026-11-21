@@ -41,9 +41,17 @@ Field rules:
   Entry level, Mid level, Senior, Staff, Lead, or Manager. Infer them from
   graduation timing and depth of experience. Never put a job title in seniority_levels.
 - target_countries and target_locations: derive from stated location and work
-  authorization. Do not invent willingness to relocate.
+  authorization. Do not invent willingness to relocate. target_locations is a
+  hard filter: a job whose location text contains none of them is dropped
+  before scoring. Write each the way job sites do ("Seattle, WA"), with no
+  notes such as "(preferred)". For a city, also list the nearby cities of its
+  metro area that the candidate could commute to. When remote work anywhere
+  in the country is acceptable, use the country name ("United States") alone
+  instead of listing cities.
 - preferred_locations: record only explicitly stated soft location preferences;
   otherwise use an empty array. They do not restrict search results.
+- excluded_locations: literal place names that appear in job locations, never
+  phrases such as "Outside the US".
 - work_modes: use an explicitly stated preference; otherwise include all three
   work modes (remote, hybrid, and on-site) as broad search suggestions. Use
   only remote, hybrid, or on-site.

@@ -105,6 +105,28 @@ def service_path(host: Host) -> str:
     return os.environ.get("PATH", "")
 
 
+def service_environment(host: Host) -> dict[str, str]:
+    """Return the environment the dashboard's background service runs with.
+
+    On Linux that is the user service manager's environment, which can hold
+    proxy settings a test call needs, with the service's own PATH on top.
+
+    Args:
+        host: Command runner.
+
+    Returns:
+        Variable names and values, always with HOME and PATH.
+    """
+    env = {"HOME": str(Path.home())}
+    if host.platform != "darwin":
+        for line in systemd(host, "show-environment").splitlines():
+            name, sep, value = line.partition("=")
+            if sep and name.isidentifier():
+                env[name] = value
+    env["PATH"] = service_path(host)
+    return env
+
+
 def _last_cycle(root: Path) -> str:
     try:
         lines = (root / "data/scheduler/cycle.log").read_text().splitlines()
@@ -266,5 +288,6 @@ __all__ = [
     "check_private_data",
     "check_private_link",
     "check_service",
+    "service_environment",
     "service_path",
 ]
