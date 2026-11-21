@@ -13,365 +13,219 @@
 <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Martian+Mono:wdth,wght@75..112.5,300..800&display=swap" rel="stylesheet">
 <style>
 :root {
-  --bg: #f4f3f0;
-  --shell: #fbfaf8;
-  --panel: #efede9;
-  --line: #e4e1dc;
-  --ink: #171614;
-  --ink-2: #4f4c47;
-  --ink-3: #7d7972;
-  --accent: #e8742a;
-  --accent-text: #b5551a;
-  --accent-soft: #fdeee3;
-  --ok: #2f8a4e;
-  --ok-soft: #e4f1e8;
-  --btn-ink: #171614;
-  --btn-ink-text: #fbfaf8;
-  --code-bg: #1c1b19;
-  --code-ink: #ecebe7;
-  --code-dim: #8d8982;
-  --shadow: 0 1px 0 rgb(23 22 20 / 4%), 0 24px 60px -24px rgb(23 22 20 / 22%);
-  --radius: 18px;
-  --sans: "Geist", ui-sans-serif, system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
-  --mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --paper: #ecebe6;
+  --paper-2: #e3e2dc;
+  --ink: #121212;
+  --ink-2: #3b3b38;
+  --ink-3: #75736d;
+  --rule: #121212;
+  --faint: #c9c7c0;
+  --v: #4b2ff0;          /* violet signal */
+  --v-2: #7a62ff;
+  --v-soft: #dcd6ff;
+  --v-deep: #170d63;
+  --on-v: #ffffff;
+  --code-bg: #121212;
+  --code-ink: #ecebe6;
+  --grain-blend: multiply;
+  --grain-op: .38;
+  --mono: "Martian Mono", ui-monospace, "SFMono-Regular", Menlo, "PingFang SC", "Noto Sans CJK SC", "Microsoft YaHei", monospace;
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --bg: #131211;
-    --shell: #1b1a18;
-    --panel: #22201e;
-    --line: #2f2d2a;
-    --ink: #f1efeb;
-    --ink-2: #bdb9b2;
-    --ink-3: #8d8982;
-    --accent: #f08a45;
-    --accent-text: #f4a26b;
-    --accent-soft: #3a2518;
-    --ok: #6cc28a;
-    --ok-soft: #1d3324;
-    --btn-ink: #f1efeb;
-    --btn-ink-text: #131211;
-    --code-bg: #0d0c0b;
-    --shadow: 0 1px 0 rgb(0 0 0 / 30%), 0 24px 60px -24px rgb(0 0 0 / 70%);
-    color-scheme: dark;
+    --paper: #0f0f11; --paper-2: #18181b; --ink: #e8e6df; --ink-2: #bcbab3; --ink-3: #85837c;
+    --rule: #e8e6df; --faint: #34343a; --v: #8d78ff; --v-2: #a896ff; --v-soft: #241a63; --v-deep: #0b0630;
+    --code-bg: #e8e6df; --code-ink: #0f0f11; --grain-blend: screen; --grain-op: .3; color-scheme: dark;
   }
 }
 :root[data-theme="dark"] {
-  --bg: #131211;
-  --shell: #1b1a18;
-  --panel: #22201e;
-  --line: #2f2d2a;
-  --ink: #f1efeb;
-  --ink-2: #bdb9b2;
-  --ink-3: #8d8982;
-  --accent: #f08a45;
-  --accent-text: #f4a26b;
-  --accent-soft: #3a2518;
-  --ok: #6cc28a;
-  --ok-soft: #1d3324;
-  --btn-ink: #f1efeb;
-  --btn-ink-text: #131211;
-  --code-bg: #0d0c0b;
-  --shadow: 0 1px 0 rgb(0 0 0 / 30%), 0 24px 60px -24px rgb(0 0 0 / 70%);
-  color-scheme: dark;
+  --paper: #0f0f11; --paper-2: #18181b; --ink: #e8e6df; --ink-2: #bcbab3; --ink-3: #85837c;
+  --rule: #e8e6df; --faint: #34343a; --v: #8d78ff; --v-2: #a896ff; --v-soft: #241a63; --v-deep: #0b0630;
+  --code-bg: #e8e6df; --code-ink: #0f0f11; --grain-blend: screen; --grain-op: .3; color-scheme: dark;
 }
 
 * { box-sizing: border-box; }
-html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; }
+html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; background: var(--paper); }
 body {
-  margin: 0;
-  background: var(--bg);
-  color: var(--ink);
-  font: 400 16px/1.6 var(--sans);
-  -webkit-font-smoothing: antialiased;
-  overflow-x: hidden;
+  margin: 0; background: transparent; color: var(--ink); position: relative; isolation: isolate;
+  font: 400 14px/1.6 var(--mono); font-stretch: 87.5%;
+  -webkit-font-smoothing: antialiased; overflow-x: hidden;
+}
+/* paper grain + speckle */
+body::after {
+  content: ""; position: fixed; inset: 0; pointer-events: none; z-index: -1;
+  opacity: var(--grain-op); mix-blend-mode: var(--grain-blend);
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='220' height='220'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 11 -7.4'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
 }
 a { color: inherit; }
-img { max-width: 100%; height: auto; display: block; }
-code, pre, .mono { font-family: var(--mono); }
-:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 6px; }
+:focus-visible { outline: 2px solid var(--v); outline-offset: 3px; }
+::selection { background: var(--v); color: var(--on-v); }
+.up { text-transform: uppercase; letter-spacing: .02em; }
+html[lang="zh-CN"] .up { letter-spacing: .04em; }
+.wrap { width: min(1200px, 100% - 32px); margin-inline: auto; }
 
-.wrap { width: min(1160px, 100% - 32px); margin-inline: auto; }
+/* double-rule frame */
+.frame { border: 1px solid var(--rule); box-shadow: 0 0 0 7px var(--paper), 0 0 0 8px var(--rule); position: relative; }
 
-/* ---------- nav ---------- */
-.nav {
-  position: sticky; top: 0; z-index: 20;
-  background: color-mix(in srgb, var(--bg) 82%, transparent);
-  backdrop-filter: saturate(1.4) blur(14px);
-  -webkit-backdrop-filter: saturate(1.4) blur(14px);
-  border-bottom: 1px solid transparent;
-  transition: border-color .2s;
-}
-.nav.scrolled { border-bottom-color: var(--line); }
-.nav .wrap { display: flex; align-items: center; gap: 24px; height: 64px; }
-.brand { display: flex; align-items: center; gap: 10px; text-decoration: none; font-weight: 600; font-size: 17px; letter-spacing: -0.01em; }
-.mark {
-  width: 30px; height: 30px; border-radius: 8px; background: var(--ink); color: var(--bg);
-  display: grid; place-items: center;
-}
-.mark svg { width: 18px; height: 18px; }
-.nav-links { display: flex; gap: 22px; margin-left: 12px; }
-.nav-links a { text-decoration: none; color: var(--ink-2); font-size: 14.5px; }
-.nav-links a:hover { color: var(--ink); }
-.nav-right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
-.lang {
-  display: inline-flex; border: 1px solid var(--line); border-radius: 999px; padding: 3px; background: var(--shell);
-}
+/* ---------- top bar ---------- */
+.top { position: sticky; top: 0; z-index: 30; background: var(--paper); border-bottom: 1px solid var(--rule); }
+.top .wrap { display: flex; align-items: center; gap: 18px; height: 54px; font-size: 12px; }
+.brand { display: flex; align-items: center; gap: 10px; text-decoration: none; font-weight: 700; font-size: 13px; }
+.mark { width: 26px; height: 26px; background: var(--ink); color: var(--paper); display: grid; place-items: center; }
+.mark svg { width: 15px; height: 15px; }
+.top .sys { color: var(--ink-3); margin-left: auto; white-space: nowrap; }
+.lang { display: flex; gap: 0; }
 .lang button {
-  border: 0; background: transparent; color: var(--ink-3); font: 500 13px var(--sans);
-  padding: 4px 10px; border-radius: 999px; cursor: pointer;
+  font: inherit; font-size: 12px; background: transparent; color: var(--ink-3); border: 0; padding: 4px 6px; cursor: pointer;
 }
-.lang button[aria-pressed="true"] { background: var(--ink); color: var(--bg); }
+.lang button[aria-pressed="true"] { color: var(--ink); font-weight: 700; }
+.lang button[aria-pressed="true"]::before { content: "["; } .lang button[aria-pressed="true"]::after { content: "]"; }
+.gh { text-decoration: none; border: 1px solid var(--rule); padding: 4px 10px; }
+.gh:hover { background: var(--ink); color: var(--paper); }
 
+/* ---------- buttons ---------- */
 .btn {
-  display: inline-flex; align-items: center; gap: 8px; justify-content: center;
-  height: 42px; padding: 0 18px; border-radius: 11px; font: 500 15px var(--sans);
-  text-decoration: none; border: 1px solid transparent; cursor: pointer; white-space: nowrap;
-  transition: transform .15s, background .15s, border-color .15s;
+  display: inline-flex; align-items: center; justify-content: center; gap: 10px; min-height: 44px; padding: 0 18px;
+  font: 600 13px var(--mono); font-stretch: 87.5%; text-transform: uppercase; letter-spacing: .03em; text-decoration: none;
+  border: 1px solid var(--rule); background: transparent; color: var(--ink); cursor: pointer; transition: background .12s, color .12s; white-space: nowrap;
 }
-.btn:active { transform: translateY(1px); }
-.btn-primary { background: var(--btn-ink); color: var(--btn-ink-text); }
-.btn-primary:hover { background: color-mix(in srgb, var(--btn-ink) 86%, var(--accent)); }
-.btn-ghost { background: var(--shell); color: var(--ink); border-color: var(--line); }
-.btn-ghost:hover { border-color: var(--ink-3); }
-.btn-sm { height: 34px; padding: 0 12px; font-size: 14px; border-radius: 9px; }
-.btn svg { width: 17px; height: 17px; }
+.btn:hover { background: var(--ink); color: var(--paper); }
+.btn.v { background: var(--v); border-color: var(--v); color: var(--on-v); }
+.btn.v:hover { background: var(--ink); border-color: var(--ink); color: var(--paper); }
+.btn::before { content: "["; opacity: .55; } .btn::after { content: "]"; opacity: .55; }
 
-/* ---------- hero ---------- */
-.hero { padding: 76px 0 40px; text-align: center; }
-.eyebrow {
-  display: inline-flex; align-items: center; gap: 8px;
-  font: 500 13px var(--mono); color: var(--ink-2); letter-spacing: 0.01em;
-  padding: 6px 12px; border: 1px solid var(--line); border-radius: 999px; background: var(--shell);
+/* ---------- hero: recognition stage ---------- */
+.hero { padding: 24px 0 0; }
+.stage { min-height: max(640px, calc(100svh - 104px)); overflow: hidden; isolation: isolate; display: flex; }
+.hero-c { position: relative; z-index: 3; flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: center; padding: 50px 30px 34px; }
+.band { flex: 1; min-height: 220px; width: 100%; }
+.bottom { position: relative; width: min(880px, 100%); padding-top: 64px; color: #fff; }
+.planet {
+  position: absolute; z-index: -1; left: 50%; top: 0; width: max(1500px, 185%); aspect-ratio: 1; transform: translateX(-50%); border-radius: 50%;
+  background: radial-gradient(circle at 50% 3%, #d9d1ff 0, #8d78ff 5%, #4b2ff0 14%, #26168f 30%, #0e0840 52%, #07041f 70%);
+  box-shadow: 0 0 110px 28px rgba(91, 63, 255, .42), inset 0 1px 0 rgba(255, 255, 255, .75);
 }
-.eyebrow .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
-h1 {
-  font-size: clamp(38px, 6.4vw, 74px); line-height: 1.04; letter-spacing: -0.035em;
-  font-weight: 600; margin: 22px auto 0; max-width: 15ch; text-wrap: balance;
+.planet::after {
+  content: ""; position: absolute; inset: 0; border-radius: 50%; opacity: .6; mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='180' height='180'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='1.15' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
 }
-h1 em { font-style: normal; color: var(--accent); }
-html[lang="zh-CN"] h1 { letter-spacing: -0.01em; max-width: 13em; line-height: 1.15; word-break: keep-all; overflow-wrap: anywhere; }
-.lede { font-size: clamp(17px, 2vw, 20px); color: var(--ink-2); max-width: 620px; margin: 22px auto 0; text-wrap: pretty; }
-.hero-cta { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; margin-top: 34px; }
-.cmd {
-  display: inline-flex; align-items: center; gap: 12px; height: 42px; padding: 0 8px 0 16px;
-  background: var(--code-bg); color: var(--code-ink); border-radius: 11px; font: 400 14px var(--mono);
-  max-width: 100%;
+.mosaic { position: absolute; left: 0; width: 100%; z-index: 0; image-rendering: pixelated; }
+.scanwrap { position: absolute; left: 0; right: 0; z-index: 2; pointer-events: none; }
+.scanline { position: absolute; left: 0; right: 0; top: 0; height: 1px; background: var(--v); animation: sweep 7s linear infinite; }
+.scanline::before { content: ""; position: absolute; left: 0; right: 0; bottom: 1px; height: 46px; background: linear-gradient(transparent, color-mix(in srgb, var(--v) 16%, transparent)); }
+.scanline::after { content: attr(data-y); position: absolute; right: 8px; top: 3px; font-size: 10px; font-weight: 700; color: var(--v); background: var(--paper); padding: 0 4px; }
+@keyframes sweep { from { top: 0; } to { top: 100%; } }
+.wires { position: absolute; inset: 0; z-index: 2; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+.wires line, .wires path { stroke: var(--ink); stroke-width: 1; fill: none; vector-effect: non-scaling-stroke; }
+.wires circle { fill: var(--ink); }
+.hub {
+  position: absolute; z-index: 2; transform: translate(-50%, -50%); display: flex; align-items: center; gap: 8px;
+  background: var(--paper); border: 1px solid var(--rule); padding: 4px 12px 4px 4px; font-weight: 700; font-size: 12px; white-space: nowrap;
 }
-.cmd span.p { color: var(--code-dim); }
-.cmd code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.copy {
-  border: 0; background: rgb(255 255 255 / 9%); color: var(--code-ink); border-radius: 7px;
-  height: 28px; min-width: 28px; padding: 0 8px; display: grid; place-items: center; cursor: pointer;
-  font: 500 12px var(--sans);
+.hub .mark { width: 24px; height: 24px; }
+.det {
+  --c: var(--v); position: absolute; z-index: 2; pointer-events: none;
+  border: 1px solid color-mix(in srgb, var(--c) 55%, transparent);
+  background:
+    linear-gradient(var(--c), var(--c)) 0 0 / 12px 2px, linear-gradient(var(--c), var(--c)) 0 0 / 2px 12px,
+    linear-gradient(var(--c), var(--c)) 100% 0 / 12px 2px, linear-gradient(var(--c), var(--c)) 100% 0 / 2px 12px,
+    linear-gradient(var(--c), var(--c)) 0 100% / 12px 2px, linear-gradient(var(--c), var(--c)) 0 100% / 2px 12px,
+    linear-gradient(var(--c), var(--c)) 100% 100% / 12px 2px, linear-gradient(var(--c), var(--c)) 100% 100% / 2px 12px;
+  background-repeat: no-repeat;
 }
-.copy:hover { background: rgb(255 255 255 / 16%); }
-.copy svg { width: 15px; height: 15px; }
-.hero-note { margin-top: 14px; font-size: 13.5px; color: var(--ink-3); }
+.det::after { content: ""; position: absolute; left: 50%; top: 50%; width: 9px; height: 9px; transform: translate(-50%, -50%); background: linear-gradient(var(--c), var(--c)) 50% 0 / 1px 100% no-repeat, linear-gradient(var(--c), var(--c)) 0 50% / 100% 1px no-repeat; }
+.det b { position: absolute; left: -1px; bottom: 100%; margin-bottom: 2px; background: var(--c); color: var(--on-v); font-size: 10px; font-weight: 700; padding: 1px 6px; white-space: nowrap; text-transform: uppercase; letter-spacing: .03em; }
+.det i { position: absolute; left: -1px; top: 100%; margin-top: 3px; font-style: normal; font-size: 10px; color: var(--ink); background: var(--paper); border: 1px solid var(--rule); padding: 0 5px; white-space: nowrap; text-transform: uppercase; }
+.det.done { --c: var(--ink); } .det.done b { color: var(--paper); }
+.det.skip { --c: var(--ink-3); } .det.skip b { color: var(--paper); }
+.det.wait b { background: var(--paper); color: var(--v); box-shadow: inset 0 0 0 1px var(--v); }
+.det.new { animation: blinkin .5s steps(2) 2; }
+@keyframes blinkin { 50% { opacity: 0; } }
+.cross { position: absolute; z-index: 2; width: 13px; height: 13px; transform: translate(-50%, -50%); color: var(--v-2); }
+.cross::before, .cross::after { content: ""; position: absolute; background: currentColor; }
+.cross::before { left: 6px; top: 0; width: 1px; height: 13px; } .cross::after { top: 6px; left: 0; height: 1px; width: 13px; }
+.corner { position: absolute; z-index: 4; font-size: 11px; font-weight: 600; color: var(--ink-3); line-height: 1.35; }
+.corner.tl { top: 16px; left: 18px; } .corner.tr { top: 16px; right: 18px; text-align: right; font-variant-numeric: tabular-nums; }
+.corner.bl { bottom: 14px; left: 18px; } .corner.br { bottom: 14px; right: 18px; }
+.corner.bl, .corner.br { color: rgba(255, 255, 255, .72); }
+.corner .d { display: inline-block; width: 3ch; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.prompt { width: 100%; background: #ecebe6; color: #121212; }
+.prompt-head { display: flex; justify-content: space-between; gap: 12px; padding: 8px 14px; font-size: 11px; font-weight: 600; border-bottom: 1px solid rgba(18, 18, 18, .18); }
+.prompt-head span + span { opacity: .55; }
+.prompt pre { margin: 0; padding: 14px 16px 16px; text-wrap: pretty; font: 12.5px/1.65 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.bottom .cta-row { justify-content: center; margin-top: 22px; }
+.btn.w { background: #fff; border-color: #fff; color: #121212; }
+.btn.w:hover { background: var(--v); border-color: var(--v); color: #fff; }
+.btn.o { color: #fff; border-color: rgba(255, 255, 255, .7); }
+.btn.o:hover { background: #fff; color: #121212; }
 
-.shot {
-  margin: 56px auto 0; max-width: 1100px; border-radius: 22px; padding: 10px;
-  background: var(--shell); border: 1px solid var(--line); box-shadow: var(--shadow);
+/* striped wordmark */
+.stripe {
+  font-weight: 800; font-stretch: 75%; line-height: .9; letter-spacing: .02em; white-space: nowrap;
+  color: transparent; -webkit-background-clip: text; background-clip: text;
+  background-image: repeating-linear-gradient(180deg, var(--ink) 0 .085em, transparent .085em .15em);
+  -webkit-mask-image: repeating-linear-gradient(90deg, #000 0 .5em, transparent .5em .56em);
+          mask-image: repeating-linear-gradient(90deg, #000 0 .5em, transparent .5em .56em);
 }
-.shot-bar { display: flex; align-items: center; gap: 7px; padding: 6px 8px 12px; }
-.shot-bar i { width: 11px; height: 11px; border-radius: 50%; background: var(--line); display: block; }
-.shot-bar .url {
-  margin-left: 12px; flex: 1; max-width: 320px; height: 26px; border-radius: 7px; background: var(--panel);
-  font: 400 12px/26px var(--mono); color: var(--ink-3); text-align: left; padding: 0 10px; overflow: hidden; white-space: nowrap;
-}
-.shot-frame { border-radius: 14px; overflow: hidden; aspect-ratio: 16 / 10; background: #f4f3f0; border: 1px solid var(--line); }
-.shot-frame img { width: 100%; height: 100%; object-fit: cover; object-position: top left; }
-.caption { font-size: 13px; color: var(--ink-3); margin-top: 12px; }
+.wordmark { font-size: clamp(44px, 12vw, 150px); margin: 0; text-align: center; position: relative; z-index: 1; }
 
-/* ---------- sources ---------- */
-.sources { padding: 48px 0 8px; text-align: center; }
-.sources p { font: 500 12.5px var(--mono); text-transform: uppercase; letter-spacing: .08em; color: var(--ink-3); margin: 0 0 16px; }
-.chips { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
-.chip {
-  font-size: 14.5px; color: var(--ink-2); padding: 7px 14px; border-radius: 999px;
-  border: 1px solid var(--line); background: var(--shell);
-}
+.cta-row { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 14px; }
+.barcode { height: 66px; width: 190px; color: var(--ink); }
+.barcode svg { width: 100%; height: 100%; display: block; }
 
-/* ---------- sections ---------- */
-section.block { padding: 110px 0 0; }
-.kicker { font: 500 13px var(--mono); color: var(--accent-text); letter-spacing: .02em; margin: 0 0 14px; }
-h2 {
-  font-size: clamp(30px, 4.2vw, 48px); line-height: 1.08; letter-spacing: -0.03em; font-weight: 600;
-  margin: 0; max-width: 18ch; text-wrap: balance;
-}
-html[lang="zh-CN"] h2 { letter-spacing: -0.005em; line-height: 1.2; max-width: 14em; text-wrap: pretty; word-break: keep-all; overflow-wrap: anywhere; }
-.sub { font-size: 18px; color: var(--ink-2); max-width: 600px; margin: 18px 0 0; text-wrap: pretty; }
-
-/* pipeline */
-.pipe { display: grid; grid-template-columns: repeat(5, 1fr); gap: 0; margin-top: 52px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--shell); overflow: hidden; }
-.step { padding: 26px 22px 28px; border-right: 1px solid var(--line); position: relative; }
-.step:last-child { border-right: 0; }
-.step .n { font: 500 12.5px var(--mono); color: var(--ink-3); display: flex; align-items: center; gap: 8px; }
-.step .n b { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); display: inline-block; }
-.step h3 { font-size: 21px; margin: 18px 0 8px; letter-spacing: -0.015em; font-weight: 600; }
-.step p { margin: 0; color: var(--ink-2); font-size: 14.5px; line-height: 1.55; }
-.step .who { margin-top: 16px; font: 400 12px var(--mono); color: var(--ink-3); }
-
-/* split feature */
-.split { display: grid; grid-template-columns: 1fr 1.08fr; gap: 64px; align-items: center; }
-.split.flip { grid-template-columns: 1.08fr 1fr; }
-.split.flip .copy-col { order: 2; }
-.list { list-style: none; padding: 0; margin: 30px 0 0; display: grid; gap: 18px; }
-.list li { display: grid; grid-template-columns: 28px 1fr; gap: 12px; }
-.list .ic {
-  width: 28px; height: 28px; border-radius: 8px; background: var(--accent-soft); color: var(--accent-text);
-  display: grid; place-items: center;
-}
-.list .ic svg { width: 16px; height: 16px; }
-.list strong { display: block; font-weight: 600; font-size: 16px; }
-.list span { color: var(--ink-2); font-size: 15px; }
-
-.card {
-  background: var(--shell); border: 1px solid var(--line); border-radius: 22px; box-shadow: var(--shadow); overflow: hidden;
-}
-.card.img { padding: 10px; }
-.card.img .inner { border-radius: 14px; overflow: hidden; border: 1px solid var(--line); background: #fff; }
-.fit .inner { max-height: 560px; position: relative; }
-.fit .inner::after {
-  content: ""; position: absolute; inset: auto 0 0 0; height: 90px;
-  background: linear-gradient(to bottom, transparent, #fff);
-}
-
-/* discord mock */
-.thread { padding: 22px 22px 24px; font-size: 14.5px; }
-.thread-head { display: flex; align-items: center; gap: 10px; padding-bottom: 16px; border-bottom: 1px solid var(--line); margin-bottom: 18px; }
-.thread-head .hash { font: 600 18px var(--mono); color: var(--ink-3); }
-.thread-head strong { font-weight: 600; }
-.thread-head small { color: var(--ink-3); margin-left: auto; font: 400 12px var(--mono); }
-.msg { display: grid; grid-template-columns: 36px 1fr; gap: 12px; margin-bottom: 18px; }
-.msg:last-child { margin-bottom: 0; }
-.av { width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center; font: 600 14px var(--sans); }
-.av.bot { background: var(--accent-soft); color: var(--accent-text); }
-.av.me { background: var(--panel); color: var(--ink-2); }
-.msg .meta { font-size: 13px; color: var(--ink-3); }
-.msg .meta b { color: var(--ink); font-weight: 600; margin-right: 6px; }
-.msg .meta .tag { font: 500 10.5px var(--mono); background: var(--accent); color: #fff; padding: 1px 5px; border-radius: 4px; margin-right: 6px; vertical-align: 1px; }
-.msg p { margin: 3px 0 0; color: var(--ink-2); }
-.msg .box {
-  margin-top: 8px; border-left: 3px solid var(--accent); background: var(--panel); border-radius: 0 10px 10px 0;
-  padding: 10px 12px; font-size: 13.5px; color: var(--ink-2);
-}
-.msg .box div { display: flex; justify-content: space-between; gap: 12px; }
-.msg .box div span:last-child { color: var(--ink); font-family: var(--mono); font-size: 12.5px; }
-.msg code.submit { background: var(--ok-soft); color: var(--ok); padding: 2px 8px; border-radius: 6px; font-size: 13.5px; }
-.ex { font: 400 12px var(--mono); color: var(--ink-3); padding: 0 22px 18px; }
-
-/* control */
-.control { margin-top: 48px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
-.ctl { background: var(--shell); border: 1px solid var(--line); border-radius: var(--radius); padding: 24px 22px; }
-.ctl .ic { width: 38px; height: 38px; border-radius: 11px; background: var(--panel); display: grid; place-items: center; color: var(--ink); }
-.ctl .ic svg { width: 19px; height: 19px; }
-.ctl h3 { font-size: 17.5px; font-weight: 600; margin: 18px 0 8px; letter-spacing: -0.01em; }
-.ctl p { margin: 0; color: var(--ink-2); font-size: 14.5px; line-height: 1.55; }
-.ctl code { font-size: 13px; background: var(--panel); padding: 1px 5px; border-radius: 5px; }
-
-/* insights */
-.wide { margin-top: 48px; }
-.pills { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 26px; }
-.pills span { font-size: 14px; padding: 6px 12px; border-radius: 9px; background: var(--panel); color: var(--ink-2); }
-
-/* install */
-.install { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 48px; }
-.inst { background: var(--shell); border: 1px solid var(--line); border-radius: var(--radius); padding: 26px; display: flex; flex-direction: column; }
-.inst .label { font: 500 12.5px var(--mono); color: var(--ink-3); }
-.inst h3 { font-size: 21px; font-weight: 600; margin: 10px 0 8px; letter-spacing: -0.015em; }
-.inst > p { margin: 0 0 18px; color: var(--ink-2); font-size: 15px; }
-.code {
-  position: relative; background: var(--code-bg); color: var(--code-ink); border-radius: 13px;
-  padding: 18px 20px; font: 400 13.5px/1.7 var(--mono); margin-top: auto;
-}
-.code pre { margin: 0; white-space: pre-wrap; word-break: break-word; padding-right: 64px; }
-.code .p { color: var(--code-dim); user-select: none; }
-.code .copy { position: absolute; top: 12px; right: 12px; width: auto; }
-.reqs { margin-top: 16px; background: var(--shell); border: 1px solid var(--line); border-radius: var(--radius); padding: 22px 26px; display: grid; grid-template-columns: auto 1fr 1fr 1fr; gap: 24px; align-items: start; }
-.reqs h4 { margin: 0; font-size: 15px; font-weight: 600; }
-.reqs h4 small { display: block; color: var(--ink-3); font-weight: 400; font-size: 13.5px; margin-top: 4px; max-width: 220px; }
-.reqs div { font-size: 14.5px; color: var(--ink-2); }
-.reqs div b { color: var(--ink); font-weight: 600; display: block; }
-
-/* cta + footer */
-.final { margin: 120px 0 0; padding: 72px 24px; text-align: center; border-radius: 28px; background: var(--ink); color: var(--bg); }
-.final h2 { margin: 0 auto; color: var(--bg); }
-.final p { color: color-mix(in srgb, var(--bg) 70%, var(--ink)); max-width: 520px; margin: 16px auto 30px; font-size: 17px; }
-.final .btn-primary { background: var(--bg); color: var(--ink); }
-.final .btn-ghost { background: transparent; color: var(--bg); border-color: color-mix(in srgb, var(--bg) 30%, var(--ink)); }
-footer { padding: 40px 0 48px; color: var(--ink-3); font-size: 14px; }
-footer .wrap { display: flex; flex-wrap: wrap; gap: 12px 28px; align-items: center; }
-footer a { color: var(--ink-2); text-decoration: none; }
-footer a:hover { color: var(--ink); }
-footer .grow { margin-right: auto; display: flex; align-items: center; gap: 10px; }
-
-/* reveal */
-.rv { opacity: 0; transform: translateY(16px); transition: opacity .7s ease, transform .7s ease; }
-.rv.in { opacity: 1; transform: none; }
-@media (prefers-reduced-motion: reduce) { .rv { opacity: 1; transform: none; transition: none; } html { scroll-behavior: auto; } }
-.no-js .rv { opacity: 1; transform: none; }
+/* footer */
+footer { padding: 40px 0 48px; }
+.eot { display: grid; grid-template-columns: 1fr auto; gap: 20px; align-items: end; border-top: 1px solid var(--rule); padding-top: 20px; }
+.eot .l { font-weight: 600; font-size: 14px; line-height: 1.35; }
+.eot .l .slash { font-size: 20px; }
+.eot .links { margin-top: 18px; display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 12px; font-weight: 400; color: var(--ink-2); }
+.eot .links a { text-decoration: none; } .eot .links a:hover { background: var(--ink); color: var(--paper); }
+.eot .r { text-align: right; }
+.eot .r .barcode { margin-left: auto; }
 
 /* responsive */
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } .scanline { animation: none; top: 38%; } .det.new { animation: none; } }
 @media (max-width: 1000px) {
-  .pipe { grid-template-columns: 1fr 1fr; }
-  .step { border-bottom: 1px solid var(--line); }
-  .step:nth-child(2n) { border-right: 0; }
-  .step:last-child { grid-column: 1 / -1; border-bottom: 0; }
-  .control { grid-template-columns: 1fr 1fr; }
-  .split, .split.flip { grid-template-columns: 1fr; gap: 40px; }
-  .split.flip .copy-col { order: 0; }
-  .reqs { grid-template-columns: 1fr 1fr; }
-  .reqs h4 { grid-column: 1 / -1; }
+  .top .sys { display: none; }
+  .lang { margin-left: auto; }
 }
 @media (max-width: 720px) {
-  .nav-links { display: none; }
-  .nav .gh-label { display: none; }
-  .hero { padding-top: 48px; }
-  .shot { margin-top: 40px; padding: 6px; border-radius: 16px; }
-  .shot-bar { display: none; }
-  .shot-frame { border-radius: 11px; aspect-ratio: 4 / 5; }
-  .pipe, .control, .install, .reqs { grid-template-columns: 1fr; }
-  .step { border-right: 0; }
-  .step:last-child { grid-column: auto; }
-  section.block { padding-top: 80px; }
-  .final { margin-top: 84px; padding: 56px 20px; border-radius: 22px; }
-  .cmd { width: 100%; }
-  .hero-cta .btn { width: 100%; }
-  .inst { padding: 22px 18px; }
-  .code { padding: 16px; }
-  .code pre { padding-right: 0; padding-top: 30px; }
+  .hero { padding-top: 24px; }
+  .stage { min-height: calc(100svh - 104px); }
+  .hero-c { padding: 66px 16px 40px; }
+  .band { min-height: 260px; }
+  .bottom { padding-top: 56px; }
+  .planet { width: max(1000px, 280%); }
+  .prompt pre { font-size: 11.5px; }
+  .hub { font-size: 11px; }
+  .corner.tr, .corner.br { display: none; }
+  .frame { box-shadow: 0 0 0 5px var(--paper), 0 0 0 6px var(--rule); }
+  .cta-row .btn { flex: 1 1 100%; }
+  .eot { grid-template-columns: 1fr; }
+  .eot .r { text-align: left; }
+  .eot .r .barcode { margin-left: 0; }
 }
 </style>
 </head>
-<body class="no-js">
+<body>
 
-<header class="nav" id="nav">
+<header class="top">
   <div class="wrap">
-    <a class="brand" href="#top" aria-label="Jobfeed home">
+    <a class="brand up" href="#top" aria-label="Jobfeed home">
       <span class="mark" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="M19 6v14.5a4.5 4.5 0 0 1-4.5 4.5H11v-3.6h3.2a1.2 1.2 0 0 0 1.2-1.2V6H19z" fill="currentColor"/></svg></span>
-      jobfeed
+      Jobfeed
     </a>
-    <nav class="nav-links" aria-label="Sections">
-      <a href="#how" data-i18n="nav.how">How it works</a>
-      <a href="#applier" data-i18n="nav.applier">Applier</a>
-      <a href="#control" data-i18n="nav.control">Control</a>
-      <a href="#install" data-i18n="nav.install">Install</a>
-    </nav>
-    <div class="nav-right">
-      <div class="lang" role="group" aria-label="Language">
-        <button type="button" data-lang="en" aria-pressed="true">EN</button>
-        <button type="button" data-lang="zh-CN" aria-pressed="false">中文</button>
-      </div>
-      <a class="btn btn-ghost btn-sm" href="https://github.com/V1ctor2182/jobfeed">
-        <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
-        <span class="gh-label">GitHub</span>
-      </a>
+    <span class="sys up" aria-hidden="true">// local-first · v.main · MIT</span>
+    <div class="lang" role="group" aria-label="Language">
+      <button type="button" data-lang="en" aria-pressed="true">EN</button>
+      <button type="button" data-lang="zh-CN" aria-pressed="false">中文</button>
     </div>
+    <a class="gh up" href="https://github.com/V1ctor2182/jobfeed">GitHub ↗</a>
   </div>
 </header>
 
@@ -380,253 +234,36 @@ footer .grow { margin-right: auto; display: flex; align-items: center; gap: 10px
   <!-- HERO -->
   <section class="hero">
     <div class="wrap">
-      <span class="eyebrow"><span class="dot"></span><span data-i18n="hero.eyebrow">Open source · local-first · MIT</span></span>
-      <h1 data-i18n="hero.title">Find the right jobs. Let Claude apply. <em>You press Submit.</em></h1>
-      <p class="lede" data-i18n="hero.lede">Jobfeed scans company career pages and job sites, scores every posting against your résumé, and hands the good ones to a Claude Applier that fills the form in a real browser — then waits for you.</p>
-      <div class="hero-cta">
-        <div class="cmd">
-          <span class="p">$</span>
-          <code>git clone https://github.com/V1ctor2182/jobfeed.git &amp;&amp; cd jobfeed &amp;&amp; ./setup.sh</code>
-          <button class="copy" type="button" data-copy="git clone https://github.com/V1ctor2182/jobfeed.git && cd jobfeed && ./setup.sh" aria-label="Copy install command"></button>
-        </div>
-        <a class="btn btn-ghost" href="#install" data-i18n="hero.secondary">Install guide</a>
-      </div>
-      <p class="hero-note" data-i18n="hero.note">macOS or Linux · opens a guided setup at 127.0.0.1:7654 · nothing scans until you start it</p>
-
-      <figure class="shot rv" style="margin-bottom:0">
-        <div class="shot-bar" aria-hidden="true"><i></i><i></i><i></i><span class="url">127.0.0.1:7654/dashboard</span></div>
-        <div class="shot-frame">
-          <img src="assets/dashboard.webp" width="1800" height="1728" alt="Jobfeed dashboard showing applied, discovered and evaluated counts, the application queue and a cumulative applied chart (synthetic data)" data-i18n-alt="hero.alt">
-        </div>
-      </figure>
-      <p class="caption" data-i18n="hero.caption">The dashboard, shown with synthetic data.</p>
-    </div>
-  </section>
-
-  <!-- SOURCES -->
-  <section class="sources">
-    <div class="wrap">
-      <p data-i18n="sources.title">Scans where the jobs are</p>
-      <div class="chips">
-        <span class="chip">Greenhouse</span><span class="chip">Lever</span><span class="chip">Ashby</span>
-        <span class="chip">Workday</span><span class="chip">iCIMS</span><span class="chip">SmartRecruiters</span>
-        <span class="chip">LinkedIn</span><span class="chip">Indeed</span><span class="chip">Jobright</span>
-        <span class="chip">Handshake</span><span class="chip" data-i18n="sources.curated">Curated lists</span>
-      </div>
-    </div>
-  </section>
-
-  <!-- HOW -->
-  <section class="block" id="how">
-    <div class="wrap">
-      <p class="kicker">scan → filter → evaluate → apply → track</p>
-      <h2 class="rv" data-i18n="how.title">One loop, from a blank search to a submitted application.</h2>
-      <p class="sub rv" data-i18n="how.sub">Two parts that run side by side on your machine: Jobfeed finds and ranks the work, the Applier pipeline does the typing.</p>
-      <div class="pipe rv">
-        <div class="step">
-          <div class="n"><b></b>01</div>
-          <h3 data-i18n="s1.t">Scan</h3>
-          <p data-i18n="s1.d">Company career boards, job sites and curated lists, on demand or on a daily timer.</p>
-        </div>
-        <div class="step">
-          <div class="n"><b></b>02</div>
-          <h3 data-i18n="s2.t">Filter</h3>
-          <p data-i18n="s2.d">Local rules drop duplicates, spam and roles you'd never take before any model sees them.</p>
-        </div>
-        <div class="step">
-          <div class="n"><b></b>03</div>
-          <h3 data-i18n="s3.t">Evaluate</h3>
-          <p data-i18n="s3.d">An LLM gives each job a quick score, then a detailed fit review against your résumé.</p>
-        </div>
-        <div class="step">
-          <div class="n"><b></b>04</div>
-          <h3 data-i18n="s4.t">Apply</h3>
-          <p data-i18n="s4.d">One Claude Code Applier per job, in a real Chromium, using one of your own PDF résumés.</p>
-        </div>
-        <div class="step">
-          <div class="n"><b></b>05</div>
-          <h3 data-i18n="s5.t">Track</h3>
-          <p data-i18n="s5.d">Every application, answer, run and dollar of model cost lands back in the dashboard.</p>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <!-- EVIDENCE -->
-  <section class="block">
-    <div class="wrap split">
-      <div class="copy-col">
-        <p class="kicker" data-i18n="ev.k">Evaluate</p>
-        <h2 class="rv" data-i18n="ev.title">Scores you can argue with.</h2>
-        <p class="sub rv" data-i18n="ev.sub">A number alone tells you nothing. Every evaluated job comes with the reasoning behind it, so you decide in seconds — and can see when the model is wrong.</p>
-        <ul class="list rv">
-          <li><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg></span><div><strong data-i18n="ev.l1t">Quick score, then a detailed fit</strong><span data-i18n="ev.l1d">A cheap first pass ranks everything; only the promising jobs get the full review.</span></div></li>
-          <li><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg></span><div><strong data-i18n="ev.l2t">Strengths and gaps, with evidence</strong><span data-i18n="ev.l2d">What in your résumé matches the posting, what's missing, and how much it matters.</span></div></li>
-          <li><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V10"/><path d="M18 20V4"/><path d="M6 20v-4"/></svg></span><div><strong data-i18n="ev.l3t">A clear verdict</strong><span data-i18n="ev.l3d">Apply, consider or skip — and the dashboard shows what every evaluation run cost.</span></div></li>
-        </ul>
-      </div>
-      <div class="card img fit rv">
-        <div class="inner"><img src="assets/fit-review.webp" width="1640" height="1898" alt="Job scores and evidence panel: quick score 83, detailed fit score 86, strengths and gaps for a backend role (synthetic data)" data-i18n-alt="ev.alt"></div>
-      </div>
-    </div>
-  </section>
-
-  <!-- APPLIER -->
-  <section class="block" id="applier">
-    <div class="wrap split flip">
-      <div class="copy-col">
-        <p class="kicker" data-i18n="ap.k">Apply</p>
-        <h2 class="rv" data-i18n="ap.title">An Applier that asks instead of guessing.</h2>
-        <p class="sub rv" data-i18n="ap.sub">Each Applier is a Claude Code agent with its own browser. It fills the form the way you would, and when it needs a fact it doesn't have, it asks you on Discord.</p>
-        <ul class="list rv">
-          <li><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg></span><div><strong data-i18n="ap.l1t">Your résumés, untouched</strong><span data-i18n="ap.l1d">It picks the best fit from the PDFs you approved. It never rewrites them.</span></div></li>
-          <li><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></span><div><strong data-i18n="ap.l2t">An answer bank that learns</strong><span data-i18n="ap.l2d">Each answer you give is saved and reused, so you answer “sponsorship?” once, not fifty times.</span></div></li>
-          <li><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg></span><div><strong data-i18n="ap.l3t">A trace of every step</strong><span data-i18n="ap.l3d">Applier trace shows each model call, browser action and wait, so a failed run is never a mystery.</span></div></li>
-        </ul>
-      </div>
-      <div class="card rv" aria-label="Example Discord thread">
-        <div class="thread">
-          <div class="thread-head"><span class="hash">#</span><strong>northwind-labs · senior-backend</strong><small>discord</small></div>
-          <div class="msg">
-            <div class="av bot">A</div>
-            <div>
-              <div class="meta"><b>Applier</b><span class="tag">BOT</span><span data-i18n="d.t1">today 14:02</span></div>
-              <p data-i18n="d.m1">Filled 14 of 15 fields with <code>backend-2026.pdf</code>. One question the profile doesn't answer:</p>
-              <div class="box" data-i18n="d.q">Will you now or in the future require visa sponsorship?</div>
+      <div class="frame stage" id="stage">
+        <canvas class="mosaic" id="mosaic" aria-hidden="true"></canvas>
+        <div class="scanwrap" id="scanwrap" aria-hidden="true"><div class="scanline" id="scanline" data-y="y 000"></div></div>
+        <svg class="wires" id="wires" aria-hidden="true"></svg>
+        <div class="hub up" id="hub" aria-hidden="true"><span class="mark"><svg viewBox="0 0 32 32"><path d="M19 6v14.5a4.5 4.5 0 0 1-4.5 4.5H11v-3.6h3.2a1.2 1.2 0 0 0 1.2-1.2V6H19z" fill="currentColor"/></svg></span>jobfeed</div>
+        <div id="dets" aria-hidden="true"></div>
+        <span class="cross" style="left:7%;top:34%" aria-hidden="true"></span>
+        <span class="cross" style="left:94%;top:27%" aria-hidden="true"></span>
+        <span class="cross" style="left:52%;top:9%" aria-hidden="true"></span>
+        <span class="corner tl up" aria-hidden="true">- 0 1<br>.jobfeed / recognition</span>
+        <span class="corner tr up" id="xy" aria-hidden="true">x 0000 · y 0000<br>scanning</span>
+        <span class="corner bl up" aria-hidden="true">( <span class="d" id="dots">...</span> ) demo feed</span>
+        <span class="corner br up" aria-hidden="true">applied <span id="count">0128</span></span>
+        <div class="hero-c">
+          <h1 class="stripe wordmark up"><span aria-hidden="true">(Jobfeed)</span><span class="sr">Jobfeed</span></h1>
+          <div class="band" id="band"></div>
+          <div class="bottom">
+            <div class="planet" aria-hidden="true"></div>
+            <div class="prompt">
+              <div class="prompt-head up"><span data-i18n="hero.paste">Paste into Claude Code or Codex</span><span aria-hidden="true">prompt.txt</span></div>
+<pre id="p0">Set up Jobfeed on my server as a background service.
+Read https://raw.githubusercontent.com/V1ctor2182/jobfeed/main/docs/server-install.md and follow it exactly, including how it says to talk to me: short, structured messages and numbered choices.
+If you aren't running on my server, ask me how to reach it. Ask me before using sudo, don't start any scan, and test everything before you hand over.</pre>
             </div>
-          </div>
-          <div class="msg">
-            <div class="av me">Y</div>
-            <div>
-              <div class="meta"><b data-i18n="d.you">You</b><span data-i18n="d.t2">today 14:05</span></div>
-              <p data-i18n="d.m2">No. Save that for next time.</p>
-            </div>
-          </div>
-          <div class="msg">
-            <div class="av bot">A</div>
-            <div>
-              <div class="meta"><b>Applier</b><span class="tag">BOT</span><span data-i18n="d.t3">today 14:06</span></div>
-              <p data-i18n="d.m3">Saved to the answer bank. Review summary ready:</p>
-              <div class="box">
-                <div><span data-i18n="d.r1">Résumé</span><span>backend-2026.pdf</span></div>
-                <div><span data-i18n="d.r2">Fields filled</span><span>15 / 15</span></div>
-                <div><span data-i18n="d.r3">Warnings</span><span>0</span></div>
-              </div>
-              <p data-i18n="d.m4">Reply <code>submit</code> to send it.</p>
-            </div>
-          </div>
-          <div class="msg">
-            <div class="av me">Y</div>
-            <div>
-              <div class="meta"><b data-i18n="d.you">You</b><span data-i18n="d.t4">today 14:09</span></div>
-              <p><code class="submit">submit</code></p>
+            <div class="cta-row">
+              <button class="btn w" type="button" data-copy-from="p0" data-i18n="hero.copy">Copy prompt</button>
+              <a class="btn o" href="https://github.com/V1ctor2182/jobfeed">GitHub ↗</a>
             </div>
           </div>
         </div>
-        <div class="ex" data-i18n="d.ex">Illustrative example.</div>
-      </div>
-    </div>
-  </section>
-
-  <!-- CONTROL -->
-  <section class="block" id="control">
-    <div class="wrap">
-      <p class="kicker" data-i18n="c.k">You stay in control</p>
-      <h2 class="rv" data-i18n="c.title">Automation up to the line. The line is yours.</h2>
-      <p class="sub rv" data-i18n="c.sub">Jobfeed is built so the agent can do nearly everything — except the one click that matters, unless you say otherwise.</p>
-      <div class="control">
-        <div class="ctl rv">
-          <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></div>
-          <h3 data-i18n="c1.t">Submit waits for you</h3>
-          <p data-i18n="c1.d">By default, nothing is sent until you press Submit on the dashboard or reply <code>submit</code> in the job's Discord thread.</p>
-        </div>
-        <div class="ctl rv">
-          <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><path d="M12 2v10"/></svg></div>
-          <h3 data-i18n="c2.t">Autopilot is opt-in</h3>
-          <p data-i18n="c2.d">Auto submit and autopilot stay off until you turn them on. CAPTCHAs, open questions and warnings still wait for you.</p>
-        </div>
-        <div class="ctl rv">
-          <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></div>
-          <h3 data-i18n="c3.t">Setup starts nothing</h3>
-          <p data-i18n="c3.d">Installing, running tests and opening the dashboard never start a worker, a browser session or an application.</p>
-        </div>
-        <div class="ctl rv">
-          <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg></div>
-          <h3 data-i18n="c4.t">Your data stays home</h3>
-          <p data-i18n="c4.d">Résumés, profile, answers, credentials and databases live on your machine and are ignored by Git.</p>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <!-- INSIGHTS -->
-  <section class="block">
-    <div class="wrap">
-      <p class="kicker" data-i18n="i.k">Track</p>
-      <h2 class="rv" data-i18n="i.title">See the whole funnel, not just a spreadsheet.</h2>
-      <p class="sub rv" data-i18n="i.sub">How many jobs you found, how many passed, what the model recommended and what you applied to — over any window you choose.</p>
-      <div class="pills rv">
-        <span data-i18n="i.p1">Dashboard</span><span data-i18n="i.p2">Review</span><span data-i18n="i.p3">Tracker</span><span data-i18n="i.p4">Answer Bank</span><span data-i18n="i.p5">Insights</span><span data-i18n="i.p6">Applier trace</span><span data-i18n="i.p7">Apply health</span><span data-i18n="i.p8">Performance</span>
-      </div>
-      <figure class="shot wide rv" style="margin-inline:0;max-width:none">
-        <div class="shot-bar" aria-hidden="true"><i></i><i></i><i></i><span class="url">127.0.0.1:7654/insights</span></div>
-        <div class="shot-frame" style="aspect-ratio:1800/1102">
-          <img src="assets/insights.webp" width="1800" height="1102" alt="Insights page: key numbers, evaluation coverage bars and user decisions chart (synthetic data)" data-i18n-alt="i.alt">
-        </div>
-      </figure>
-    </div>
-  </section>
-
-  <!-- INSTALL -->
-  <section class="block" id="install">
-    <div class="wrap">
-      <p class="kicker" data-i18n="in.k">Install</p>
-      <h2 class="rv" data-i18n="in.title">Running in one command. Or ask your agent.</h2>
-      <p class="sub rv" data-i18n="in.sub">Start on your laptop to find and score jobs. Move to an always-on box when you want the daily loop.</p>
-      <div class="install">
-        <div class="inst rv">
-          <span class="label" data-i18n="in.a.l">On your machine</span>
-          <h3 data-i18n="in.a.t">Find and score jobs</h3>
-          <p data-i18n="in.a.d">Installs the runtime, starts Jobfeed at 127.0.0.1:7654 and walks you through connecting a model, uploading your résumé and picking searches.</p>
-          <div class="code">
-            <button class="copy" type="button" data-copy-from="c1" aria-label="Copy"></button>
-<pre id="c1"><span class="p">$ </span>git clone https://github.com/V1ctor2182/jobfeed.git
-<span class="p">$ </span>cd jobfeed
-<span class="p">$ </span>./setup.sh</pre>
-          </div>
-        </div>
-        <div class="inst rv">
-          <span class="label" data-i18n="in.b.l">On a server, with a coding agent</span>
-          <h3 data-i18n="in.b.t">Hand it to Claude Code or Codex</h3>
-          <p data-i18n="in.b.d">Paste this into an agent that can run commands on your VPS or Mac mini. It installs the service, sets things up with you in chat and tests it all before handing over.</p>
-          <div class="code">
-            <button class="copy" type="button" data-copy-from="c2" aria-label="Copy"></button>
-<pre id="c2">Set up Jobfeed on my server as a background service.
-Read https://raw.githubusercontent.com/V1ctor2182/jobfeed/main/docs/server-install.md
-and follow it exactly, including how it says to talk to me: short, structured
-messages and numbered choices. If you aren't running on my server, ask me how
-to reach it. Ask me before using sudo, don't start any scan, and test
-everything before you hand over.</pre>
-          </div>
-        </div>
-      </div>
-      <div class="reqs rv">
-        <h4 data-i18n="in.r.t">Adding the Applier?<small data-i18n="in.r.s">Three more things on the same machine.</small></h4>
-        <div><b>Claude Code CLI</b><span data-i18n="in.r1">Installed and signed in.</span></div>
-        <div><b>Chromium</b><span data-i18n="in.r2">A separate browser profile just for Appliers.</span></div>
-        <div><b data-i18n="in.r3t">A Discord bot</b><span data-i18n="in.r3">In your own server, so Appliers can ask you questions.</span></div>
-      </div>
-    </div>
-  </section>
-
-  <!-- FINAL CTA -->
-  <section class="wrap">
-    <div class="final rv">
-      <h2 data-i18n="f.title">Spend your time on interviews, not forms.</h2>
-      <p data-i18n="f.sub">Jobfeed is free and open source under the MIT License.</p>
-      <div class="hero-cta" style="margin-top:0">
-        <a class="btn btn-primary" href="https://github.com/V1ctor2182/jobfeed" data-i18n="f.b1">Get it on GitHub</a>
-        <a class="btn btn-ghost" href="https://github.com/V1ctor2182/jobfeed/blob/main/jobfeed/README.md" data-i18n="f.b2">Read the guide</a>
       </div>
     </div>
   </section>
@@ -634,156 +271,216 @@ everything before you hand over.</pre>
 
 <footer>
   <div class="wrap">
-    <span class="grow">
-      <span class="mark" aria-hidden="true" style="width:22px;height:22px;border-radius:6px"><svg viewBox="0 0 32 32" style="width:13px;height:13px"><path d="M19 6v14.5a4.5 4.5 0 0 1-4.5 4.5H11v-3.6h3.2a1.2 1.2 0 0 0 1.2-1.2V6H19z" fill="currentColor"/></svg></span>
-      <span data-i18n="ft.ack">Originally created by <a href="https://github.com/wenqiw777/jobfeed">wenqiw777</a>, published with permission.</span>
-    </span>
-    <a href="https://github.com/V1ctor2182/jobfeed">GitHub</a>
-    <a href="https://github.com/V1ctor2182/jobfeed/blob/main/README.zh-CN.md" data-i18n="ft.zh">中文文档</a>
-    <a href="https://github.com/V1ctor2182/jobfeed/blob/main/LICENSE">MIT License</a>
+    <div class="eot">
+      <div class="l up">
+        <span class="slash">//</span><br>- End of transmission &nbsp;&nbsp;&nbsp; ( &nbsp;&nbsp;&nbsp;&nbsp; )))))))))) &nbsp; :)<br>Number 01 JF
+        <div class="links">
+          <span data-i18n="ft.ack">Originally created by <a href="https://github.com/wenqiw777/jobfeed">wenqiw777</a>, published with permission.</span>
+          <a href="https://github.com/V1ctor2182/jobfeed">GitHub</a>
+          <a href="https://github.com/V1ctor2182/jobfeed/blob/main/README.zh-CN.md" data-i18n="ft.zh">中文文档</a>
+          <a href="https://github.com/V1ctor2182/jobfeed/blob/main/LICENSE">MIT License</a>
+        </div>
+      </div>
+      <div class="r"><div class="barcode" data-seed="21" aria-hidden="true"></div></div>
+    </div>
   </div>
 </footer>
 
 <script>
 (function () {
-  document.body.classList.remove("no-js");
 
+  /* ---------- i18n ---------- */
   var ZH = {
-    "nav.how": "工作流程", "nav.applier": "Applier", "nav.control": "掌控权", "nav.install": "安装",
-    "hero.eyebrow": "开源 · 本地优先 · MIT",
-    "hero.title": "找对岗位，交给 Claude 投递，<em>提交键仍由你按。</em>",
-    "hero.lede": "Jobfeed 扫描公司招聘页和求职网站，对照你的简历给每个岗位打分，再把合适的交给 Claude Applier 在真实浏览器里填好申请表——然后等你点头。",
-    "hero.secondary": "安装指南",
-    "hero.note": "macOS 或 Linux · 在 127.0.0.1:7654 打开引导式设置 · 你不点开始，就不会扫描",
-    "hero.caption": "Dashboard 总览（演示数据）。",
-    "hero.alt": "Jobfeed Dashboard：已投递、已发现、已评估数量、投递队列和累计投递曲线（演示数据）",
-    "sources.title": "去岗位所在的地方扫描", "sources.curated": "精选岗位列表",
-    "how.title": "一个闭环：从空白搜索到提交申请。",
-    "how.sub": "两个部分并排跑在你的电脑上：Jobfeed 负责找岗位、排优先级，Applier 流水线负责填表。",
-    "s1.t": "扫描", "s1.d": "公司招聘页、求职网站和精选列表，可以手动触发，也可以每天定时跑。",
-    "s2.t": "过滤", "s2.d": "在任何模型介入之前，本地规则先去掉重复、垃圾岗位和你绝不会投的职位。",
-    "s3.t": "评估", "s3.d": "LLM 先给每个岗位一个快速分，再对照你的简历做详细匹配审阅。",
-    "s4.t": "投递", "s4.d": "每个岗位一个 Claude Code Applier，在真实的 Chromium 里，用你自己的 PDF 简历。",
-    "s5.t": "跟踪", "s5.d": "每一份申请、每个回答、每次运行和每一分模型花费，都记回 Dashboard。",
-    "ev.k": "评估", "ev.title": "每个分数都有理有据。",
-    "ev.sub": "光有一个数字没有意义。每个评估过的岗位都附带打分理由，你几秒就能做决定，也能一眼看出模型哪里判断错了。",
-    "ev.l1t": "先快速打分，再详细匹配", "ev.l1d": "便宜的第一轮给所有岗位排序，只有有希望的岗位才进入完整审阅。",
-    "ev.l2t": "优势与差距，附带依据", "ev.l2d": "简历里哪些经历对得上，缺了什么，影响有多大。",
-    "ev.l3t": "明确的结论", "ev.l3d": "投、可以考虑、跳过——每次评估花了多少钱，Dashboard 上都看得见。",
-    "ev.alt": "岗位评分与依据面板：快速分 83、详细匹配分 86，以及后端岗位的优势和差距（演示数据）",
-    "ap.k": "投递", "ap.title": "不会乱猜、会先问你的 Applier。",
-    "ap.sub": "每个 Applier 都是一个拥有独立浏览器的 Claude Code 智能体。它像你一样填表；遇到不知道的信息，就在 Discord 上问你。",
-    "ap.l1t": "简历原样使用", "ap.l1d": "从你允许的 PDF 里挑最合适的一份，绝不改写。",
-    "ap.l2t": "会成长的答案库", "ap.l2d": "你回答过的问题都会被保存复用——“需要签证担保吗？”只用回答一次，而不是五十次。",
-    "ap.l3t": "每一步都有记录", "ap.l3d": "Applier trace 记下每次模型调用、浏览器操作和等待，失败了也知道为什么。",
-    "d.t1": "今天 14:02", "d.t2": "今天 14:05", "d.t3": "今天 14:06", "d.t4": "今天 14:09", "d.you": "你",
-    "d.m1": "已用 <code>backend-2026.pdf</code> 填好 15 个字段中的 14 个。有一个问题你的资料里没有答案：",
-    "d.q": "你现在或将来是否需要签证担保？",
-    "d.m2": "不需要。下次也这么填。",
-    "d.m3": "已存入答案库。审阅摘要已就绪：",
-    "d.r1": "简历", "d.r2": "已填字段", "d.r3": "警告",
-    "d.m4": "回复 <code>submit</code> 即可提交。",
-    "d.ex": "示意图。",
-    "c.k": "一切由你掌控", "c.title": "自动化到最后一步为止，最后一步属于你。",
-    "c.sub": "Jobfeed 让智能体几乎什么都能做——除了最关键的那一下点击，除非你自己授权。",
-    "c1.t": "Submit 一定等你", "c1.d": "默认情况下，你在 Dashboard 点 Submit，或在该岗位的 Discord 线程里回复 <code>submit</code>，才会真正提交。",
-    "c2.t": "Autopilot 需要你主动开启", "c2.d": "自动提交和 autopilot 默认关闭。遇到验证码、未回答的问题或警告，仍然会等你。",
-    "c3.t": "安装不会启动任何东西", "c3.d": "安装、运行测试、打开 Dashboard，都不会启动 worker、浏览器会话或任何投递。",
-    "c4.t": "数据留在你的电脑上", "c4.d": "简历、个人资料、答案、凭据和数据库都只存在本地，并且被 Git 忽略。",
-    "i.k": "跟踪", "i.title": "看清整个漏斗，而不只是一张表格。",
-    "i.sub": "发现了多少岗位、通过了多少、模型推荐了哪些、你投了哪些——任意时间范围都能看。",
-    "i.p1": "总览", "i.p2": "审阅", "i.p3": "投递跟踪", "i.p4": "答案库", "i.p5": "数据洞察", "i.p6": "Applier 追踪", "i.p7": "投递健康度", "i.p8": "性能",
-    "i.alt": "数据洞察页：关键数字、评估覆盖率和用户决策图表（演示数据）",
-    "in.k": "安装", "in.title": "一条命令跑起来，或者交给你的智能体。",
-    "in.sub": "先在自己电脑上找岗位、打分；想要每天自动跑，再搬到一台常开的机器上。",
-    "in.a.l": "在你的电脑上", "in.a.t": "找岗位、打分",
-    "in.a.d": "安装运行环境，在 127.0.0.1:7654 启动 Jobfeed，引导你连接模型、上传简历、选择搜索条件。",
-    "in.b.l": "在服务器上，交给编程智能体", "in.b.t": "交给 Claude Code 或 Codex",
-    "in.b.d": "把下面这段粘贴给能在你的 VPS 或 Mac mini 上执行命令的智能体。它会装好后台服务，在对话里和你一起完成设置，并在交付前测试全部功能。",
-    "in.r.t": "要加上 Applier？", "in.r.s": "同一台电脑上还需要三样东西。",
-    "in.r1": "已安装并登录。", "in.r2": "给 Applier 专用的独立浏览器配置。",
-    "in.r3t": "一个 Discord bot", "in.r3": "放在你自己的服务器里，让 Applier 能向你提问。",
-    "f.title": "把时间花在面试上，而不是填表。",
-    "f.sub": "Jobfeed 免费开源，采用 MIT 许可证。",
-    "f.b1": "去 GitHub 获取", "f.b2": "阅读使用指南",
+    "hero.paste": "粘贴到 Claude Code 或 Codex", "hero.copy": "复制提示词",
     "ft.ack": "最初由 <a href=\"https://github.com/wenqiw777/jobfeed\">wenqiw777</a> 创建，经其同意在此发布。",
     "ft.zh": "中文文档"
   };
-
   var nodes = document.querySelectorAll("[data-i18n]");
-  var altNodes = document.querySelectorAll("[data-i18n-alt]");
   var EN = {};
-  nodes.forEach(function (n) { EN[n.dataset.i18n] = n.innerHTML; });
-  altNodes.forEach(function (n) { EN["alt:" + n.dataset.i18nAlt] = n.alt; });
+  nodes.forEach(function (n) { if (!(n.dataset.i18n in EN)) EN[n.dataset.i18n] = n.innerHTML; });
   var titleEN = document.title;
-
   function setLang(lang) {
     var zh = lang === "zh-CN";
-    nodes.forEach(function (n) {
-      var k = n.dataset.i18n;
-      var v = zh ? ZH[k] : EN[k];
-      if (v != null) n.innerHTML = v;
-    });
-    altNodes.forEach(function (n) {
-      var k = n.dataset.i18nAlt;
-      var v = zh ? ZH[k] : EN["alt:" + k];
-      if (v != null) n.alt = v;
-    });
+    nodes.forEach(function (n) { var k = n.dataset.i18n, v = zh ? ZH[k] : EN[k]; if (v != null) n.innerHTML = v; });
     document.documentElement.lang = zh ? "zh-CN" : "en";
     document.title = zh ? "Jobfeed — 找岗位、打分、交给 Claude 投递" : titleEN;
-    document.querySelectorAll(".lang button").forEach(function (b) {
-      b.setAttribute("aria-pressed", String(b.dataset.lang === lang));
-    });
+    document.querySelectorAll(".lang button").forEach(function (b) { b.setAttribute("aria-pressed", String(b.dataset.lang === lang)); });
     try { localStorage.setItem("jobfeed-lang", lang); } catch (e) {}
   }
-
-  var saved = null;
-  try { saved = localStorage.getItem("jobfeed-lang"); } catch (e) {}
+  var saved = null; try { saved = localStorage.getItem("jobfeed-lang"); } catch (e) {}
   var param = new URLSearchParams(location.search).get("lang");
-  var initial = param === "zh" || param === "zh-CN" ? "zh-CN"
-    : param === "en" ? "en"
+  var initial = param === "zh" || param === "zh-CN" ? "zh-CN" : param === "en" ? "en"
     : saved || ((navigator.language || "").toLowerCase().indexOf("zh") === 0 ? "zh-CN" : "en");
   if (initial !== "en") setLang(initial);
+  document.querySelectorAll(".lang button").forEach(function (b) { b.addEventListener("click", function () { setLang(b.dataset.lang); }); });
 
-  document.querySelectorAll(".lang button").forEach(function (b) {
-    b.addEventListener("click", function () { setLang(b.dataset.lang); });
-  });
-
-  // copy buttons
-  var COPY = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
-  var DONE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
-  document.querySelectorAll(".copy").forEach(function (btn) {
-    btn.innerHTML = COPY;
+  /* ---------- copy ---------- */
+  document.querySelectorAll("[data-copy], [data-copy-from]").forEach(function (btn) {
     btn.addEventListener("click", function () {
+      if (btn.dataset.busy) return;
+      var label = btn.textContent;
       var text = btn.dataset.copy;
       if (!text) {
         var src = document.getElementById(btn.dataset.copyFrom);
-        text = Array.from(src.childNodes).filter(function (n) {
-          return !(n.nodeType === 1 && n.classList.contains("p"));
-        }).map(function (n) { return n.textContent; }).join("");
+        text = Array.from(src.childNodes).filter(function (n) { return !(n.nodeType === 1 && n.classList.contains("p")); })
+          .map(function (n) { return n.textContent; }).join("");
       }
-      var done = function () { btn.innerHTML = DONE; setTimeout(function () { btn.innerHTML = COPY; }, 1400); };
       if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(text).then(done, function () {});
+        navigator.clipboard.writeText(text).then(function () {
+          btn.dataset.busy = "1";
+          btn.textContent = document.documentElement.lang === "zh-CN" ? "已复制" : "Copied";
+          setTimeout(function () { btn.textContent = label; delete btn.dataset.busy; }, 1400);
+        }, function () {});
       }
     });
   });
 
-  // nav border on scroll
-  var nav = document.getElementById("nav");
-  var onScroll = function () { nav.classList.toggle("scrolled", window.scrollY > 8); };
-  window.addEventListener("scroll", onScroll, { passive: true }); onScroll();
+  /* ---------- seeded random ---------- */
+  function rng(seed) { var s = seed >>> 0 || 1; return function () { s ^= s << 13; s ^= s >>> 17; s ^= s << 5; return ((s >>> 0) % 100000) / 100000; }; }
 
-  // reveal on scroll
-  var els = document.querySelectorAll(".rv");
-  if ("IntersectionObserver" in window) {
-    var io = new IntersectionObserver(function (entries) {
-      entries.forEach(function (e) { if (e.isIntersecting) { e.target.classList.add("in"); io.unobserve(e.target); } });
-    }, { rootMargin: "0px 0px -8% 0px", threshold: 0.08 });
-    els.forEach(function (el) { io.observe(el); });
-  } else {
-    els.forEach(function (el) { el.classList.add("in"); });
+  /* ---------- barcodes ---------- */
+  document.querySelectorAll(".barcode").forEach(function (el) {
+    var r = rng(Number(el.dataset.seed) * 7919), x = 0, bars = "";
+    while (x < 186) {
+      var w = [1, 1, 1, 2, 2, 3, 4][Math.floor(r() * 7)];
+      if (r() > 0.38) bars += '<rect x="' + x + '" y="0" width="' + w + '" height="66"/>';
+      x += w + 1;
+    }
+    el.innerHTML = '<svg viewBox="0 0 190 66" preserveAspectRatio="none" fill="currentColor">' + bars + "</svg>";
+  });
+
+  /* ---------- recognition stage ---------- */
+  var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  function g(x, m, sd) { return Math.exp(-((x - m) * (x - m)) / (2 * sd * sd)); }
+  function noise2(seed) {
+    var r = rng(seed), grid = [];
+    for (var i = 0; i < 64 * 64; i++) grid.push(r());
+    function v(x, y) { x = ((x % 64) + 64) % 64; y = ((y % 64) + 64) % 64; return grid[y * 64 + x]; }
+    return function (x, y) {
+      var xi = Math.floor(x), yi = Math.floor(y), xf = x - xi, yf = y - yi;
+      var u = xf * xf * (3 - 2 * xf), w = yf * yf * (3 - 2 * yf);
+      var a = v(xi, yi), b = v(xi + 1, yi), c = v(xi, yi + 1), d = v(xi + 1, yi + 1);
+      return a + (b - a) * u + (c - a) * w + (a - b - c + d) * u * w;
+    };
   }
+  var PAL = ["#120a45", "#1d1166", "#2c1a8f", "#3f28b8", "#5638db", "#7258ef", "#937cff", "#b9a9ff", "#d9cfff", "#26301f", "#3c4a33", "#5e3f8f"];
+  var stage = document.getElementById("stage"), band = document.getElementById("band");
+  var canvas = document.getElementById("mosaic"), ctx = canvas.getContext("2d");
+  var wires = document.getElementById("wires"), hub = document.getElementById("hub");
+  var detsEl = document.getElementById("dets"), scanwrap = document.getElementById("scanwrap"), scanline = document.getElementById("scanline");
+  var xy = document.getElementById("xy"), countEl = document.getElementById("count");
+  var R = rng(9001), cells = [], cols = 0, rows = 0, B = null, hubP = null, count = 128;
+  var n1 = noise2(4242), n2 = noise2(4253);
+
+  function measure() {
+    var sr = stage.getBoundingClientRect(), br = band.getBoundingClientRect();
+    B = { x: br.left - sr.left, y: br.top - sr.top, w: br.width, h: br.height, W: sr.width, H: sr.height };
+    var mobile = B.W < 720;
+    hubP = mobile ? { x: B.x + B.w * 0.5, y: B.y + 22 } : { x: B.x + B.w * 0.13, y: B.y + B.h * 0.5 };
+    hub.style.left = hubP.x + "px"; hub.style.top = hubP.y + "px";
+    scanwrap.style.top = B.y + "px"; scanwrap.style.height = B.h + "px";
+    wires.setAttribute("viewBox", "0 0 " + B.W + " " + B.H);
+  }
+  function buildMosaic() {
+    var top = B.y - 60, h = B.h + 180, size = B.W < 720 ? 7 : 8;
+    canvas.style.top = top + "px"; canvas.style.height = h + "px";
+    cols = Math.max(1, Math.round(B.W / size)); rows = Math.max(1, Math.round(h / size));
+    canvas.width = cols; canvas.height = rows; cells = [];
+    var r = rng(77);
+    for (var y = 0; y < rows; y++) for (var x = 0; x < cols; x++) {
+      var u = x / cols, t = y / rows;
+      var cloud = g(t, 0.45, 0.15) * (0.35 + 0.75 * g(u, 0.3, 0.17) + 0.75 * g(u, 0.8, 0.15));
+      var trunk = g(u, 0.6 - t * 0.12, 0.045) * (t < 0.55 ? 1.15 : 0.3);
+      var d = Math.max(cloud, trunk) * (0.55 + 0.9 * n1(x / 5.5, y / 5.5)) + (r() < 0.012 ? 0.6 : 0);
+      if (d > 0.68) {
+        var shade = n2(x / 3, y / 3) * 0.75 + r() * 0.35 + (d - 0.68) * 0.25;
+        var idx = Math.min(PAL.length - 1, Math.floor(shade * 8.5));
+        if (r() < 0.06) idx = 9 + Math.floor(r() * 3);
+        cells.push([x, y, idx]);
+      }
+    }
+    drawMosaic();
+  }
+  function drawMosaic() {
+    ctx.clearRect(0, 0, cols, rows);
+    for (var i = 0; i < cells.length; i++) { ctx.fillStyle = PAL[cells[i][2]]; ctx.fillRect(cells[i][0], cells[i][1], 1, 1); }
+  }
+
+  var JOBS = ["Backend eng · fintech", "SWE II · infra", "Platform eng · payments", "ML engineer · search", "Full-stack · health",
+    "Data engineer · ads", "iOS engineer · consumer", "SRE · cloud", "Security eng · devtools", "Frontend · design tools"];
+  var dets = [];
+  function pad(n, k) { n = String(Math.round(n)); while (n.length < k) n = "0" + n; return n; }
+  function place(d) {
+    var mobile = B.W < 720, n = dets.length, slot = dets.indexOf(d);
+    var x0 = mobile ? B.x + 6 : hubP.x + 96, x1 = B.x + B.w - 6;
+    var sw = (x1 - x0) / n, w = Math.min(sw - (mobile ? 14 : 30), (mobile ? 92 : 118) + R() * (mobile ? 50 : 100));
+    var y0 = mobile ? B.y + 64 : B.y + 28, h = (mobile ? 48 : 56) + R() * (mobile ? 30 : 56);
+    var x = x0 + slot * sw + R() * Math.max(0, sw - w - (mobile ? 14 : 30));
+    var y = y0 + R() * Math.max(1, B.y + B.h - 30 - h - y0);
+    d.x = x; d.y = y; d.w = w; d.h = h;
+    d.el.style.left = x + "px"; d.el.style.top = y + "px"; d.el.style.width = w + "px"; d.el.style.height = h + "px";
+    d.job = JOBS[Math.floor(R() * JOBS.length)]; d.step = 0; d.score = 0.35 + R() * 0.6; d.wait = R() < 0.2;
+    d.el.classList.remove("new"); void d.el.offsetWidth; if (!reduce) d.el.classList.add("new");
+  }
+  function render(d) {
+    var lab, cls = "";
+    var skip = d.score < 0.55;
+    if (d.step === 0) lab = "Detected";
+    else if (d.step === 1) lab = "Match " + d.score.toFixed(2);
+    else if (skip) { lab = "Skip · low fit"; cls = "skip"; }
+    else if (d.step === 2) lab = "Applying " + (7 + Math.floor(R() * 7)) + "/15";
+    else if (d.wait) { lab = "Waiting · question for you"; cls = "wait"; }
+    else { lab = "Submitted ✓"; cls = "done"; }
+    d.el.className = "det" + (cls ? " " + cls : "");
+    d.el.innerHTML = "<b>" + lab + "</b><i>" + d.job + "</i>";
+  }
+  function drawWires() {
+    var out = "";
+    dets.forEach(function (d) {
+      var tx = d.x + (d.x > hubP.x ? 0 : d.w), ty = d.y + d.h / 2;
+      var mx = hubP.x + (tx - hubP.x) * 0.55;
+      out += '<path d="M' + hubP.x + " " + hubP.y + " L" + mx + " " + hubP.y + " L" + tx + " " + ty + '"/>';
+      out += '<circle cx="' + tx + '" cy="' + ty + '" r="2.5"/>';
+    });
+    wires.innerHTML = out;
+  }
+  function layout() {
+    measure(); buildMosaic();
+    var n = B.W < 720 ? 2 : B.W < 1000 ? 3 : 4;
+    detsEl.innerHTML = ""; dets = [];
+    for (var i = 0; i < n; i++) { var el = document.createElement("div"); detsEl.appendChild(el); dets.push({ el: el }); }
+    dets.forEach(function (d, i) { place(d); d.step = reduce ? [3, 1, 2, 3][i] : i % 3; render(d); });
+    drawWires();
+  }
+  layout();
+  var rt; window.addEventListener("resize", function () { clearTimeout(rt); rt = setTimeout(layout, 160); });
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(layout);
+
+  if (!reduce) {
+    var k = 0;
+    setInterval(function () {
+      if (document.hidden || !dets.length) return;
+      var d = dets[k++ % dets.length];
+      d.step++;
+      var skip = d.score < 0.55;
+      if ((skip && d.step > 2) || d.step > 3) { place(d); drawWires(); }
+      else if (d.step === 3 && !d.wait) { count++; countEl.textContent = pad(count, 4); }
+      render(d);
+      xy.innerHTML = "x " + pad(d.x, 4) + " · y " + pad(d.y, 4) + "<br>" + (d.step === 0 ? "target lock" : "scanning");
+      for (var j = 0; j < 8; j++) { var c = cells[Math.floor(R() * cells.length)]; if (c) c[2] = Math.min(PAL.length - 1, Math.max(0, c[2] + (R() < 0.5 ? -1 : 1))); }
+      drawMosaic();
+    }, 650);
+    setInterval(function () {
+      var y = scanline.offsetTop; scanline.setAttribute("data-y", "y " + pad(B.y + y, 3));
+    }, 120);
+    stage.addEventListener("pointermove", function (e) {
+      var r = stage.getBoundingClientRect();
+      xy.innerHTML = "x " + pad(e.clientX - r.left, 4) + " · y " + pad(e.clientY - r.top, 4) + "<br>tracking";
+    });
+    var dots = document.getElementById("dots"), di = 0;
+    setInterval(function () { di = (di + 1) % 4; dots.textContent = ".".repeat(di); }, 450);
+  }
+
 })();
 </script>
 </body>
