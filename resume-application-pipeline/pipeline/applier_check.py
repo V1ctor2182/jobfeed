@@ -27,6 +27,10 @@ from pipeline.workday_accounts import PASSWORD_FILE
 PROFILE = 'Fill in My Profile on the dashboard, or ask the agent to fill it from your résumé.'
 
 
+def _need(found, fix):
+    return (True, 'found') if found else (False, fix)
+
+
 def _profile(root):
     from jobfeed.my_profile_document import PersonalProfileStore
     state = PersonalProfileStore(root / 'application-profile.md', root.parent / 'jobfeed/data/my-profile-review.json').state()
@@ -90,19 +94,19 @@ def checks(root, *, env=os.environ, discord_env=DEFAULT_ENV, claude_config=Path(
     items = [
         ('My Profile', lambda: _profile(root)),
         ('Résumés for applications', lambda: _resumes(root)),
-        ('claude command', lambda: (bool(shutil.which('claude', path=path)), 'Install Claude Code and sign it in.')),
-        ('jobfeed command', lambda: (os.access(root.parent / 'jobfeed/.venv/bin/jobfeed', os.X_OK),
-                                     'Jobfeed is not installed beside the pipeline.')),
-        ('Claude trusts this folder', lambda: (claude_trusts(root / 'applications', Path(claude_config).expanduser()),
-                                               f'Run claude once in {root.parent} and accept the trust question.')),
-        ('Same Jobfeed database', lambda: (PipelineConfig.discover(root).jobfeed_db.is_file(),
-                                           'The Jobfeed database is not at jobfeed/data/jobfeed.sqlite.')),
+        ('claude command', lambda: _need(shutil.which('claude', path=path), 'Install Claude Code and sign it in.')),
+        ('jobfeed command', lambda: _need(os.access(root.parent / 'jobfeed/.venv/bin/jobfeed', os.X_OK),
+                                          'Jobfeed is not installed beside the pipeline.')),
+        ('Claude trusts this folder', lambda: _need(claude_trusts(root / 'applications', Path(claude_config).expanduser()),
+                                                    f'Run claude once in {root.parent} and accept the trust question.')),
+        ('Same Jobfeed database', lambda: _need(PipelineConfig.discover(root).jobfeed_db.is_file(),
+                                                'The Jobfeed database is not at jobfeed/data/jobfeed.sqlite.')),
         ('Discord', lambda: _discord(discord_env, discord_client)),
         ('Applying browser', lambda: _browser(targets or _targets)),
         ('Applying browser recorded', lambda: _device(root)),
         ('Workday account program', lambda: _broker(root)),
-        ('Job-site password', lambda: ((root / PASSWORD_FILE).is_file(),
-                                       'Set a password under Login on the dashboard\'s My Profile page.')),
+        ('Job-site password', lambda: _need((root / PASSWORD_FILE).is_file(),
+                                            'Set a password under Login on the dashboard\'s My Profile page.')),
     ]
     results = []
     for name, check in items:

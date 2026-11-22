@@ -71,6 +71,7 @@ class ApplierCheckTests(unittest.TestCase):
         results = self.results()
         self.assertEqual([name for name, r in results.items() if not r['ok']], [])
         self.assertEqual(results['Applying browser recorded']['detail'], DEVICE)
+        self.assertEqual(results['claude command']['detail'], 'found')
 
     def test_a_fresh_install_names_a_fix_for_each_missing_part(self):
         results = self.results(targets=[])

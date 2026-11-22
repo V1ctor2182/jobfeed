@@ -822,10 +822,14 @@ If `DISPLAY` is missing there, take it from a process running on the desktop
    `JOBFEED_API_URL` and `JOBFEED_APPLIERS` to the plist's
    `EnvironmentVariables` and reload it.
 3. **Trust the folder.** Claude Code asks once whether it may work in a folder.
-   Answer it for the checkout: start `claude` in tmux in `$JOBFEED_HOME`, wait
-   for the trust question, send Enter (the first choice, "Yes"), then send
-   `/exit`. `jq '.projects["'"$JOBFEED_HOME"'"].hasTrustDialogAccepted' ~/.claude.json`
-   must print `true`.
+   Answer it for the checkout: start `claude` in tmux in `$JOBFEED_HOME` and
+   read the screen after each key. A first interactive run asks setup
+   questions first (text style, security notes): press Enter for each. At the
+   trust question the selected answer is **No, exit**: press Down until
+   **Yes, I trust this folder** is selected, then Enter, then send `/exit`.
+   Check:
+   `python3 -c "import json,os;print(json.load(open(os.path.expanduser('~/.claude.json')))['projects']['$JOBFEED_HOME'].get('hasTrustDialogAccepted'))"`
+   must print `True`.
 4. **My Profile.** Appliers fill forms from it. Read it with
    `curl -s http://127.0.0.1:7654/api/my-profile`. `application_resumes` must
    list at least one résumé with `"available": true`: the PDF from step 5. If
@@ -906,12 +910,12 @@ If `DISPLAY` is missing there, take it from a process running on the desktop
       ⏳ Step 7/9 · Connect Claude to the applying browser
       1. Open your server's screen: <link>
       2. In the Chrome window with the Claude extension page, click Add to Chrome, then Add extension
-      3. Click the Claude icon (puzzle piece, then Claude) and sign in with the same Claude account
+      3. A Claude log-in page opens by itself: log in with the same Claude account. Skip "Sign in to Chrome"
       4. Reply "done"
       ```
 
-      If you can control the server's desktop, click 2 yourself; the sign-in
-      is theirs.
+      If you can control the server's desktop, do 2 yourself (maximize the
+      window first if the button is off screen); the log-in is theirs.
    3. Run the command from 1 again. The browser that is new in the list, with
       `osPlatform` Linux (or macOS on a Mac mini), is the applying browser.
       Save its deviceId:
