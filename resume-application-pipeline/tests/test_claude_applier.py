@@ -103,6 +103,13 @@ class ClaudeApplierTests(unittest.TestCase):
         self.assertEqual(settings['deniedMcpServers'], [{'serverName': 'desktop-chromium'}])
         self.assertIn('PreToolUse', settings['hooks'])
 
+    def test_the_browser_guard_blocks_the_dashboard_this_batch_reports_to(self):
+        self.launcher.launch(1, scope='batch', url='http://127.0.0.1:8790/job1.html', materials=[self.root / 'materials'],
+                             work_dir=self.root / 'work-1', dashboard_url='http://127.0.0.1:7654')
+        hook = json.loads((self.root / 'work-1/applier-settings.json').read_text())['hooks']['PreToolUse'][0]['hooks'][0]['command']
+        self.assertIn('applier_guard.py', hook)
+        self.assertIn('localhost:7654', hook)
+
     def test_an_unreadable_user_config_denies_nothing(self):
         with patch('pipeline.claude_applier.Path.home', return_value=self.root / 'nobody'):
             self.launch()

@@ -7,9 +7,10 @@ too.
 
 It installs **Jobfeed** as a background service: it scans job sites, filters
 and ranks the jobs against the user's résumé with AI, and shows them on a
-dashboard. As an option, it also reads replies to applications from Gmail
-(confirmations, interviews, rejections, offers). It does not apply to jobs;
-that is the separate Claude Applier setup in the main README.
+dashboard. As options, it also reads replies to applications from Gmail
+(confirmations, interviews, rejections, offers) and applies to the jobs the
+user picks with Claude Appliers, which wait for the user to confirm every
+Submit.
 
 The user only talks to you, in this chat. Assume they are not technical and
 have no terminal on the server. Everything that needs their input (a choice, a
@@ -61,8 +62,7 @@ What you get
 • New jobs from LinkedIn, Indeed and company career pages, ranked against your résumé by AI
 • A scan every day by itself, or only when you start one: your choice
 • Optional extras: Handshake and signed-in LinkedIn, a private link for your phone,
-  replies to your applications from Gmail
-• Not included: applying to jobs
+  replies to your applications from Gmail, applying to the jobs you pick (you confirm every Submit)
 
 What I need from you (about 10 minutes)
 1. Your résumé: a PDF, Word file or pasted text
@@ -86,6 +86,8 @@ Then post one status line per step as you finish it.
 - Never print, log, or commit API keys or tokens.
 - Do not start a scan or an evaluation on your own. The only one during setup
   is the first scan that step 8 offers, after the user says yes.
+- Never start an application, press Submit, or turn on auto submit or
+  autopilot. Only the user does those (see "Applying for them").
 - Jobfeed's dashboard has no accounts. It refuses to bind anything except
   loopback. The only ways to reach it from outside the server are the private
   link (step 7), which asks for an access code, and an SSH tunnel. Do not open
@@ -482,12 +484,13 @@ Optional extras (reply with numbers, or "none"):
 2. Private link: open the dashboard from your phone or laptop
 3. Company career pages: I suggest companies that fit your profile
 4. Application email: track replies to your applications (confirmations, interviews, rejections) from Gmail. Read-only
+5. Apply for me: Claude fills in applications for the jobs you pick, asks you on Discord, and waits for your OK before each Submit
 ```
 
 When the confirmed profile is a student, new graduate or intern, write 1 as
 "Handshake, where most student jobs are, and signed-in LinkedIn (recommended)",
-since Handshake shows nothing without a sign-in. Leave out 1 when the user
-cannot see the server's screen (see "Show the user the server's screen" below);
+since Handshake shows nothing without a sign-in. Leave out 1 and 5 when the
+user cannot see the server's screen (see "Show the user the server's screen" below);
 offer the laptop route only if they ask. Set up what they chose in the order
 below, and ask only the follow-up questions each one needs.
 
@@ -759,6 +762,281 @@ If Gmail later stops answering (the connector was removed, or the Claude
 sign-in expired), `jobfeed doctor` shows ❌ "Application email" with the fix:
 reconnect Gmail on claude.ai, then run `jobfeed email check`.
 
+### Applying for them
+
+Claude Appliers fill in application forms in a browser on the server. The user
+picks the jobs and presses **Start with Claude** on the dashboard; each job gets
+one Applier, which picks one of their PDF résumés, fills the form, and asks them
+in Discord when it needs a fact. Nothing is sent to an employer until they
+confirm Submit for that job, on the dashboard or by replying `submit` in its
+Discord thread. Say that in two or three lines, and that setting it up takes
+about 20 minutes with them.
+
+It needs all of these. If one is missing, say which and skip this extra:
+
+- Claude Code signed in **on the server** with their Claude account (step 4,
+  or sign it in as there). Appliers run on their Claude plan.
+- A server screen they can see and type into, as for Handshake above: they sign
+  in to Claude in a browser there. Without one, skip this extra.
+- A Discord account. They make a free Discord server and bot in item 8.
+- Application email (above) is strongly recommended: Appliers read sign-up
+  codes and links from Gmail. Set it up first if they agree.
+- About 1.5 GB of memory free (`available_mb` from step 1, read again now). With
+  less, say applying will be slow and run one job at a time.
+
+**Rules.** You never press **Start with Claude**, never reply `submit` or
+anything else in their Discord, never press Submit, and never run
+`pipeline.cli auto-submit on` or `autopilot on`: only the user starts
+applications and confirms each Submit. Setting up and testing apply to no job.
+
+Run the commands from `$JOBFEED_HOME/resume-application-pipeline`. On Linux,
+read the desktop's display first; every browser command below uses it:
+
+```sh
+cd "$JOBFEED_HOME/resume-application-pipeline"
+systemctl --user show-environment | grep -E '^(DISPLAY|XAUTHORITY)='
+```
+
+If `DISPLAY` is missing there, take it from a process running on the desktop
+(`tr '\0' '\n' < /proc/$(pgrep -u "$USER" -n -f 'chrome|xfce|gnome-shell|plasma')/environ | grep -E '^(DISPLAY|XAUTHORITY)='`).
+
+1. **Python environment.** The application programs share Jobfeed's:
+
+   ```sh
+   ln -sfn ../jobfeed/.venv .venv
+   .venv/bin/python -m pipeline.cli --help >/dev/null && echo pipeline-ok
+   ```
+
+2. **Dashboard service.** Add three lines to the `[Service]` section of the
+   dashboard service from step 3, then reload and restart it:
+
+   ```ini
+   Environment=JOBFEED_API_URL=http://127.0.0.1:7654
+   Environment=JOBFEED_APPLIERS=N
+   KillMode=process
+   ```
+
+   `N` is how many Appliers work at once: `1` under 2500 MB available memory,
+   `2` under 5000 MB, otherwise `3`. `KillMode=process` keeps running
+   applications alive when the dashboard restarts. On macOS, add
+   `JOBFEED_API_URL` and `JOBFEED_APPLIERS` to the plist's
+   `EnvironmentVariables` and reload it.
+3. **Trust the folder.** Claude Code asks once whether it may work in a folder.
+   Answer it for the checkout: start `claude` in tmux in `$JOBFEED_HOME`, wait
+   for the trust question, send Enter (the first choice, "Yes"), then send
+   `/exit`. `jq '.projects["'"$JOBFEED_HOME"'"].hasTrustDialogAccepted' ~/.claude.json`
+   must print `true`.
+4. **My Profile.** Appliers fill forms from it. Read it with
+   `curl -s http://127.0.0.1:7654/api/my-profile`. `application_resumes` must
+   list at least one résumé with `"available": true`: the PDF from step 5. If
+   their résumé was Word or pasted text, ask for a PDF and upload it on the
+   dashboard's **My Profile** page (or `"$JF" onboard resume <pdf>`). Then fill
+   `personal_details` from the résumé and ask only for what it lacks, as one
+   list:
+
+   ```
+   ⏳ Step 7/9 · Facts that application forms ask for
+   • Name: … · Email: … · Phone: …
+   • Address (city and state is enough): …
+   • Allowed to work in: … · Needs visa sponsorship: …
+   • Willing to relocate: … · Can start: …
+   • LinkedIn / GitHub / website: …
+   Correct, or fill in the blanks?
+   ```
+
+   Save the confirmed facts as one JSON object (all thirteen fields of
+   `personal_details`, empty strings for unknowns, one line each) with the
+   `revision` you read:
+
+   ```sh
+   curl -fsS -X PUT http://127.0.0.1:7654/api/my-profile/personal \
+     -H 'Content-Type: application/json' -H 'Origin: http://127.0.0.1:7654' \
+     --data @"$JOBFEED_HOME/jobfeed/data/my-profile.json"
+   ```
+
+   The file holds `{"personal_details": {...}, "revision": "..."}`. Delete it
+   afterwards. Write only what they confirmed; never guess work authorization.
+5. **Applying browser.** Appliers work in a Chrome of their own, with its own
+   profile, so the user's everyday browser stays out of it. Install Chrome as
+   in the Handshake extra if it is missing. Linux,
+   `~/.config/systemd/user/jobfeed-apply-chrome.service`, with the display
+   values read above (leave out `XAUTHORITY` if there was none):
+
+   ```ini
+   [Unit]
+   Description=Jobfeed applying browser
+   After=graphical-session.target
+
+   [Service]
+   Environment=DISPLAY=:0
+   Environment=XAUTHORITY=/path/from/above
+   ExecStart=/usr/bin/google-chrome --user-data-dir=%h/.config/jobfeed-apply-chrome --remote-debugging-port=9333 --password-store=basic --no-first-run --no-default-browser-check
+   Restart=on-failure
+   RestartSec=10
+
+   [Install]
+   WantedBy=default.target
+   ```
+
+   ```sh
+   systemctl --user daemon-reload
+   systemctl --user enable --now jobfeed-apply-chrome.service
+   curl -fsS http://127.0.0.1:9333/json/version >/dev/null && echo browser-ok
+   ```
+
+   macOS: `~/Library/LaunchAgents/com.jobfeed.apply-chrome.plist` with label
+   `com.jobfeed.apply-chrome`, `RunAtLoad` and `KeepAlive` true, and
+   `ProgramArguments` `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`
+   with the same four options (`--user-data-dir=$HOME/Library/Application Support/jobfeed-apply-chrome`),
+   loaded with `launchctl bootstrap` like the dashboard.
+6. **Claude in Chrome.** Appliers drive that browser through Claude's own
+   browser extension.
+   1. List the browsers already connected to their Claude account (their
+      laptop's, for example). Claude in Chrome connects through the account,
+      so browsers on other computers show up too. Keep the output:
+
+      ```sh
+      claude -p --chrome --model haiku --allowedTools 'mcp__claude-in-chrome__list_connected_browsers' -- "Call list_connected_browsers once and reply with its raw result only."
+      ```
+   2. Open the extension's page in the applying browser:
+      `DISPLAY=… /usr/bin/google-chrome --user-data-dir=$HOME/.config/jobfeed-apply-chrome https://chromewebstore.google.com/detail/claude/fcoeoabgfenejglbffodgkkbkcdhcgfn`
+      (it opens in the running window), and send:
+
+      ```
+      ⏳ Step 7/9 · Connect Claude to the applying browser
+      1. Open your server's screen: <link>
+      2. In the Chrome window with the Claude extension page, click Add to Chrome, then Add extension
+      3. Click the Claude icon (puzzle piece, then Claude) and sign in with the same Claude account
+      4. Reply "done"
+      ```
+
+      If you can control the server's desktop, click 2 yourself; the sign-in
+      is theirs.
+   3. Run the command from 1 again. The browser that is new in the list, with
+      `osPlatform` Linux (or macOS on a Mac mini), is the applying browser.
+      Save its deviceId:
+      `echo '{"device_id": "<deviceId>"}' > .pipeline/apply-browser.json`.
+      If no browser is new, the extension is not signed in yet, or signed in
+      to another Claude account: ask them to check, then try again. If more
+      than one is new, ask which.
+
+   Every Applier selects that deviceId before it touches a page. Other browsers
+   on their Claude account, such as their laptop's, are never used.
+7. **Job sites that need an account.** Workday sites make applicants create an
+   account. A program on the server does that with one password the user
+   chooses, so the Applier never sees it. Linux,
+   `~/.config/systemd/user/jobfeed-browser-broker.service`, with the same
+   `JOBFEED_HOME` and `SERVICE_PATH` as the dashboard service (it reads
+   verification emails with `claude`):
+
+   ```ini
+   [Unit]
+   Description=Jobfeed job-site account program
+   After=jobfeed-dashboard.service jobfeed-apply-chrome.service
+   Wants=jobfeed-apply-chrome.service
+
+   [Service]
+   WorkingDirectory=JOBFEED_HOME/resume-application-pipeline
+   Environment=PATH=SERVICE_PATH
+   ExecStart=JOBFEED_HOME/resume-application-pipeline/.venv/bin/python -m pipeline.browser_broker serve --root .
+   Restart=on-failure
+   RestartSec=60
+
+   [Install]
+   WantedBy=default.target
+   ```
+
+   ```sh
+   systemctl --user daemon-reload
+   systemctl --user enable --now jobfeed-browser-broker.service
+   ```
+
+   macOS: a LaunchAgent `com.jobfeed.browser-broker` with the same working
+   directory, `PATH` and program, `RunAtLoad` and `KeepAlive` true.
+   Then have them set the password on the dashboard, on the server's own
+   screen, so it never passes through the chat. Open the page there with
+   `DISPLAY=… google-chrome http://127.0.0.1:7654/profile` (their everyday
+   Chrome profile, not the applying browser) and send:
+
+   ```
+   ⏳ Step 7/9 · Choose a password for job-site accounts
+   On your server's screen, on the My Profile page, under Login: type a new password and click Save password.
+   At least 8 characters, with a capital letter, a small letter, a digit and a symbol. Save it in your password manager.
+   Reply "done"
+   ```
+8. **Discord.** Appliers ask questions there, and the user can reply `submit`
+   there. Walk them through it, one message per part, and wait for "done":
+
+   ```
+   ⏳ Step 7/9 · Make a Discord server for your applications
+   1. In Discord, click + (Add a Server) on the left, then Create My Own, then For me and my friends
+   2. Name it, for example "Job applications", and click Create
+   Reply "done"
+   ```
+
+   ```
+   ⏳ Step 7/9 · Make the bot that writes to you
+   1. Open https://discord.com/developers/applications and click New Application. Name it "Jobfeed Appliers", accept and click Create
+   2. On the left, click Bot. Under Privileged Gateway Intents, turn on Message Content Intent, then Save Changes
+   3. On the same page, click Reset Token, confirm, and Copy. Keep it to yourself for now
+   Reply "done"
+   ```
+
+   Then the token. If they can type on the server's screen, open a terminal
+   window there running the setup, so the token goes straight to the server.
+   Linux, with `JOBFEED_HOME` replaced by the absolute checkout path:
+
+   ```sh
+   DISPLAY=… x-terminal-emulator -e bash -c 'cd JOBFEED_HOME/resume-application-pipeline && .venv/bin/python -m pipeline.discord_setup; read -rp "Press Enter to close this window."' &
+   ```
+
+   (macOS: `open -a Terminal` and type the same `cd … && …` line there.) Send:
+
+   ```
+   ⏳ Step 7/9 · Give the bot's token to your server
+   On your server's screen, a black window asks for the token. Click it, paste the token (Ctrl+Shift+V) and press Enter.
+   Nothing shows while you paste; that is normal. Reply "done"
+   ```
+ Otherwise warn ⚠️ that a token pasted
+   into chat stays in this conversation's history, and use it only if they
+   still want to: pass it to `.venv/bin/python -m pipeline.discord_setup` on
+   stdin, never as an argument or in a file, and never repeat it.
+
+   It prints one JSON result and also leaves it, without the token, in
+   `~/.config/jobfeed-applier/discord-setup.json`; read that file when it ran
+   in their terminal window. The first time, expect
+   `"problem": "not_in_server"`: the bot is not in their server yet. Send its
+   `invite_url`:
+
+   ```
+   ⏳ Step 7/9 · Add the bot to your server
+   1. Open: <invite_url>
+   2. Choose your applications server and click Authorize
+   Reply "done"
+   ```
+
+   Then run `.venv/bin/python -m pipeline.discord_setup --again`, which reuses
+   the token Discord already accepted, so they never paste it twice. Each
+   other `problem` comes with a `fix`: send it in one plain line, then run
+   `--again` (after `bad_token`, they paste a new token as before). When it
+   passes, a "Jobfeed Appliers are connected" message and a test thread appear
+   in their server. Only the server's owner, which is them, can answer the
+   Appliers.
+9. **Check.** Read-only; it starts nothing and posts nothing:
+
+   ```sh
+   .venv/bin/python -m pipeline.applier_check
+   ```
+
+   `"ready": true` passes. Fix each check with `"ok": false` from its `fix`.
+
+In the status line, say how they apply: open a job they like, **Add to
+application queue**, then **Runs › Application queue**, select it and **Start
+with Claude**. Questions arrive in Discord; each Submit waits for them.
+
+To turn applying off later: `systemctl --user disable --now
+jobfeed-apply-chrome.service jobfeed-browser-broker.service`.
+
 ## 8. Test the setup
 
 Do not hand over until the test passes. Send "⏳ Step 8/9 · Testing
@@ -796,6 +1074,10 @@ everything." first.
    extension needs up to 30 seconds to reconnect, so if only that check fails,
    wait and rerun. If something cannot be fixed, say so in the hand-over with
    what it means for them. Pass on each `warn` in one plain sentence.
+3. **Applying** (only with that extra). Run
+   `cd "$JOBFEED_HOME/resume-application-pipeline" && .venv/bin/python -m pipeline.applier_check`
+   and fix each check with `"ok": false`. Report it as one line, "✅ Applying:
+   profile, résumé, browser, Discord ready".
 
 Report the result as one message, one line per check that is not `off`, in
 plain words, and offer the first scan in the same message:
@@ -818,7 +1100,7 @@ today. About 10–30 minutes.
 With an API key, add the cost to the question (typically $1–2). With "no",
 go to step 9.
 
-3. **First scan.** With their yes, send "⏳ Step 8/9 · First scan running,
+4. **First scan.** With their yes, send "⏳ Step 8/9 · First scan running,
    about 10–30 minutes." and run one scan of every enabled site, then the AI
    ranking of the new jobs, the same way the daily scan does. It can outlast
    your command time limit, so run it in tmux and check every few minutes:
@@ -870,7 +1152,7 @@ Open it: <how, in one or two lines>
 Finds jobs: every day at 08:00 (<their time zone>) · LinkedIn, Indeed, <n> companies, Handshake
 AI: Claude subscription · up to <N> new jobs per run
 Replies: Gmail checked every 30 minutes, on the Tracker page
-Not included: applying to jobs
+Applies: when you press Start with Claude · questions on Discord · every Submit waits for you
 Tests: all passed
 
 Next: <one line, below>
@@ -896,10 +1178,14 @@ scan**", adding "or wait for the daily scan" when there is one. With scans only
 on request, write "Finds jobs: when you start a scan · …" in the "Finds jobs"
 line.
 
-Leave out the "Replies" line when application email is off. With a private
-link, add a line that the link changes when the server restarts. The dashboard
-has no Review or Answer Bank pages on this install, and its Tracker page stays
-empty without application email; don't mention them unless asked.
+Leave out the "Replies" line when application email is off, and the
+"Applies" line when applying is off; then add "Not included: applying to jobs".
+With applying on, add one line on how to start: open a job they like, **Add to
+application queue**, then **Runs › Application queue**, select it and **Start
+with Claude**. With a private link, add a line that the link changes when the
+server restarts. Without applying, the dashboard has no Review or Answer Bank
+pages, and its Tracker page stays empty without application email; don't
+mention them unless asked.
 
 Finish with one short **Technical details** block for whoever helps them later:
 the checkout path, the service names, and these commands (Linux):
@@ -917,7 +1203,13 @@ cd "$JOBFEED_HOME/jobfeed" && .venv/bin/jobfeed email check
 cd "$JOBFEED_HOME/jobfeed" && .venv/bin/jobfeed email sync
 # current private link
 cd "$JOBFEED_HOME/jobfeed" && .venv/bin/jobfeed remote-access status
+# applying: check it (read-only), or reconnect Discord
+cd "$JOBFEED_HOME/resume-application-pipeline" && .venv/bin/python -m pipeline.applier_check
+cd "$JOBFEED_HOME/resume-application-pipeline" && .venv/bin/python -m pipeline.discord_setup
 ```
+
+With applying on, add `jobfeed-apply-chrome.service jobfeed-browser-broker.service`
+to the stop line and `jobfeed-browser-broker` to the restart in the update line.
 
 If the Chrome extension is installed, add: after an update, click the reload
 arrow on **Jobfeed Jobright Source** in `chrome://extensions`. On macOS, replace

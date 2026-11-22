@@ -32,6 +32,9 @@ HANDOVER_WAIT = 60
 BUSY = 'Another application worker is running. Start these jobs after it stops.'
 APPLIED = 'Every job in this start is submitted and recorded as applied.'
 REVIEW = 'Confirm Submit for each draft in Application runs when you are ready.'
+# At most this many Appliers work at once. A small server sets fewer with JOBFEED_APPLIERS, since each Applier is a
+# Claude session and a browser tab group of its own.
+MAX_APPLIERS = 4
 STOPPED = ('The application worker stopped before these jobs finished. Their drafts and Appliers are kept. '
            'Start the worker again from the cutover checklist.')
 
@@ -58,6 +61,15 @@ class Host:
         from pipeline.claude_applier import clean_env
         path = [str(Path(self.python).parent), *filter(None, [self.env.get('PATH')])]
         return {**clean_env(self.env), 'PATH': os.pathsep.join(path)}
+
+
+def applier_slots(env, jobs):
+    """How many Appliers this start runs at once: JOBFEED_APPLIERS (1 to 4), else 4, and never more than its jobs."""
+    try:
+        limit = int(env.get('JOBFEED_APPLIERS') or MAX_APPLIERS)
+    except ValueError:
+        limit = MAX_APPLIERS
+    return max(1, min(limit, MAX_APPLIERS, len(jobs)))
 
 
 def paths(root, request_id):
@@ -166,12 +178,12 @@ def claimed(jobfeed_db, jobs):
                 yield job
 
 
-def manifest(root, request_id, jobs, dashboard_url):
+def manifest(root, request_id, jobs, dashboard_url, slots):
     from pipeline.resume_catalog import ResumeCatalog
     return dict(resume_mode='selected_existing',
                 resume_catalog=ResumeCatalog.load(root / 'resume-catalog.json').freeze(root),
                 ordered_candidates=[{'id': job['source_job_id'], **{key: job[key] for key in ('real_job_id', 'company', 'title', 'url', 'jd_text')}} for job in jobs],
-                max_parallel=min(4, len(jobs)), target_successful_submissions=len(jobs), submit_authorized=False,
+                max_parallel=slots, target_successful_submissions=len(jobs), submit_authorized=False,
                 direct_application_mode=True, preserve_unsubmitted_pages=True, dashboard_request_id=request_id,
                 dashboard_url=dashboard_url)
 
@@ -194,7 +206,8 @@ def start(queue, row, host=None):
     if taken:
         queue._save(request_id, status='needs_attention', reason=', '.join(taken) + ' is no longer queued without an Applier. Nothing was started.')
         return
-    private_json(manifest_path, manifest(root, request_id, jobs, json.loads(row['dispatch_context'])['backend_origin']), root)
+    slots = applier_slots(host.env, jobs)
+    private_json(manifest_path, manifest(root, request_id, jobs, json.loads(row['dispatch_context'])['backend_origin'], slots), root)
     from pipeline.orchestrator import ApplicationPipeline
     pipeline = ApplicationPipeline(PipelineConfig.discover(root))
     pipeline.initialize()
@@ -203,7 +216,7 @@ def start(queue, row, host=None):
     output = confined(root, root / 'monitor-output' / f'dashboard-claude-{request_id}')
     output.mkdir(parents=True, exist_ok=True)
     argv = [host.python, '-m', 'pipeline.cli', '--root', str(root), 'watch', '--batch', str(manifest_path),
-            '--application-workers', str(min(4, len(jobs))), '--progress-output', str(output), '--progress-local-only']
+            '--application-workers', str(slots), '--progress-output', str(output), '--progress-local-only']
     try:
         with (output / 'worker.log').open('ab') as log:
             process = host.spawn(argv, cwd=root, stdin=subprocess.DEVNULL, stdout=log, stderr=log, shell=False,

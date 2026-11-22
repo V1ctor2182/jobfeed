@@ -16,6 +16,7 @@ from pathlib import Path
 import pty
 import re
 import select
+import shlex
 import signal
 import sqlite3
 import subprocess
@@ -23,8 +24,10 @@ import sys
 import time
 import uuid
 
+from pipeline.applier_guard import dashboard_hosts
 from pipeline.applier_mcp import TOOLS
 from pipeline.applier_runtime import DEFAULT_MODEL, MAX_DRAFT, RETRY_ACTORS, STRONG_MODEL, ApplierRuntime
+from pipeline.jobfeed import DEFAULT_API_URL
 from pipeline.model_routing import is_strong_ats
 
 PIPELINE = Path(__file__).resolve().parents[1]
@@ -333,8 +336,9 @@ class ClaudeApplierLauncher:
             'env': {'PYTHONPATH': str(PIPELINE)}, 'timeout': MCP_TIMEOUT_MS}}}, indent=2))
         settings = work_dir / 'applier-settings.json'
         guard = Path(__file__).resolve().with_name('applier_guard.py')
+        dashboard = ','.join(dashboard_hosts(dashboard_url or os.environ.get('JOBFEED_API_URL') or DEFAULT_API_URL))
         settings.write_text(json.dumps({'hooks': {'PreToolUse': [{'matcher': 'mcp__claude-in-chrome__.*', 'hooks': [
-            {'type': 'command', 'command': f'{self.python} -I {guard}'}]}]},
+            {'type': 'command', 'command': f'{self.python} -I {guard} {shlex.quote(dashboard)}'}]}]},
             'deniedMcpServers': [{'serverName': name} for name in user_mcp_servers()]}, indent=2))
         name = f'applier-{job_id}-{launch_id[:8]}'
         prompt = PROMPT.format(job_id=job_id, url=url, materials=', '.join(map(str, materials)) or 'none', browser_rule=browser_rule(self.root),

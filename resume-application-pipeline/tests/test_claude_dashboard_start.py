@@ -95,6 +95,14 @@ class ClaudeDashboardStartTests(unittest.TestCase):
         with closing(sqlite3.connect(self.f.db)) as db:
             self.assertEqual(db.execute('SELECT job_id,state FROM application_queue ORDER BY job_id').fetchall(), [(1, 'Queued'), (2, 'Queued')])
 
+    def test_a_small_server_runs_fewer_appliers_at_once(self):
+        queue = self.dashboard(Host(spawn=self.spawn, alive=lambda pid, manifest: self.alive, python=str(self.root / '.venv/bin/python'),
+                                    env={'PATH': str(self.bin), 'JOBFEED_APPLIERS': '1'}, discord_env=self.discord, claude_config=self.claude_config))
+        queue.handoff(self.payload())
+        self.assertEqual(json.loads(self.manifest_path().read_text())['max_parallel'], 1)
+        argv = self.spawned[0]['argv']
+        self.assertEqual(argv[argv.index('--application-workers') + 1], '1')
+
     def test_replaying_the_same_request_spawns_nothing_new(self):
         first = self.queue.handoff(self.payload())
         self.assertEqual(self.queue.handoff(self.payload()), first)

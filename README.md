@@ -88,7 +88,8 @@ The agent checks the server, installs the dashboard as a service, and walks you
 through setup in the chat: AI sign-in, résumé, job profile, searches, when to
 scan (every day, or only when you ask) and limits. It offers optional extras
 (Handshake and signed-in LinkedIn, a private link for your phone, company
-career pages, replies to your applications from Gmail), tests the whole setup,
+career pages, replies to your applications from Gmail, and Claude Appliers
+that apply to the jobs you pick), tests the whole setup,
 offers a first scan, and tells you how to open the dashboard. Later, `jobfeed doctor` checks
 that everything still works. The steps are in
 [`docs/server-install.md`](docs/server-install.md) if you prefer to run them
