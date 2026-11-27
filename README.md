@@ -185,6 +185,19 @@ the other by that layout.
 Issues and focused pull requests are welcome. Describe the user-visible
 change, include test evidence, and never commit personal data or credentials.
 
+## Responsible use
+
+Jobfeed is a personal tool that runs on your own computer or server, with your
+own accounts. Some sources it can read from or apply through, such as LinkedIn,
+Handshake, Jobright and Workday, have terms of service that limit automated
+access. You are responsible for following the terms of every site you connect,
+and for any effect on your accounts there; use it at your own risk. Keep the
+pace low, and don't run Jobfeed as a hosted service for other people.
+
+Jobfeed is not affiliated with, endorsed by or sponsored by any job board,
+applicant tracking system or employer it works with. Their names are used only
+to describe compatibility.
+
 ## License
 
 Released under the [MIT License](LICENSE).
