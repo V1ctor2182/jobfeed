@@ -1,7 +1,7 @@
 <a id="readme-top"></a>
 
 <div align="center">
-  <img src="jobfeed/web-ui/public/favicon.svg" alt="Jobfeed logo" width="88" height="88">
+  <a href="https://v1ctor2182.github.io/jobfeed/"><img src="site/assets/favicon.svg" alt="Jobfeed logo" width="88" height="88"></a>
 
   <h1>Jobfeed</h1>
 
@@ -12,6 +12,8 @@
   </p>
 
   <p>
+    <a href="https://v1ctor2182.github.io/jobfeed/"><strong>Website</strong></a>
+    ·
     <strong>English</strong>
     ·
     <a href="README.zh-CN.md">简体中文</a>
